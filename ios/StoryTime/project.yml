@@ -1,0 +1,61 @@
+name: StoryTime
+options:
+  bundleIdPrefix: com.storytime
+packages:
+  Firebase:
+    url: https://github.com/firebase/firebase-ios-sdk.git
+    exactVersion: 12.10.0
+settings:
+  base:
+    SWIFT_VERSION: 5.10
+targets:
+  StoryTime:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: App
+      - path: Core
+      - path: Features
+      - path: Models
+      - path: Networking
+      - path: Storage
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.tuesday.storytime
+        INFOPLIST_FILE: App/Info.plist
+    dependencies:
+      - package: Firebase
+        product: FirebaseCore
+    info:
+      path: App/Info.plist
+      properties:
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        NSMicrophoneUsageDescription: StoryTime uses your microphone for voice interactions.
+        NSSpeechRecognitionUsageDescription: StoryTime transcribes speech to personalize stories.
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+  StoryTimeTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: Tests
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+    dependencies:
+      - target: StoryTime
+  StoryTimeUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: UITests
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+    dependencies:
+      - target: StoryTime

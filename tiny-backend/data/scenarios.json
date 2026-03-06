@@ -1,0 +1,30 @@
+[
+  {
+    "id": "friendly-intro",
+    "title": "Friendly Introduction",
+    "difficulty": "beginner",
+    "goal": "Introduce yourself with confidence in 30 seconds",
+    "prompt": "You are meeting a new classmate. Introduce yourself and ask one kind question."
+  },
+  {
+    "id": "show-and-tell",
+    "title": "Show and Tell",
+    "difficulty": "beginner",
+    "goal": "Explain a favorite toy with clear structure",
+    "prompt": "Describe your favorite toy with a beginning, middle, and ending."
+  },
+  {
+    "id": "teamwork-idea",
+    "title": "Teamwork Idea",
+    "difficulty": "intermediate",
+    "goal": "Share an idea politely and clearly",
+    "prompt": "Suggest a game your group can play and explain why everyone will enjoy it."
+  },
+  {
+    "id": "problem-solving",
+    "title": "Problem Solving",
+    "difficulty": "intermediate",
+    "goal": "Explain a simple problem and safe solution",
+    "prompt": "Your team cannot agree on a game. Explain a fair plan step by step."
+  }
+]

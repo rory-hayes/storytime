@@ -1,0 +1,14 @@
+# Node
+node_modules/
+**/node_modules/
+
+# Build artifacts
+**/dist/
+**/.vercel/
+
+# Env
+.env
+**/.env
+
+# macOS
+.DS_Store

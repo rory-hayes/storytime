@@ -1,0 +1,40 @@
+services:
+  - type: web
+    name: storytime-backend
+    runtime: node
+    rootDir: backend
+    plan: free
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: ALLOWED_ORIGIN
+        sync: false
+      - key: SESSION_SIGNING_SECRET
+        sync: false
+      - key: AUTH_TOKEN_SECRET
+        sync: false
+      - key: ALLOWED_REGIONS
+        value: US,EU
+      - key: DEFAULT_REGION
+        value: US
+      - key: TRUST_PROXY
+        value: "true"
+      - key: API_AUTH_REQUIRED
+        value: "false"
+      - key: OPENAI_MAX_RETRIES
+        value: "2"
+      - key: OPENAI_RETRY_BASE_MS
+        value: "250"
+      - key: OPENAI_TIMEOUT_MS
+        value: "20000"
+      - key: ENABLE_USAGE_METERING
+        value: "true"
+      - key: ENABLE_STRUCTURED_ANALYTICS
+        value: "true"
+      - key: APP_VERSION
+        value: 0.1.0

@@ -1,0 +1,527 @@
+import Foundation
+import WebKit
+
+@MainActor
+protocol RealtimeVoiceControlling: AnyObject {
+    var onConnected: (() -> Void)? { get set }
+    var onDisconnected: (() -> Void)? { get set }
+    var onTranscriptPartial: ((String) -> Void)? { get set }
+    var onTranscriptFinal: ((String) -> Void)? { get set }
+    var onLevels: ((CGFloat, CGFloat) -> Void)? { get set }
+    var onUserSpeechChanged: ((Bool) -> Void)? { get set }
+    var onAssistantResponseCompleted: (() -> Void)? { get set }
+    var onError: ((String) -> Void)? { get set }
+
+    func connect(baseURL: URL, endpointPath: String, session: RealtimeSessionData, installId: String) async throws
+    func speak(text: String) async
+    func cancelAssistantSpeech() async
+    func disconnect() async
+}
+
+@MainActor
+final class RealtimeVoiceClient: NSObject, ObservableObject, RealtimeVoiceControlling {
+    enum RealtimeError: LocalizedError {
+        case notReady
+        case invalidBridgeResponse
+
+        var errorDescription: String? {
+            switch self {
+            case .notReady:
+                return "Realtime bridge is not ready yet."
+            case .invalidBridgeResponse:
+                return "Realtime bridge returned an invalid response."
+            }
+        }
+    }
+
+    let webView: WKWebView
+
+    var onConnected: (() -> Void)?
+    var onDisconnected: (() -> Void)?
+    var onTranscriptPartial: ((String) -> Void)?
+    var onTranscriptFinal: ((String) -> Void)?
+    var onLevels: ((CGFloat, CGFloat) -> Void)?
+    var onUserSpeechChanged: ((Bool) -> Void)?
+    var onAssistantResponseCompleted: (() -> Void)?
+    var onError: ((String) -> Void)?
+
+    private let bridgeHandlerName = "storytimeRealtime"
+    private var bridgeReady = false
+    private var bridgeReadyWaiters: [CheckedContinuation<Void, Never>] = []
+    private var connectionContinuation: CheckedContinuation<Void, Error>?
+    private var messageProxy: WeakScriptMessageHandler?
+    var bridgeCommandSender: ((String, [String: Any]) async throws -> Void)?
+
+    override init() {
+        let configuration = WKWebViewConfiguration()
+        configuration.allowsInlineMediaPlayback = true
+        configuration.mediaTypesRequiringUserActionForPlayback = []
+
+        let userContentController = WKUserContentController()
+        configuration.userContentController = userContentController
+        self.webView = WKWebView(frame: .zero, configuration: configuration)
+
+        super.init()
+
+        let proxy = WeakScriptMessageHandler(delegate: self)
+        self.messageProxy = proxy
+        webView.configuration.userContentController.add(proxy, name: bridgeHandlerName)
+        webView.navigationDelegate = self
+        webView.uiDelegate = self
+        webView.scrollView.isScrollEnabled = false
+        webView.isOpaque = false
+        webView.backgroundColor = .clear
+        loadBridge()
+    }
+
+    func connect(baseURL: URL, endpointPath: String, session: RealtimeSessionData, installId: String) async throws {
+        await waitForBridgeReady()
+        let callURL = endpointPath.hasPrefix("http")
+            ? endpointPath
+            : baseURL.appending(path: endpointPath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))).absoluteString
+
+        let payload: [String: Any] = [
+            "baseURL": baseURL.absoluteString,
+            "callURL": callURL,
+            "ticket": session.ticket,
+            "installId": installId,
+            "sessionToken": AppSession.currentToken ?? ""
+        ]
+
+        try await withCheckedThrowingContinuation { [weak self] (continuation: CheckedContinuation<Void, Error>) in
+            guard let self else {
+                continuation.resume(throwing: RealtimeError.notReady)
+                return
+            }
+
+            self.connectionContinuation = continuation
+            Task {
+                do {
+                    try await self.send(command: "connect", payload: payload)
+                } catch {
+                    self.connectionContinuation = nil
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    func speak(text: String) async {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        try? await send(command: "speak", payload: ["text": text])
+    }
+
+    func cancelAssistantSpeech() async {
+        try? await send(command: "cancel", payload: [:])
+    }
+
+    func disconnect() async {
+        try? await send(command: "disconnect", payload: [:])
+    }
+
+    private func loadBridge() {
+        bridgeReady = false
+        webView.loadHTMLString(Self.bridgeHTML, baseURL: URL(string: "https://backend-brown-ten-94.vercel.app"))
+    }
+
+    private func waitForBridgeReady() async {
+        guard !bridgeReady else { return }
+        await withCheckedContinuation { continuation in
+            bridgeReadyWaiters.append(continuation)
+        }
+    }
+
+    private func send(command: String, payload: [String: Any]) async throws {
+        guard bridgeReady else {
+            throw RealtimeError.notReady
+        }
+
+        if let bridgeCommandSender {
+            try await bridgeCommandSender(command, payload)
+            return
+        }
+
+        _ = try await webView.callAsyncJavaScript(
+            "window.StoryTimeRealtime.receiveCommand(command, payload)",
+            arguments: [
+                "command": command,
+                "payload": payload
+            ],
+            in: nil,
+            contentWorld: .page
+        )
+    }
+
+    private func handleBridgeMessage(_ message: [String: Any]) {
+        guard let type = message["type"] as? String else { return }
+
+        switch type {
+        case "bridge_ready":
+            bridgeReady = true
+            let waiters = bridgeReadyWaiters
+            bridgeReadyWaiters.removeAll()
+            waiters.forEach { $0.resume(returning: ()) }
+
+        case "connected":
+            connectionContinuation?.resume(returning: ())
+            connectionContinuation = nil
+            onConnected?()
+
+        case "disconnected":
+            connectionContinuation?.resume(throwing: RealtimeError.invalidBridgeResponse)
+            connectionContinuation = nil
+            onDisconnected?()
+
+        case "levels":
+            let local = CGFloat((message["localLevel"] as? NSNumber)?.doubleValue ?? 0)
+            let remote = CGFloat((message["remoteLevel"] as? NSNumber)?.doubleValue ?? 0)
+            onLevels?(local, remote)
+
+        case "user_speech_state":
+            let speaking = message["speaking"] as? Bool ?? false
+            onUserSpeechChanged?(speaking)
+
+        case "transcript_partial":
+            if let text = message["text"] as? String {
+                onTranscriptPartial?(text)
+            }
+
+        case "transcript_final":
+            if let text = message["text"] as? String {
+                onTranscriptFinal?(text)
+            }
+
+        case "assistant_response_completed":
+            onAssistantResponseCompleted?()
+
+        case "error":
+            let errorMessage = message["message"] as? String ?? "Realtime bridge error"
+            connectionContinuation?.resume(throwing: NSError(domain: "StoryTimeRealtime", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: errorMessage
+            ]))
+            connectionContinuation = nil
+            onError?(errorMessage)
+
+        default:
+            break
+        }
+    }
+}
+
+extension RealtimeVoiceClient {
+    func setBridgeReadyForTesting(_ ready: Bool = true) {
+        bridgeReady = ready
+    }
+
+    func handleBridgeMessageForTesting(_ message: [String: Any]) {
+        handleBridgeMessage(message)
+    }
+}
+
+extension RealtimeVoiceClient: WKScriptMessageHandler {
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard let payload = message.body as? [String: Any] else { return }
+        handleBridgeMessage(payload)
+    }
+}
+
+extension RealtimeVoiceClient: WKNavigationDelegate, WKUIDelegate {
+    func webView(
+        _ webView: WKWebView,
+        requestMediaCapturePermissionFor origin: WKSecurityOrigin,
+        initiatedByFrame frame: WKFrameInfo,
+        type: WKMediaCaptureType,
+        decisionHandler: @escaping (WKPermissionDecision) -> Void
+    ) {
+        decisionHandler(.grant)
+    }
+}
+
+private final class WeakScriptMessageHandler: NSObject, WKScriptMessageHandler {
+    weak var delegate: WKScriptMessageHandler?
+
+    init(delegate: WKScriptMessageHandler) {
+        self.delegate = delegate
+    }
+
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        delegate?.userContentController(userContentController, didReceive: message)
+    }
+}
+
+private extension RealtimeVoiceClient {
+    static let bridgeHTML = """
+    <!doctype html>
+    <html>
+    <head>
+      <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+      <style>
+        html, body {
+          margin: 0;
+          padding: 0;
+          background: transparent;
+        }
+      </style>
+    </head>
+    <body>
+      <script>
+        (() => {
+          const post = (payload) => {
+            try {
+              window.webkit.messageHandlers.storytimeRealtime.postMessage(payload);
+            } catch (error) {
+              console.error("postMessage failed", error);
+            }
+          };
+
+          const sampleLevel = (analyser) => {
+            if (!analyser) return 0;
+            const data = new Uint8Array(analyser.fftSize);
+            analyser.getByteTimeDomainData(data);
+            let sum = 0;
+            for (let i = 0; i < data.length; i += 1) {
+              const normalized = (data[i] - 128) / 128;
+              sum += normalized * normalized;
+            }
+            const rms = Math.sqrt(sum / data.length);
+            return Math.max(0, Math.min(1, rms * 4.8));
+          };
+
+          const StoryTimeRealtime = {
+            pc: null,
+            dc: null,
+            audio: null,
+            audioContext: null,
+            localAnalyser: null,
+            remoteAnalyser: null,
+            levelTimer: null,
+            partialTranscript: "",
+            userSpeaking: false,
+
+            async receiveCommand(command, payload) {
+              switch (command) {
+                case "connect":
+                  await this.connect(payload);
+                  break;
+                case "speak":
+                  await this.speak(payload);
+                  break;
+                case "cancel":
+                  this.cancel();
+                  break;
+                case "disconnect":
+                  this.disconnect();
+                  break;
+                default:
+                  break;
+              }
+            },
+
+            async connect(payload) {
+              try {
+                await this.disconnect();
+
+                this.audio = document.createElement("audio");
+                this.audio.autoplay = true;
+                this.audio.playsInline = true;
+
+                const stream = await navigator.mediaDevices.getUserMedia({
+                  audio: {
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    autoGainControl: true
+                  }
+                });
+
+                const AudioCtx = window.AudioContext || window.webkitAudioContext;
+                this.audioContext = this.audioContext || new AudioCtx();
+                if (this.audioContext.state === "suspended") {
+                  await this.audioContext.resume();
+                }
+
+                this.localAnalyser = this.createAnalyser(stream);
+
+                this.pc = new RTCPeerConnection();
+                stream.getTracks().forEach((track) => this.pc.addTrack(track, stream));
+
+                this.pc.ontrack = async (event) => {
+                  const remoteStream = event.streams[0];
+                  this.audio.srcObject = remoteStream;
+                  this.remoteAnalyser = this.createAnalyser(remoteStream);
+                  try {
+                    await this.audio.play();
+                  } catch (error) {
+                    post({ type: "error", message: `Audio playback failed: ${error.message}` });
+                  }
+                };
+
+                this.pc.onconnectionstatechange = () => {
+                  const state = this.pc?.connectionState || "unknown";
+                  if (state === "connected") {
+                    post({ type: "connected" });
+                  }
+                  if (state === "disconnected" || state === "failed" || state === "closed") {
+                    post({ type: "disconnected" });
+                  }
+                };
+
+                this.dc = this.pc.createDataChannel("oai-events");
+                this.dc.onmessage = (event) => {
+                  try {
+                    this.handleRealtimeEvent(JSON.parse(event.data));
+                  } catch (error) {
+                    post({ type: "error", message: `Realtime event parse failed: ${error.message}` });
+                  }
+                };
+                this.dc.onerror = (event) => {
+                  post({ type: "error", message: "Realtime data channel error." });
+                };
+
+                const offer = await this.pc.createOffer({ offerToReceiveAudio: true });
+                await this.pc.setLocalDescription(offer);
+
+                const response = await fetch(payload.callURL, {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    "x-storytime-install-id": payload.installId,
+                    ...(payload.sessionToken ? { "x-storytime-session": payload.sessionToken } : {})
+                  },
+                  body: JSON.stringify({
+                    ticket: payload.ticket,
+                    sdp: offer.sdp
+                  })
+                });
+
+                if (!response.ok) {
+                  throw new Error(await response.text());
+                }
+
+                const call = await response.json();
+                await this.pc.setRemoteDescription({
+                  type: "answer",
+                  sdp: call.answer_sdp
+                });
+
+                this.startLevelLoop();
+              } catch (error) {
+                post({ type: "error", message: error.message || "Realtime connection failed." });
+              }
+            },
+
+            async speak(payload) {
+              if (!this.dc || this.dc.readyState !== "open") {
+                post({ type: "error", message: "Realtime session is not connected." });
+                return;
+              }
+
+              const text = (payload?.text || "").trim();
+              if (!text) return;
+
+              this.dc.send(JSON.stringify({
+                type: "response.create",
+                response: {
+                  modalities: ["audio"],
+                  instructions: `Read the following to the child exactly as written. Do not add or change words.\\n\\n${text}`
+                }
+              }));
+            },
+
+            cancel() {
+              if (this.dc && this.dc.readyState === "open") {
+                this.dc.send(JSON.stringify({ type: "response.cancel" }));
+              }
+            },
+
+            async disconnect() {
+              if (this.levelTimer) {
+                clearInterval(this.levelTimer);
+                this.levelTimer = null;
+              }
+
+              if (this.dc) {
+                this.dc.close();
+                this.dc = null;
+              }
+
+              if (this.pc) {
+                this.pc.getSenders().forEach((sender) => sender.track && sender.track.stop());
+                this.pc.close();
+                this.pc = null;
+              }
+
+              if (this.audio) {
+                this.audio.pause();
+                this.audio.srcObject = null;
+                this.audio = null;
+              }
+
+              this.localAnalyser = null;
+              this.remoteAnalyser = null;
+              this.partialTranscript = "";
+              this.userSpeaking = false;
+            },
+
+            handleRealtimeEvent(event) {
+              switch (event.type) {
+                case "conversation.item.input_audio_transcription.delta":
+                  this.partialTranscript = `${this.partialTranscript}${event.delta || ""}`;
+                  post({ type: "transcript_partial", text: this.partialTranscript });
+                  break;
+                case "conversation.item.input_audio_transcription.completed":
+                  this.partialTranscript = "";
+                  if (event.transcript && event.transcript.trim()) {
+                    post({ type: "transcript_final", text: event.transcript.trim() });
+                  }
+                  break;
+                case "response.done":
+                  post({ type: "assistant_response_completed" });
+                  break;
+                case "error":
+                  post({ type: "error", message: event.error?.message || "Realtime API error." });
+                  break;
+                default:
+                  break;
+              }
+            },
+
+            createAnalyser(stream) {
+              const source = this.audioContext.createMediaStreamSource(stream);
+              const analyser = this.audioContext.createAnalyser();
+              analyser.fftSize = 256;
+              source.connect(analyser);
+              return analyser;
+            },
+
+            startLevelLoop() {
+              if (this.levelTimer) {
+                clearInterval(this.levelTimer);
+              }
+
+              this.levelTimer = setInterval(() => {
+                const localLevel = sampleLevel(this.localAnalyser);
+                const remoteLevel = sampleLevel(this.remoteAnalyser);
+                const speaking = localLevel > 0.06;
+
+                if (speaking !== this.userSpeaking) {
+                  this.userSpeaking = speaking;
+                  post({ type: "user_speech_state", speaking });
+                }
+
+                post({
+                  type: "levels",
+                  localLevel,
+                  remoteLevel
+                });
+              }, 60);
+            }
+          };
+
+          window.StoryTimeRealtime = StoryTimeRealtime;
+          post({ type: "bridge_ready" });
+        })();
+      </script>
+    </body>
+    </html>
+    """
+}
