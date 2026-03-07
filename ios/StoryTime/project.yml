@@ -36,7 +36,8 @@ targets:
         NSMicrophoneUsageDescription: StoryTime uses your microphone for voice interactions.
         NSSpeechRecognitionUsageDescription: StoryTime transcribes speech to personalize stories.
         NSAppTransportSecurity:
-          NSAllowsArbitraryLoads: true
+          NSAllowsLocalNetworking: true
+        StoryTimeAPIBaseURL: https://backend-brown-ten-94.vercel.app
   StoryTimeTests:
     type: bundle.unit-test
     platform: iOS

@@ -8,6 +8,8 @@ final class RealtimeVoiceClientTests: XCTestCase {
         let defaults = UserDefaults.standard
         defaults.removeObject(forKey: "com.storytime.session-token")
         defaults.removeObject(forKey: "com.storytime.session-expiry")
+        defaults.removeObject(forKey: "com.storytime.session-id")
+        defaults.removeObject(forKey: "com.storytime.session-region")
     }
 
     func testSpeakCancelAndDisconnectSendCommandsOnceBridgeIsReady() async {
@@ -18,12 +20,13 @@ final class RealtimeVoiceClientTests: XCTestCase {
         }
         client.setBridgeReadyForTesting()
 
-        await client.speak(text: "Hello there")
+        await client.speak(text: "Hello there", utteranceId: "utterance-1")
         await client.cancelAssistantSpeech()
         await client.disconnect()
 
         XCTAssertEqual(commands.map(\.0), ["speak", "cancel", "disconnect"])
         XCTAssertEqual(commands.first?.1["text"] as? String, "Hello there")
+        XCTAssertEqual(commands.first?.1["utteranceId"] as? String, "utterance-1")
     }
 
     func testCommandsBeforeBridgeReadyAndBlankSpeechDoNotSendAnything() async {
@@ -56,7 +59,7 @@ final class RealtimeVoiceClientTests: XCTestCase {
 
         let connectTask = Task {
             try await client.connect(
-                baseURL: URL(string: "https://backend.example.com")!,
+                baseURL: URL(string: "https://backend.example.com/mobile/")!,
                 endpointPath: "/v1/realtime/call",
                 session: RealtimeSessionData(
                     ticket: "signed-ticket",
@@ -78,6 +81,44 @@ final class RealtimeVoiceClientTests: XCTestCase {
         XCTAssertEqual(sentPayload["installId"] as? String, "install-123")
         XCTAssertEqual(sentPayload["sessionToken"] as? String, "session-token-123")
         XCTAssertEqual(sentPayload["callURL"] as? String, "https://backend.example.com/v1/realtime/call")
+        XCTAssertNil(sentPayload["baseURL"])
+    }
+
+    func testConnectWaitsForBridgeReadyBeforeSendingStartupCommand() async throws {
+        let client = RealtimeVoiceClient()
+        var sendCount = 0
+        let connectSent = expectation(description: "connect command sent after bridge ready")
+        client.bridgeCommandSender = { command, _ in
+            XCTAssertEqual(command, "connect")
+            sendCount += 1
+            connectSent.fulfill()
+        }
+        client.bridgeReadyTimeoutNanoseconds = 500_000_000
+
+        let connectTask = Task {
+            try await client.connect(
+                baseURL: URL(string: "https://backend.example.com")!,
+                endpointPath: "/v1/realtime/call",
+                session: RealtimeSessionData(
+                    ticket: "signed-ticket",
+                    expiresAt: 120,
+                    model: "gpt-realtime",
+                    voice: "alloy",
+                    inputAudioTranscriptionModel: "gpt-4o-mini-transcribe"
+                ),
+                installId: "install-123"
+            )
+        }
+
+        await Task.yield()
+        XCTAssertEqual(sendCount, 0)
+
+        client.setBridgeReadyForTesting()
+        await fulfillment(of: [connectSent], timeout: 1.0)
+        client.handleBridgeMessageForTesting(["type": "connected"])
+        try await connectTask.value
+
+        XCTAssertEqual(sendCount, 1)
     }
 
     func testConnectAcceptsAbsoluteEndpointPathAndEmptySessionToken() async throws {
@@ -115,6 +156,36 @@ final class RealtimeVoiceClientTests: XCTestCase {
         XCTAssertEqual(sentPayload["sessionToken"] as? String, "")
     }
 
+    func testConnectResolvesPathRelativeEndpointAgainstBasePath() async throws {
+        let client = RealtimeVoiceClient()
+        var sentPayload: [String: Any] = [:]
+        client.bridgeCommandSender = { _, payload in
+            sentPayload = payload
+        }
+        client.setBridgeReadyForTesting()
+
+        let connectTask = Task {
+            try await client.connect(
+                baseURL: URL(string: "https://backend.example.com/mobile/")!,
+                endpointPath: "v1/realtime/call",
+                session: RealtimeSessionData(
+                    ticket: "signed-ticket",
+                    expiresAt: 120,
+                    model: "gpt-realtime",
+                    voice: "alloy",
+                    inputAudioTranscriptionModel: "gpt-4o-mini-transcribe"
+                ),
+                installId: "install-123"
+            )
+        }
+
+        await Task.yield()
+        client.handleBridgeMessageForTesting(["type": "connected"])
+        try await connectTask.value
+
+        XCTAssertEqual(sentPayload["callURL"] as? String, "https://backend.example.com/mobile/v1/realtime/call")
+    }
+
     func testConnectFailsWhenBridgeReportsAnError() async {
         let client = RealtimeVoiceClient()
         client.bridgeCommandSender = { _, _ in }
@@ -148,6 +219,7 @@ final class RealtimeVoiceClientTests: XCTestCase {
     func testConnectWaitsForBridgeReadyAndFailsOnDisconnect() async {
         let client = RealtimeVoiceClient()
         client.bridgeCommandSender = { _, _ in }
+        client.setBridgeReadyForTesting()
 
         let connectTask = Task {
             do {
@@ -170,9 +242,112 @@ final class RealtimeVoiceClientTests: XCTestCase {
         }
 
         await Task.yield()
-        client.handleBridgeMessageForTesting(["type": "bridge_ready"])
+        client.handleBridgeMessageForTesting(["type": "disconnected"])
+        await connectTask.value
+    }
+
+    func testConnectFailsWhenBridgeNeverBecomesReadyBeforeTimeout() async {
+        let client = RealtimeVoiceClient()
+        client.bridgeCommandSender = { _, _ in }
+        client.bridgeReadyTimeoutNanoseconds = 60_000_000
+
+        let connectTask = Task {
+            do {
+                try await client.connect(
+                    baseURL: URL(string: "https://backend.example.com")!,
+                    endpointPath: "/v1/realtime/call",
+                    session: RealtimeSessionData(
+                        ticket: "signed-ticket",
+                        expiresAt: 120,
+                        model: "gpt-realtime",
+                        voice: "alloy",
+                        inputAudioTranscriptionModel: "gpt-4o-mini-transcribe"
+                    ),
+                    installId: "install-123"
+                )
+                XCTFail("Expected connect to fail")
+            } catch {
+                XCTAssertEqual(
+                    error as? RealtimeVoiceClient.RealtimeError,
+                    .bridgeReadyTimedOut
+                )
+            }
+        }
+
+        await connectTask.value
+    }
+
+    func testConnectFailsWhenBridgeDisconnectsBeforeReady() async {
+        let client = RealtimeVoiceClient()
+        client.bridgeCommandSender = { _, _ in }
+        client.bridgeReadyTimeoutNanoseconds = 500_000_000
+
+        let connectTask = Task {
+            do {
+                try await client.connect(
+                    baseURL: URL(string: "https://backend.example.com")!,
+                    endpointPath: "/v1/realtime/call",
+                    session: RealtimeSessionData(
+                        ticket: "signed-ticket",
+                        expiresAt: 120,
+                        model: "gpt-realtime",
+                        voice: "alloy",
+                        inputAudioTranscriptionModel: "gpt-4o-mini-transcribe"
+                    ),
+                    installId: "install-123"
+                )
+                XCTFail("Expected connect to fail")
+            } catch {
+                XCTAssertEqual(
+                    error as? RealtimeVoiceClient.RealtimeError,
+                    .disconnectedBeforeReady
+                )
+            }
+        }
+
         await Task.yield()
         client.handleBridgeMessageForTesting(["type": "disconnected"])
+        await connectTask.value
+    }
+
+    func testConnectFailsWhenBridgeNavigationFailsBeforeReady() async {
+        let client = RealtimeVoiceClient()
+        client.bridgeCommandSender = { _, _ in }
+        client.bridgeReadyTimeoutNanoseconds = 500_000_000
+
+        let connectTask = Task {
+            do {
+                try await client.connect(
+                    baseURL: URL(string: "https://backend.example.com")!,
+                    endpointPath: "/v1/realtime/call",
+                    session: RealtimeSessionData(
+                        ticket: "signed-ticket",
+                        expiresAt: 120,
+                        model: "gpt-realtime",
+                        voice: "alloy",
+                        inputAudioTranscriptionModel: "gpt-4o-mini-transcribe"
+                    ),
+                    installId: "install-123"
+                )
+                XCTFail("Expected connect to fail")
+            } catch {
+                XCTAssertEqual(
+                    error as? RealtimeVoiceClient.RealtimeError,
+                    .bridgeReadyFailed("Bridge navigation failed")
+                )
+            }
+        }
+
+        await Task.yield()
+        client.webView(
+            client.webView,
+            didFailProvisionalNavigation: nil,
+            withError: NSError(
+                domain: NSURLErrorDomain,
+                code: NSURLErrorCannotFindHost,
+                userInfo: [NSLocalizedDescriptionKey: "Bridge navigation failed"]
+            )
+        )
         await connectTask.value
     }
 
@@ -185,7 +360,7 @@ final class RealtimeVoiceClientTests: XCTestCase {
         var userSpeaking = false
         var connectedCount = 0
         var disconnectedCount = 0
-        var completionCount = 0
+        var completionID: String?
         var receivedError = ""
 
         client.onConnected = { connectedCount += 1 }
@@ -197,7 +372,7 @@ final class RealtimeVoiceClientTests: XCTestCase {
             remoteLevel = remote
         }
         client.onUserSpeechChanged = { userSpeaking = $0 }
-        client.onAssistantResponseCompleted = { completionCount += 1 }
+        client.onAssistantResponseCompleted = { completionID = $0 }
         client.onError = { receivedError = $0 }
 
         client.handleBridgeMessageForTesting(["type": "connected"])
@@ -205,7 +380,7 @@ final class RealtimeVoiceClientTests: XCTestCase {
         client.handleBridgeMessageForTesting(["type": "user_speech_state", "speaking": true])
         client.handleBridgeMessageForTesting(["type": "transcript_partial", "text": "Bunny wants"])
         client.handleBridgeMessageForTesting(["type": "transcript_final", "text": "Bunny wants a lantern adventure"])
-        client.handleBridgeMessageForTesting(["type": "assistant_response_completed"])
+        client.handleBridgeMessageForTesting(["type": "assistant_response_completed", "utteranceId": "utterance-7"])
         client.handleBridgeMessageForTesting(["type": "error", "message": "Bridge problem"])
         client.handleBridgeMessageForTesting(["type": "disconnected"])
 
@@ -216,7 +391,7 @@ final class RealtimeVoiceClientTests: XCTestCase {
         XCTAssertEqual(localLevel, 0.1, accuracy: 0.0001)
         XCTAssertEqual(remoteLevel, 0.4, accuracy: 0.0001)
         XCTAssertTrue(userSpeaking)
-        XCTAssertEqual(completionCount, 1)
+        XCTAssertEqual(completionID, "utterance-7")
         XCTAssertEqual(receivedError, "Bridge problem")
     }
 
@@ -239,6 +414,22 @@ final class RealtimeVoiceClientTests: XCTestCase {
         XCTAssertEqual(
             RealtimeVoiceClient.RealtimeError.invalidBridgeResponse.errorDescription,
             "Realtime bridge returned an invalid response."
+        )
+        XCTAssertEqual(
+            RealtimeVoiceClient.RealtimeError.bridgeReadyTimedOut.errorDescription,
+            "Realtime bridge did not become ready in time."
+        )
+        XCTAssertEqual(
+            RealtimeVoiceClient.RealtimeError.bridgeReadyFailed("Bridge setup failed").errorDescription,
+            "Bridge setup failed"
+        )
+        XCTAssertEqual(
+            RealtimeVoiceClient.RealtimeError.disconnectedBeforeReady.errorDescription,
+            "Realtime bridge disconnected before it was ready."
+        )
+        XCTAssertEqual(
+            RealtimeVoiceClient.RealtimeError.connectFailed("Socket failed").errorDescription,
+            "Socket failed"
         )
     }
 }

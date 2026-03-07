@@ -3,7 +3,7 @@ import SwiftUI
 struct HomeView: View {
     @ObservedObject var store: StoryLibraryStore
     @State private var showingNewJourney = false
-    @State private var showingParentHub = false
+    @State private var parentSheet: ParentSheetDestination?
 
     var body: some View {
         NavigationStack {
@@ -49,9 +49,17 @@ struct HomeView: View {
                     NewStoryJourneyView(store: store)
                 }
             }
-            .sheet(isPresented: $showingParentHub) {
+            .sheet(item: $parentSheet) { destination in
                 NavigationStack {
-                    ParentTrustCenterView(store: store)
+                    switch destination {
+                    case .gate:
+                        ParentAccessGateView(
+                            onUnlock: { parentSheet = .hub },
+                            onCancel: { parentSheet = nil }
+                        )
+                    case .hub:
+                        ParentTrustCenterView(store: store)
+                    }
                 }
             }
         }
@@ -71,7 +79,7 @@ struct HomeView: View {
             Spacer()
 
             Button {
-                showingParentHub = true
+                parentSheet = .gate
             } label: {
                 Label("Parent", systemImage: "lock.shield")
                     .font(.system(size: 14, weight: .bold, design: .rounded))
@@ -160,13 +168,14 @@ struct HomeView: View {
                 .font(.system(size: 18, weight: .bold, design: .rounded))
 
             HStack(spacing: 10) {
-                trustPill(title: "Raw audio", value: "Off")
+                trustPill(title: "Raw audio", value: "Not saved")
                 trustPill(title: "History", value: store.storyHistorySummary)
             }
 
-            Text("Parents manage profiles, sensitivity, retention, and deletion. Raw audio is not saved by default.")
+            Text("Parents manage profiles, sensitivity, retention, and deletion. Raw audio is not saved. Story prompts and generated stories are sent for live processing, and saved history stays on this device after each session.")
                 .font(.system(size: 13, weight: .medium, design: .rounded))
                 .foregroundStyle(.secondary)
+                .accessibilityIdentifier("homePrivacySummary")
         }
         .padding(16)
         .background(
@@ -192,6 +201,7 @@ struct HomeView: View {
                         VStack(spacing: 8) {
                             Text(emptyStateTitle)
                                 .font(.system(size: 17, weight: .bold, design: .rounded))
+                                .accessibilityIdentifier("storiesEmptyStateTitle")
                             Text("Tap + to start a new voice story.")
                                 .multilineTextAlignment(.center)
                                 .font(.system(size: 15, weight: .medium, design: .rounded))
@@ -232,6 +242,77 @@ struct HomeView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .background(Capsule(style: .continuous).fill(.white))
+    }
+}
+
+private enum ParentSheetDestination: String, Identifiable {
+    case gate
+    case hub
+
+    var id: String { rawValue }
+}
+
+private struct ParentAccessGateView: View {
+    private static let confirmationCode = "PARENT"
+
+    let onUnlock: () -> Void
+    let onCancel: () -> Void
+
+    @State private var confirmationText = ""
+
+    var body: some View {
+        VStack(spacing: 20) {
+            Spacer(minLength: 12)
+
+            Image(systemName: "lock.shield")
+                .font(.system(size: 42, weight: .bold))
+                .foregroundStyle(Color(red: 0.14, green: 0.50, blue: 0.96))
+
+            Text("Parents only")
+                .font(.system(size: 28, weight: .black, design: .rounded))
+                .accessibilityIdentifier("parentAccessGateTitle")
+
+            Text("Type PARENT to open profile, privacy, and story-history controls.")
+                .multilineTextAlignment(.center)
+                .font(.system(size: 16, weight: .semibold, design: .rounded))
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("parentAccessGateMessage")
+
+            TextField("Type PARENT", text: $confirmationText)
+                .textInputAutocapitalization(.characters)
+                .autocorrectionDisabled()
+                .font(.system(size: 16, weight: .bold, design: .rounded))
+                .padding(.horizontal, 14)
+                .padding(.vertical, 14)
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(Color(.secondarySystemBackground))
+                )
+                .accessibilityIdentifier("parentAccessGateField")
+
+            Button("Open Parent Controls") {
+                guard isConfirmationValid else { return }
+                onUnlock()
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(!isConfirmationValid)
+            .accessibilityIdentifier("unlockParentControlsButton")
+
+            Button("Not now") {
+                onCancel()
+            }
+            .buttonStyle(.bordered)
+            .accessibilityIdentifier("cancelParentAccessGateButton")
+
+            Spacer()
+        }
+        .padding(24)
+        .navigationTitle("Parents Only")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private var isConfirmationValid: Bool {
+        confirmationText.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() == Self.confirmationCode
     }
 }
 
@@ -302,8 +383,9 @@ private struct ParentTrustCenterView: View {
     var body: some View {
         Form {
             Section("Privacy") {
-                Label("Raw audio storage is off by default", systemImage: "waveform.slash")
+                Label("Raw audio is not saved", systemImage: "waveform.slash")
                     .foregroundStyle(.primary)
+                    .accessibilityIdentifier("parentRawAudioStatusLabel")
                 Toggle("Save story history", isOn: Binding(
                     get: { store.privacySettings.saveStoryHistory },
                     set: { store.setSaveStoryHistory($0) }
@@ -325,9 +407,10 @@ private struct ParentTrustCenterView: View {
                     set: { store.setClearTranscriptsAfterSession($0) }
                 ))
                 .accessibilityIdentifier("clearTranscriptsToggle")
-                Text("Stories stay on device. Raw audio is not persisted in StoryTime V1.")
+                Text("Saved stories and continuity stay on this device after the session ends. Raw audio is not saved. Live microphone audio, spoken prompts, story generation, and revisions are sent for live processing.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("parentPrivacySummary")
             }
 
             Section("Child profiles") {

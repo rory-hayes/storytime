@@ -243,10 +243,15 @@ struct ReviseStoryEnvelope: Codable, Hashable {
     }
 }
 
+enum StoryTimeRegion: String, Codable, Hashable, CaseIterable {
+    case us = "US"
+    case eu = "EU"
+}
+
 struct RealtimeSessionRequest: Encodable {
     let childProfileId: String
     let voice: String
-    let region: String
+    let region: StoryTimeRegion
 
     enum CodingKeys: String, CodingKey {
         case childProfileId = "child_profile_id"

@@ -2,6 +2,13 @@ import type { Request } from "express";
 import type { Env } from "../lib/env.js";
 import { logger } from "../lib/logger.js";
 import type { RequestContext } from "../lib/requestContext.js";
+import type pino from "pino";
+
+export type CapturedLogEntry = {
+  level: "info" | "warn" | "error";
+  message: string;
+  bindings: Record<string, unknown>;
+};
 
 export function makeTestEnv(overrides: Partial<Env> = {}): Env {
   return {
@@ -80,5 +87,30 @@ export function makeRequest(options?: {
 export function responseWithJSON(payload: unknown) {
   return {
     output_text: JSON.stringify(payload)
+  };
+}
+
+export function makeCapturedLogger() {
+  const entries: CapturedLogEntry[] = [];
+
+  const buildLogger = (baseBindings: Record<string, unknown>): pino.Logger =>
+    ({
+      child(bindings: Record<string, unknown>) {
+        return buildLogger({ ...baseBindings, ...bindings });
+      },
+      info(payload: Record<string, unknown>, message: string) {
+        entries.push({ level: "info", message, bindings: { ...baseBindings, ...(payload ?? {}) } });
+      },
+      warn(payload: Record<string, unknown>, message: string) {
+        entries.push({ level: "warn", message, bindings: { ...baseBindings, ...(payload ?? {}) } });
+      },
+      error(payload: Record<string, unknown>, message: string) {
+        entries.push({ level: "error", message, bindings: { ...baseBindings, ...(payload ?? {}) } });
+      }
+    }) as unknown as pino.Logger;
+
+  return {
+    logger: buildLogger({}),
+    entries
   };
 }

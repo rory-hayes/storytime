@@ -65,18 +65,23 @@ struct NewStoryJourneyView: View {
                 selectedChildProfileId = store.activeProfile?.id
                 experienceMode = store.activeProfile?.preferredMode ?? .classic
             }
-            if selectedSeriesId == nil {
-                selectedSeriesId = store.visibleSeries.first?.id
-            }
+            syncSelectedSeriesSelection()
+        }
+        .onChange(of: selectedChildProfileId) { _, _ in
+            syncSelectedSeriesSelection()
         }
     }
 
     private var selectedSeries: StorySeries? {
-        store.seriesById(selectedSeriesId)
+        scopedVisibleSeries.first(where: { $0.id == selectedSeriesId })
     }
 
     private var selectedChildProfile: ChildProfile? {
         store.profileById(selectedChildProfileId) ?? store.activeProfile
+    }
+
+    private var scopedVisibleSeries: [StorySeries] {
+        store.visibleSeries(for: selectedChildProfile?.id ?? store.activeProfile?.id)
     }
 
     private var childCard: some View {
@@ -94,6 +99,7 @@ struct NewStoryJourneyView: View {
                         if let profile = store.profileById(newValue) {
                             experienceMode = profile.preferredMode
                         }
+                        syncSelectedSeriesSelection()
                     }
                 )) {
                     ForEach(store.childProfiles) { profile in
@@ -183,24 +189,23 @@ struct NewStoryJourneyView: View {
                 Text("Story Source")
                     .font(.system(size: 16, weight: .bold, design: .rounded))
 
-                if store.visibleSeries.isEmpty {
+                if scopedVisibleSeries.isEmpty {
                     Text("No past stories for this child yet. We will start a fresh story.")
                         .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("noPastStoriesMessage")
                 } else {
                     Picker("Past story", selection: Binding(
-                        get: { selectedSeriesId ?? store.visibleSeries.first?.id },
+                        get: { selectedSeriesId ?? scopedVisibleSeries.first?.id },
                         set: { selectedSeriesId = $0 }
                     )) {
-                        ForEach(store.visibleSeries) { series in
+                        ForEach(scopedVisibleSeries) { series in
                             Text(series.title).tag(Optional(series.id))
                         }
                     }
                     .pickerStyle(.menu)
                     .accessibilityIdentifier("pastStoryPicker")
                     .onAppear {
-                        if selectedSeriesId == nil {
-                            selectedSeriesId = store.visibleSeries.first?.id
-                        }
+                        syncSelectedSeriesSelection()
                     }
                 }
             }
@@ -236,9 +241,10 @@ struct NewStoryJourneyView: View {
             Text("Privacy and retention")
                 .font(.system(size: 16, weight: .bold, design: .rounded))
 
-            Text("Raw audio is not saved. \(store.storyHistorySummary.lowercased()).")
+            Text("Raw audio is not saved. Story prompts and generated stories are sent for live processing. \(store.storyHistorySummary).")
                 .font(.system(size: 14, weight: .medium, design: .rounded))
                 .foregroundStyle(.secondary)
+                .accessibilityIdentifier("journeyPrivacySummary")
 
             if let profile = selectedChildProfile {
                 Text(profile.contentSensitivity.generationDirective)
@@ -297,7 +303,7 @@ struct NewStoryJourneyView: View {
 
     private var launchPlan: StoryLaunchPlan {
         let mode: StoryLaunchMode
-        if usePastStory, let id = selectedSeriesId {
+        if usePastStory, let id = selectedSeries?.id {
             mode = .extend(seriesId: id)
         } else {
             mode = .new
@@ -308,10 +314,22 @@ struct NewStoryJourneyView: View {
             childProfileId: selectedChildProfile?.id ?? store.activeProfile?.id ?? UUID(),
             experienceMode: experienceMode,
             usePastStory: usePastStory,
-            selectedSeriesId: selectedSeriesId,
+            selectedSeriesId: selectedSeries?.id,
             usePastCharacters: usePastCharacters,
             lengthMinutes: lengthMinutes
         )
+    }
+
+    private func syncSelectedSeriesSelection() {
+        guard let selectedSeriesId else {
+            self.selectedSeriesId = scopedVisibleSeries.first?.id
+            return
+        }
+
+        guard scopedVisibleSeries.contains(where: { $0.id == selectedSeriesId }) else {
+            self.selectedSeriesId = scopedVisibleSeries.first?.id
+            return
+        }
     }
 
     private var cardBackground: some View {

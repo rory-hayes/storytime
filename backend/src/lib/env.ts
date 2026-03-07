@@ -95,6 +95,10 @@ export function loadEnv(raw: NodeJS.ProcessEnv = process.env): Env {
 }
 
 function assertSecureEnv(env: Env) {
+  if (env.SESSION_TOKEN_REFRESH_SECONDS >= env.SESSION_TOKEN_TTL_SECONDS) {
+    throw new Error("SESSION_TOKEN_REFRESH_SECONDS must be lower than SESSION_TOKEN_TTL_SECONDS.");
+  }
+
   if (env.NODE_ENV !== "production") {
     return;
   }
@@ -110,5 +114,13 @@ function assertSecureEnv(env: Env) {
 
   if (!env.ALLOWED_REGIONS.includes(env.DEFAULT_REGION)) {
     throw new Error("DEFAULT_REGION must be included in ALLOWED_REGIONS.");
+  }
+
+  if (env.ALLOWED_ORIGIN === "*") {
+    throw new Error("ALLOWED_ORIGIN must be explicit in production.");
+  }
+
+  if (!env.API_AUTH_REQUIRED) {
+    throw new Error("API_AUTH_REQUIRED must be enabled in production.");
   }
 }

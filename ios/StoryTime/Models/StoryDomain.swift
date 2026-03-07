@@ -204,9 +204,136 @@ enum VoiceSpeaker {
 
 enum ConversationPhase: String {
     case idle
-    case gatheringInput
+    case booting
+    case ready
+    case discovering
     case generating
     case narrating
+    case interrupting
     case revising
     case completed
+    case failed
+}
+
+struct VoiceSessionReadyState: Equatable {
+    enum Mode: Equatable {
+        case discovery(stepNumber: Int)
+    }
+
+    let mode: Mode
+}
+
+extension VoiceSessionReadyState.Mode {
+    var logDescription: String {
+        switch self {
+        case .discovery(let stepNumber):
+            return "discovery(stepNumber: \(stepNumber))"
+        }
+    }
+}
+
+enum VoiceSessionState: Equatable {
+    case idle
+    case booting
+    case ready(VoiceSessionReadyState)
+    case discovering(turnID: Int)
+    case generating
+    case narrating(sceneIndex: Int)
+    case interrupting(sceneIndex: Int)
+    case revising(sceneIndex: Int, queuedUpdates: Int)
+    case completed
+    case failed
+
+    var phase: ConversationPhase {
+        switch self {
+        case .idle:
+            return .idle
+        case .booting:
+            return .booting
+        case .ready:
+            return .ready
+        case .discovering:
+            return .discovering
+        case .generating:
+            return .generating
+        case .narrating:
+            return .narrating
+        case .interrupting:
+            return .interrupting
+        case .revising:
+            return .revising
+        case .completed:
+            return .completed
+        case .failed:
+            return .failed
+        }
+    }
+
+    var isTerminal: Bool {
+        switch self {
+        case .completed, .failed:
+            return true
+        case .idle, .booting, .ready, .discovering, .generating, .narrating, .interrupting, .revising:
+            return false
+        }
+    }
+
+    var canStartSession: Bool {
+        switch self {
+        case .idle, .completed, .failed:
+            return true
+        case .booting, .ready, .discovering, .generating, .narrating, .interrupting, .revising:
+            return false
+        }
+    }
+
+    var sceneIndex: Int? {
+        switch self {
+        case .narrating(let sceneIndex), .interrupting(let sceneIndex), .revising(let sceneIndex, _):
+            return sceneIndex
+        case .idle, .booting, .ready, .discovering, .generating, .completed, .failed:
+            return nil
+        }
+    }
+
+    var logDescription: String {
+        switch self {
+        case .idle:
+            return "idle"
+        case .booting:
+            return "booting"
+        case .ready(let readyState):
+            return "ready(mode: \(readyState.mode.logDescription))"
+        case .discovering(let turnID):
+            return "discovering(turnID: \(turnID))"
+        case .generating:
+            return "generating"
+        case .narrating(let sceneIndex):
+            return "narrating(sceneIndex: \(sceneIndex))"
+        case .interrupting(let sceneIndex):
+            return "interrupting(sceneIndex: \(sceneIndex))"
+        case .revising(let sceneIndex, let queuedUpdates):
+            return "revising(sceneIndex: \(sceneIndex), queuedUpdates: \(queuedUpdates))"
+        case .completed:
+            return "completed"
+        case .failed:
+            return "failed"
+        }
+    }
+}
+
+enum StoryTimeAppErrorCategory: String, Equatable {
+    case startup
+    case moderationBlock
+    case networkFailure
+    case backendFailure
+    case decodeFailure
+    case persistenceFailure
+    case cancellation
+}
+
+struct StoryTimeAppError: Equatable {
+    let category: StoryTimeAppErrorCategory
+    let statusMessage: String
+    let userMessage: String
 }

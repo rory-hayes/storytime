@@ -14,9 +14,11 @@ enum UITestSeed {
             "storytime.continuity.memory.v1",
             "com.storytime.install-id",
             "com.storytime.session-token",
-            "com.storytime.session-expiry"
+            "com.storytime.session-expiry",
+            "com.storytime.session-id"
         ]
         keys.forEach { defaults.removeObject(forKey: $0) }
+        StoryLibraryV2Storage(storageURL: StoryLibraryV2Storage.defaultStorageURL()).clear()
 
         let primaryProfile = ChildProfile(
             id: UUID(uuidString: "11111111-1111-1111-1111-111111111111") ?? UUID(),

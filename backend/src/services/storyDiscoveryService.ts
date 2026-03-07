@@ -2,6 +2,7 @@ import OpenAI from "openai";
 import { analytics } from "../lib/analytics.js";
 import type { Env } from "../lib/env.js";
 import { AppError } from "../lib/errors.js";
+import { logLifecycle } from "../lib/lifecycle.js";
 import type { RequestContext } from "../lib/requestContext.js";
 import { withRetry } from "../lib/retry.js";
 import type { DiscoveryRequest, DiscoveryResult } from "../types.js";
@@ -71,78 +72,155 @@ export class StoryDiscoveryService {
   ) {}
 
   async analyzeTurn(request: DiscoveryRequest, context?: RequestContext): Promise<DiscoveryResult> {
-    const transcript = request.transcript.trim();
-    const priorState = normalizeDiscoverySlotState(request.slot_state, request.mode);
-    const moderation = await this.moderation.moderateText(transcript, context);
+    const startedAt = Date.now();
+    logLifecycle(context, {
+      component: "story_discovery",
+      action: "analyze_turn",
+      phase: "started",
+      details: {
+        mode: request.mode,
+        question_count: request.question_count,
+        has_previous_episode_recap: Boolean(request.previous_episode_recap)
+      }
+    });
 
-    if (moderation.flagged || containsBannedTheme(transcript)) {
-      return {
-        blocked: true,
-        safe_message: "Let's make it a gentle and happy story. Tell me about a kind adventure instead.",
-        data: {
-          slot_state: priorState,
-          question_count: Math.min(3, request.question_count),
-          ready_to_generate: false,
-          assistant_message: "Let's choose a friendly adventure with kind characters. What should the story be about?",
-          transcript
-        }
-      };
-    }
+    try {
+      const transcript = request.transcript.trim();
+      const priorState = normalizeDiscoverySlotState(request.slot_state, request.mode);
+      const moderation = await this.moderation.moderateText(transcript, context);
 
-    const questionCount = Math.min(3, request.question_count);
-    if (questionCount >= 3) {
-      return {
-        blocked: false,
-        data: {
-          slot_state: priorState,
-          question_count: 3,
-          ready_to_generate: true,
-          assistant_message: "Thanks. I have enough details to make the story now.",
-          transcript
-        }
-      };
-    }
+      if (moderation.flagged || containsBannedTheme(transcript)) {
+        const result: DiscoveryResult = {
+          blocked: true,
+          safe_message: "Let's make it a gentle and happy story. Tell me about a kind adventure instead.",
+          data: {
+            slot_state: priorState,
+            question_count: Math.min(3, request.question_count),
+            ready_to_generate: false,
+            assistant_message: "Let's choose a friendly adventure with kind characters. What should the story be about?",
+            transcript
+          }
+        };
+        logLifecycle(context, {
+          component: "story_discovery",
+          action: "analyze_turn",
+          phase: "blocked",
+          details: {
+            mode: request.mode,
+            blocked_reason: "unsafe_transcript"
+          },
+          durationMs: Date.now() - startedAt
+        });
+        return result;
+      }
 
-    const payload = await this.extractDiscoveryState(
-      {
-        ...request,
-        slot_state: priorState
-      },
-      context
-    );
+      const questionCount = Math.min(3, request.question_count);
+      if (questionCount >= 3) {
+        const result: DiscoveryResult = {
+          blocked: false,
+          data: {
+            slot_state: priorState,
+            question_count: 3,
+            ready_to_generate: true,
+            assistant_message: "Thanks. I have enough details to make the story now.",
+            transcript
+          }
+        };
+        logLifecycle(context, {
+          component: "story_discovery",
+          action: "analyze_turn",
+          phase: "completed",
+          details: {
+            mode: request.mode,
+            ready_to_generate: true,
+            used_model: false,
+            question_count: result.data.question_count
+          },
+          durationMs: Date.now() - startedAt
+        });
+        return result;
+      }
 
-    const mergedState = mergeDiscoverySlotState(priorState, payload.slot_state, request.mode);
-    const missingSlots = missingDiscoverySlots(mergedState);
+      const payload = await this.extractDiscoveryState(
+        {
+          ...request,
+          slot_state: priorState
+        },
+        context
+      );
 
-    if (missingSlots.length === 0) {
-      return {
+      const mergedState = mergeDiscoverySlotState(priorState, payload.slot_state, request.mode);
+      const missingSlots = missingDiscoverySlots(mergedState);
+
+      if (missingSlots.length === 0) {
+        const result: DiscoveryResult = {
+          blocked: false,
+          data: {
+            slot_state: mergedState,
+            question_count: questionCount,
+            ready_to_generate: true,
+            assistant_message: "Thanks. I have enough details to make the story now.",
+            transcript
+          }
+        };
+        logLifecycle(context, {
+          component: "story_discovery",
+          action: "analyze_turn",
+          phase: "completed",
+          details: {
+            mode: request.mode,
+            ready_to_generate: true,
+            used_model: true,
+            question_count: result.data.question_count
+          },
+          durationMs: Date.now() - startedAt
+        });
+        return result;
+      }
+
+      const nextFocus = sanitizeNextFocusSlot(payload.next_focus_slot, missingSlots);
+      const result: DiscoveryResult = {
         blocked: false,
         data: {
           slot_state: mergedState,
-          question_count: questionCount,
-          ready_to_generate: true,
-          assistant_message: "Thanks. I have enough details to make the story now.",
+          question_count: questionCount + 1,
+          ready_to_generate: false,
+          assistant_message: buildFollowUpQuestion(
+            nextFocus,
+            payload.assistant_message.trim(),
+            request.mode,
+            request.previous_episode_recap
+          ),
           transcript
         }
       };
+      logLifecycle(context, {
+        component: "story_discovery",
+        action: "analyze_turn",
+        phase: "completed",
+        details: {
+          mode: request.mode,
+          ready_to_generate: false,
+          used_model: true,
+          question_count: result.data.question_count
+        },
+        durationMs: Date.now() - startedAt
+      });
+      return result;
+    } catch (error) {
+      logLifecycle(context, {
+        component: "story_discovery",
+        action: "analyze_turn",
+        phase: "failed",
+        details: {
+          mode: request.mode,
+          question_count: request.question_count
+        },
+        durationMs: Date.now() - startedAt,
+        error
+      });
+      throw error;
     }
-
-    const nextFocus = sanitizeNextFocusSlot(payload.next_focus_slot, missingSlots);
-    return {
-      blocked: false,
-      data: {
-        slot_state: mergedState,
-        question_count: questionCount + 1,
-        ready_to_generate: false,
-        assistant_message: buildFollowUpQuestion(
-          nextFocus,
-          payload.assistant_message.trim(),
-          request.mode,
-          request.previous_episode_recap
-        ),
-        transcript
-      }
-    };
   }
 
   private async extractDiscoveryState(request: DiscoveryRequest, context?: RequestContext): Promise<DiscoveryPayload> {
@@ -191,7 +269,20 @@ export class StoryDiscoveryService {
           } as any),
         {
           retries: this.env.OPENAI_MAX_RETRIES,
-          baseDelayMs: this.env.OPENAI_RETRY_BASE_MS
+          baseDelayMs: this.env.OPENAI_RETRY_BASE_MS,
+          onRetry: (error, attempt, nextDelayMs) => {
+            logLifecycle(context, {
+              component: "story_discovery",
+              action: "analyze_turn",
+              phase: "retrying",
+              details: {
+                retry_attempt: attempt,
+                retry_in_ms: nextDelayMs,
+                retry_source: "openai"
+              },
+              error
+            });
+          }
         }
       );
       attempts = usedAttempts;

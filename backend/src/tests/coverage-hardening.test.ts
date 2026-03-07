@@ -78,10 +78,45 @@ describe("coverage hardening", () => {
         OPENAI_API_KEY: "test-key-12345678901234567890",
         SESSION_SIGNING_SECRET: "secure-signing-secret-1234567890",
         AUTH_TOKEN_SECRET: "secure-auth-secret-123456789012",
+        ALLOWED_ORIGIN: "https://storytime.example.com",
+        API_AUTH_REQUIRED: "true",
         ALLOWED_REGIONS: "EU",
         DEFAULT_REGION: "US"
       })
     ).toThrow(/DEFAULT_REGION/);
+  });
+
+  it("rejects invalid refresh windows and insecure production transport defaults", () => {
+    expect(() =>
+      loadEnv({
+        NODE_ENV: "development",
+        OPENAI_API_KEY: "test-key-12345678901234567890",
+        SESSION_TOKEN_TTL_SECONDS: "300",
+        SESSION_TOKEN_REFRESH_SECONDS: "300"
+      })
+    ).toThrow(/SESSION_TOKEN_REFRESH_SECONDS/);
+
+    expect(() =>
+      loadEnv({
+        NODE_ENV: "production",
+        OPENAI_API_KEY: "test-key-12345678901234567890",
+        SESSION_SIGNING_SECRET: "secure-signing-secret-1234567890",
+        AUTH_TOKEN_SECRET: "secure-auth-secret-123456789012",
+        ALLOWED_ORIGIN: "*",
+        API_AUTH_REQUIRED: "true"
+      })
+    ).toThrow(/ALLOWED_ORIGIN/);
+
+    expect(() =>
+      loadEnv({
+        NODE_ENV: "production",
+        OPENAI_API_KEY: "test-key-12345678901234567890",
+        SESSION_SIGNING_SECRET: "secure-signing-secret-1234567890",
+        AUTH_TOKEN_SECRET: "secure-auth-secret-123456789012",
+        ALLOWED_ORIGIN: "https://storytime.example.com",
+        API_AUTH_REQUIRED: "false"
+      })
+    ).toThrow(/API_AUTH_REQUIRED/);
   });
 
   it("covers retry decisions for cause statuses and explicit non-retry policies", async () => {

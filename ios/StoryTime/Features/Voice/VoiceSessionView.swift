@@ -132,6 +132,7 @@ struct VoiceSessionView: View {
                 Text(viewModel.privacySummary)
                     .font(.system(size: 13, weight: .semibold, design: .rounded))
                     .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("voicePrivacySummaryLabel")
             }
             .padding(16)
         }
@@ -154,9 +155,10 @@ struct VoiceSessionView: View {
                     .fill(Color.green)
                     .frame(width: 8, height: 8)
 
-                Text("Speak anytime to answer or interrupt. Raw audio is not saved.")
+                Text("Speak anytime to answer or interrupt. Raw audio is not saved, and your words are sent for live processing.")
                     .font(.system(size: 13, weight: .semibold, design: .rounded))
                     .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("voiceProcessingHintLabel")
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 20)

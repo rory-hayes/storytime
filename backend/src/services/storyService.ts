@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from "uuid";
 import { analytics } from "../lib/analytics.js";
 import type { Env } from "../lib/env.js";
 import { AppError } from "../lib/errors.js";
+import { logLifecycle } from "../lib/lifecycle.js";
 import type { RequestContext } from "../lib/requestContext.js";
 import { withRetry } from "../lib/retry.js";
 import type {
@@ -97,86 +98,40 @@ export class StoryService {
   ) {}
 
   async generateStory(request: GenerateStoryRequest, context?: RequestContext): Promise<StoryGenerateResult> {
-    const inputNarrative = this.inputNarrative(request);
-    const plan = buildStoryPlan({
-      titleHint: undefined,
-      theme: request.story_brief.theme,
-      characters: request.story_brief.characters,
-      setting: request.story_brief.setting,
-      tone: request.story_brief.tone,
-      episodeIntent: request.story_brief.episode_intent,
-      lengthMinutes: request.length_minutes,
-      continuityFacts: request.continuity_facts
+    const startedAt = Date.now();
+    logLifecycle(context, {
+      component: "story_generate",
+      action: "generate_story",
+      phase: "started",
+      details: {
+        length_minutes: request.length_minutes,
+        scene_target: estimateSceneCount(request.length_minutes),
+        continuity_fact_count: request.continuity_facts.length
+      }
     });
 
-    if (containsBannedTheme(inputNarrative)) {
-      return {
-        blocked: true,
-        safe_message: "Let's pick a gentler story idea with friendly characters and a happy ending.",
-        data: this.toGenerateResponse(
-          request,
-          safeFallbackStory(request.length_minutes),
-          "flagged",
-          "pass",
-          buildEngineMetadata(
-            plan,
-            evaluateStoryQuality(
-              safeFallbackStory(request.length_minutes),
-              plan,
-              request.length_minutes * 60,
-              estimateSceneCount(request.length_minutes)
-            )
-          )
-        )
-      };
-    }
+    try {
+      const inputNarrative = this.inputNarrative(request);
+      const plan = buildStoryPlan({
+        titleHint: undefined,
+        theme: request.story_brief.theme,
+        characters: request.story_brief.characters,
+        setting: request.story_brief.setting,
+        tone: request.story_brief.tone,
+        episodeIntent: request.story_brief.episode_intent,
+        lengthMinutes: request.length_minutes,
+        continuityFacts: request.continuity_facts
+      });
 
-    const inputModeration = await this.moderation.moderateText(inputNarrative, context);
-    if (inputModeration.flagged) {
-      return {
-        blocked: true,
-        safe_message: "Let's choose a different idea and make a kind, cozy story instead.",
-        data: this.toGenerateResponse(
-          request,
-          safeFallbackStory(request.length_minutes),
-          "flagged",
-          "pass",
-          buildEngineMetadata(
-            plan,
-            evaluateStoryQuality(
-              safeFallbackStory(request.length_minutes),
-              plan,
-              request.length_minutes * 60,
-              estimateSceneCount(request.length_minutes)
-            )
-          )
-        )
-      };
-    }
-
-    let lastQualityIssues: string[] = [];
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const story = await this.generateStoryFromModel(request, plan, attempt > 0, lastQualityIssues, context);
-      const quality = evaluateStoryQuality(
-        story,
-        plan,
-        request.length_minutes * 60,
-        estimateSceneCount(request.length_minutes)
-      );
-      if (!quality.passed) {
-        lastQualityIssues = quality.issues;
-        if (attempt < 2) {
-          continue;
-        }
-
-        return {
+      if (containsBannedTheme(inputNarrative)) {
+        const result: StoryGenerateResult = {
           blocked: true,
-          safe_message: "I made a softer story version so we can keep things smooth and fun.",
+          safe_message: "Let's pick a gentler story idea with friendly characters and a happy ending.",
           data: this.toGenerateResponse(
             request,
             safeFallbackStory(request.length_minutes),
-            "pass",
             "flagged",
+            "pass",
             buildEngineMetadata(
               plan,
               evaluateStoryQuality(
@@ -188,113 +143,204 @@ export class StoryService {
             )
           )
         };
+        logLifecycle(context, {
+          component: "story_generate",
+          action: "generate_story",
+          phase: "blocked",
+          details: {
+            blocked_reason: "unsafe_input"
+          },
+          durationMs: Date.now() - startedAt
+        });
+        return result;
       }
 
-      const outputModeration = await this.moderation.moderateManyText(story.scenes.map((scene) => scene.text), context);
-      if (!outputModeration.flagged) {
-        const continuity = await this.continuity.enrichEngine(story.title, story.scenes, plan, context);
-        return {
-          blocked: false,
+      const inputModeration = await this.moderation.moderateText(inputNarrative, context);
+      if (inputModeration.flagged) {
+        const result: StoryGenerateResult = {
+          blocked: true,
+          safe_message: "Let's choose a different idea and make a kind, cozy story instead.",
           data: this.toGenerateResponse(
             request,
-            story,
+            safeFallbackStory(request.length_minutes),
+            "flagged",
             "pass",
-            "pass",
-            {
-              ...buildEngineMetadata(plan, quality),
-              ...continuity
-            }
+            buildEngineMetadata(
+              plan,
+              evaluateStoryQuality(
+                safeFallbackStory(request.length_minutes),
+                plan,
+                request.length_minutes * 60,
+                estimateSceneCount(request.length_minutes)
+              )
+            )
           )
         };
+        logLifecycle(context, {
+          component: "story_generate",
+          action: "generate_story",
+          phase: "blocked",
+          details: {
+            blocked_reason: "input_moderation"
+          },
+          durationMs: Date.now() - startedAt
+        });
+        return result;
       }
-    }
 
-    return {
-      blocked: true,
-      safe_message: "I made a softer story version so we can keep things safe and fun.",
-      data: this.toGenerateResponse(
-        request,
-        safeFallbackStory(request.length_minutes),
-        "pass",
-        "flagged",
-        buildEngineMetadata(
+      let lastQualityIssues: string[] = [];
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const story = await this.generateStoryFromModel(request, plan, attempt > 0, lastQualityIssues, context);
+        const quality = evaluateStoryQuality(
+          story,
           plan,
-          evaluateStoryQuality(
-            safeFallbackStory(request.length_minutes),
+          request.length_minutes * 60,
+          estimateSceneCount(request.length_minutes)
+        );
+        if (!quality.passed) {
+          lastQualityIssues = quality.issues;
+          if (attempt < 2) {
+            continue;
+          }
+
+          const result: StoryGenerateResult = {
+            blocked: true,
+            safe_message: "I made a softer story version so we can keep things smooth and fun.",
+            data: this.toGenerateResponse(
+              request,
+              safeFallbackStory(request.length_minutes),
+              "pass",
+              "flagged",
+              buildEngineMetadata(
+                plan,
+                evaluateStoryQuality(
+                  safeFallbackStory(request.length_minutes),
+                  plan,
+                  request.length_minutes * 60,
+                  estimateSceneCount(request.length_minutes)
+                )
+              )
+            )
+          };
+          logLifecycle(context, {
+            component: "story_generate",
+            action: "generate_story",
+            phase: "blocked",
+            details: {
+              blocked_reason: "quality_gate",
+              quality_attempts: attempt + 1
+            },
+            durationMs: Date.now() - startedAt
+          });
+          return result;
+        }
+
+        const outputModeration = await this.moderation.moderateManyText(story.scenes.map((scene) => scene.text), context);
+        if (!outputModeration.flagged) {
+          const continuity = await this.continuity.enrichEngine(story.title, story.scenes, plan, context);
+          const result: StoryGenerateResult = {
+            blocked: false,
+            data: this.toGenerateResponse(
+              request,
+              story,
+              "pass",
+              "pass",
+              {
+                ...buildEngineMetadata(plan, quality),
+                ...continuity
+              }
+            )
+          };
+          logLifecycle(context, {
+            component: "story_generate",
+            action: "generate_story",
+            phase: "completed",
+            details: {
+              quality_attempts: attempt + 1,
+              scene_count: story.scenes.length
+            },
+            durationMs: Date.now() - startedAt
+          });
+          return result;
+        }
+      }
+
+      const result: StoryGenerateResult = {
+        blocked: true,
+        safe_message: "I made a softer story version so we can keep things safe and fun.",
+        data: this.toGenerateResponse(
+          request,
+          safeFallbackStory(request.length_minutes),
+          "pass",
+          "flagged",
+          buildEngineMetadata(
             plan,
-            request.length_minutes * 60,
-            estimateSceneCount(request.length_minutes)
+            evaluateStoryQuality(
+              safeFallbackStory(request.length_minutes),
+              plan,
+              request.length_minutes * 60,
+              estimateSceneCount(request.length_minutes)
+            )
           )
         )
-      )
-    };
+      };
+      logLifecycle(context, {
+        component: "story_generate",
+        action: "generate_story",
+        phase: "blocked",
+        details: {
+          blocked_reason: "output_moderation"
+        },
+        durationMs: Date.now() - startedAt
+      });
+      return result;
+    } catch (error) {
+      logLifecycle(context, {
+        component: "story_generate",
+        action: "generate_story",
+        phase: "failed",
+        details: {
+          length_minutes: request.length_minutes
+        },
+        durationMs: Date.now() - startedAt,
+        error
+      });
+      throw error;
+    }
   }
 
   async reviseStory(request: ReviseStoryRequest, context?: RequestContext): Promise<StoryReviseResult> {
-    const plan = buildRevisionPlan({
-      titleHint: request.story_title,
-      completedScenes: request.completed_scenes,
-      remainingScenes: request.remaining_scenes,
-      userUpdate: request.user_update
+    const startedAt = Date.now();
+    logLifecycle(context, {
+      component: "story_revise",
+      action: "revise_story",
+      phase: "started",
+      details: {
+        current_scene_index: request.current_scene_index,
+        remaining_scene_count: request.remaining_scenes.length
+      }
     });
 
-    const inputModeration = await this.moderation.moderateText(request.user_update, context);
-    if (inputModeration.flagged || containsBannedTheme(request.user_update)) {
-      return {
-        blocked: true,
-        safe_message: "Let's keep the adventure gentle. Tell me a happy change instead.",
-        data: {
-          story_id: request.story_id,
-          revised_from_scene_index: request.current_scene_index,
-          scenes: request.remaining_scenes,
-          safety: {
-            input_moderation: "flagged",
-            output_moderation: "pass"
-          },
-          engine: buildEngineMetadata(
-            plan,
-            evaluateStoryQuality(
-              { title: request.story_title ?? "StoryTime", scenes: request.remaining_scenes },
-              plan,
-              Math.max(60, request.remaining_scenes.reduce((sum, scene) => sum + scene.duration_sec, 0)),
-              request.remaining_scenes.length
-            )
-          )
-        }
-      };
-    }
+    try {
+      const plan = buildRevisionPlan({
+        titleHint: request.story_title,
+        completedScenes: request.completed_scenes,
+        remainingScenes: request.remaining_scenes,
+        userUpdate: request.user_update
+      });
 
-    let previousQualityIssues: string[] = [];
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const revisedScenes = await this.reviseRemainingScenesFromModel(
-        request,
-        plan,
-        attempt > 0,
-        previousQualityIssues,
-        context
-      );
-      const quality = evaluateStoryQuality(
-        { title: request.story_title ?? "StoryTime", scenes: revisedScenes },
-        plan,
-        Math.max(60, request.remaining_scenes.reduce((sum, scene) => sum + scene.duration_sec, 0)),
-        request.remaining_scenes.length
-      );
-      if (!quality.passed) {
-        previousQualityIssues = quality.issues;
-        if (attempt < 2) {
-          continue;
-        }
-
-        return {
+      const inputModeration = await this.moderation.moderateText(request.user_update, context);
+      if (inputModeration.flagged || containsBannedTheme(request.user_update)) {
+        const result: StoryReviseResult = {
           blocked: true,
-          safe_message: "I kept the finished part of the story and avoided a rough rewrite.",
+          safe_message: "Let's keep the adventure gentle. Tell me a happy change instead.",
           data: {
             story_id: request.story_id,
             revised_from_scene_index: request.current_scene_index,
             scenes: request.remaining_scenes,
             safety: {
-              input_moderation: "pass",
-              output_moderation: "flagged"
+              input_moderation: "flagged",
+              output_moderation: "pass"
             },
             engine: buildEngineMetadata(
               plan,
@@ -307,61 +353,166 @@ export class StoryService {
             )
           }
         };
+        logLifecycle(context, {
+          component: "story_revise",
+          action: "revise_story",
+          phase: "blocked",
+          details: {
+            blocked_reason: "unsafe_input",
+            remaining_scene_count: request.remaining_scenes.length
+          },
+          durationMs: Date.now() - startedAt
+        });
+        return result;
       }
 
-      const outputModeration = await this.moderation.moderateManyText(revisedScenes.map((scene) => scene.text), context);
-      if (!outputModeration.flagged) {
-        const continuity = await this.continuity.enrichEngine(
-          request.story_title ?? "StoryTime",
-          revisedScenes,
+      let previousQualityIssues: string[] = [];
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const revisedScenes = await this.reviseRemainingScenesFromModel(
+          request,
           plan,
+          attempt > 0,
+          previousQualityIssues,
           context
         );
-        return {
-          blocked: false,
-          data: {
-            story_id: request.story_id,
-            revised_from_scene_index: request.current_scene_index,
-            scenes: revisedScenes,
-            safety: {
-              input_moderation: "pass",
-              output_moderation: "pass"
-            },
-            engine: {
-              ...buildEngineMetadata(plan, quality),
-              ...continuity
-            }
-          }
-        };
-      }
-
-      if (attempt < 2) {
-        previousQualityIssues = ["Keep the rewrite calmer and cleaner."];
-      }
-    }
-
-    return {
-      blocked: true,
-      safe_message: "I kept your story safe and continued with the original ending.",
-      data: {
-        story_id: request.story_id,
-        revised_from_scene_index: request.current_scene_index,
-        scenes: request.remaining_scenes,
-        safety: {
-          input_moderation: "pass",
-          output_moderation: "flagged"
-        },
-        engine: buildEngineMetadata(
+        const quality = evaluateStoryQuality(
+          { title: request.story_title ?? "StoryTime", scenes: revisedScenes },
           plan,
-          evaluateStoryQuality(
-            { title: request.story_title ?? "StoryTime", scenes: request.remaining_scenes },
+          Math.max(60, request.remaining_scenes.reduce((sum, scene) => sum + scene.duration_sec, 0)),
+          request.remaining_scenes.length
+        );
+        if (!quality.passed) {
+          previousQualityIssues = quality.issues;
+          if (attempt < 2) {
+            continue;
+          }
+
+          const result: StoryReviseResult = {
+            blocked: true,
+            safe_message: "I kept the finished part of the story and avoided a rough rewrite.",
+            data: {
+              story_id: request.story_id,
+              revised_from_scene_index: request.current_scene_index,
+              scenes: request.remaining_scenes,
+              safety: {
+                input_moderation: "pass",
+                output_moderation: "flagged"
+              },
+              engine: buildEngineMetadata(
+                plan,
+                evaluateStoryQuality(
+                  { title: request.story_title ?? "StoryTime", scenes: request.remaining_scenes },
+                  plan,
+                  Math.max(60, request.remaining_scenes.reduce((sum, scene) => sum + scene.duration_sec, 0)),
+                  request.remaining_scenes.length
+                )
+              )
+            }
+          };
+          logLifecycle(context, {
+            component: "story_revise",
+            action: "revise_story",
+            phase: "blocked",
+            details: {
+              blocked_reason: "quality_gate",
+              quality_attempts: attempt + 1,
+              remaining_scene_count: request.remaining_scenes.length
+            },
+            durationMs: Date.now() - startedAt
+          });
+          return result;
+        }
+
+        const outputModeration = await this.moderation.moderateManyText(revisedScenes.map((scene) => scene.text), context);
+        if (!outputModeration.flagged) {
+          const continuity = await this.continuity.enrichEngine(
+            request.story_title ?? "StoryTime",
+            revisedScenes,
             plan,
-            Math.max(60, request.remaining_scenes.reduce((sum, scene) => sum + scene.duration_sec, 0)),
-            request.remaining_scenes.length
-          )
-        )
+            context
+          );
+          const result: StoryReviseResult = {
+            blocked: false,
+            data: {
+              story_id: request.story_id,
+              revised_from_scene_index: request.current_scene_index,
+              scenes: revisedScenes,
+              safety: {
+                input_moderation: "pass",
+                output_moderation: "pass"
+              },
+              engine: {
+                ...buildEngineMetadata(plan, quality),
+                ...continuity
+              }
+            }
+          };
+          logLifecycle(context, {
+            component: "story_revise",
+            action: "revise_story",
+            phase: "completed",
+            details: {
+              quality_attempts: attempt + 1,
+              revised_scene_count: revisedScenes.length,
+              remaining_scene_count: request.remaining_scenes.length
+            },
+            durationMs: Date.now() - startedAt
+          });
+          return result;
+        }
+
+        if (attempt < 2) {
+          previousQualityIssues = ["Keep the rewrite calmer and cleaner."];
+        }
       }
-    };
+
+      const result: StoryReviseResult = {
+        blocked: true,
+        safe_message: "I kept your story safe and continued with the original ending.",
+        data: {
+          story_id: request.story_id,
+          revised_from_scene_index: request.current_scene_index,
+          scenes: request.remaining_scenes,
+          safety: {
+            input_moderation: "pass",
+            output_moderation: "flagged"
+          },
+          engine: buildEngineMetadata(
+            plan,
+            evaluateStoryQuality(
+              { title: request.story_title ?? "StoryTime", scenes: request.remaining_scenes },
+              plan,
+              Math.max(60, request.remaining_scenes.reduce((sum, scene) => sum + scene.duration_sec, 0)),
+              request.remaining_scenes.length
+            )
+          )
+        }
+      };
+      logLifecycle(context, {
+        component: "story_revise",
+        action: "revise_story",
+        phase: "blocked",
+        details: {
+          blocked_reason: "output_moderation",
+          remaining_scene_count: request.remaining_scenes.length
+        },
+        durationMs: Date.now() - startedAt
+      });
+      return result;
+    } catch (error) {
+      logLifecycle(context, {
+        component: "story_revise",
+        action: "revise_story",
+        phase: "failed",
+        details: {
+          current_scene_index: request.current_scene_index,
+          remaining_scene_count: request.remaining_scenes.length
+        },
+        durationMs: Date.now() - startedAt,
+        error
+      });
+      throw error;
+    }
   }
 
   private async generateStoryFromModel(
@@ -412,7 +563,20 @@ export class StoryService {
           } as any),
         {
           retries: this.env.OPENAI_MAX_RETRIES,
-          baseDelayMs: this.env.OPENAI_RETRY_BASE_MS
+          baseDelayMs: this.env.OPENAI_RETRY_BASE_MS,
+          onRetry: (error, attempt, nextDelayMs) => {
+            logLifecycle(context, {
+              component: "story_generate",
+              action: "generate_story",
+              phase: "retrying",
+              details: {
+                retry_attempt: attempt,
+                retry_in_ms: nextDelayMs,
+                retry_source: "openai"
+              },
+              error
+            });
+          }
         }
       );
       attempts = usedAttempts;
@@ -470,7 +634,20 @@ export class StoryService {
           } as any),
         {
           retries: this.env.OPENAI_MAX_RETRIES,
-          baseDelayMs: this.env.OPENAI_RETRY_BASE_MS
+          baseDelayMs: this.env.OPENAI_RETRY_BASE_MS,
+          onRetry: (error, attempt, nextDelayMs) => {
+            logLifecycle(context, {
+              component: "story_revise",
+              action: "revise_story",
+              phase: "retrying",
+              details: {
+                retry_attempt: attempt,
+                retry_in_ms: nextDelayMs,
+                retry_source: "openai"
+              },
+              error
+            });
+          }
         }
       );
       attempts = usedAttempts;

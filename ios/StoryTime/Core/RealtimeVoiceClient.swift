@@ -9,20 +9,24 @@ protocol RealtimeVoiceControlling: AnyObject {
     var onTranscriptFinal: ((String) -> Void)? { get set }
     var onLevels: ((CGFloat, CGFloat) -> Void)? { get set }
     var onUserSpeechChanged: ((Bool) -> Void)? { get set }
-    var onAssistantResponseCompleted: (() -> Void)? { get set }
+    var onAssistantResponseCompleted: ((String?) -> Void)? { get set }
     var onError: ((String) -> Void)? { get set }
 
     func connect(baseURL: URL, endpointPath: String, session: RealtimeSessionData, installId: String) async throws
-    func speak(text: String) async
+    func speak(text: String, utteranceId: String?) async
     func cancelAssistantSpeech() async
     func disconnect() async
 }
 
 @MainActor
 final class RealtimeVoiceClient: NSObject, ObservableObject, RealtimeVoiceControlling {
-    enum RealtimeError: LocalizedError {
+    enum RealtimeError: LocalizedError, Equatable {
         case notReady
         case invalidBridgeResponse
+        case bridgeReadyTimedOut
+        case bridgeReadyFailed(String)
+        case disconnectedBeforeReady
+        case connectFailed(String)
 
         var errorDescription: String? {
             switch self {
@@ -30,6 +34,14 @@ final class RealtimeVoiceClient: NSObject, ObservableObject, RealtimeVoiceContro
                 return "Realtime bridge is not ready yet."
             case .invalidBridgeResponse:
                 return "Realtime bridge returned an invalid response."
+            case .bridgeReadyTimedOut:
+                return "Realtime bridge did not become ready in time."
+            case .bridgeReadyFailed(let message):
+                return message
+            case .disconnectedBeforeReady:
+                return "Realtime bridge disconnected before it was ready."
+            case .connectFailed(let message):
+                return message
             }
         }
     }
@@ -42,14 +54,16 @@ final class RealtimeVoiceClient: NSObject, ObservableObject, RealtimeVoiceContro
     var onTranscriptFinal: ((String) -> Void)?
     var onLevels: ((CGFloat, CGFloat) -> Void)?
     var onUserSpeechChanged: ((Bool) -> Void)?
-    var onAssistantResponseCompleted: (() -> Void)?
+    var onAssistantResponseCompleted: ((String?) -> Void)?
     var onError: ((String) -> Void)?
 
+    private static let embeddedBridgeOriginURL = URL(string: "https://localhost/")!
     private let bridgeHandlerName = "storytimeRealtime"
     private var bridgeReady = false
-    private var bridgeReadyWaiters: [CheckedContinuation<Void, Never>] = []
+    private var bridgeReadyFailure: RealtimeError?
     private var connectionContinuation: CheckedContinuation<Void, Error>?
     private var messageProxy: WeakScriptMessageHandler?
+    var bridgeReadyTimeoutNanoseconds: UInt64 = 5_000_000_000
     var bridgeCommandSender: ((String, [String: Any]) async throws -> Void)?
 
     override init() {
@@ -75,13 +89,13 @@ final class RealtimeVoiceClient: NSObject, ObservableObject, RealtimeVoiceContro
     }
 
     func connect(baseURL: URL, endpointPath: String, session: RealtimeSessionData, installId: String) async throws {
-        await waitForBridgeReady()
-        let callURL = endpointPath.hasPrefix("http")
-            ? endpointPath
-            : baseURL.appending(path: endpointPath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))).absoluteString
+        if bridgeReadyFailure != nil && !bridgeReady {
+            loadBridge()
+        }
+        try await waitForBridgeReady()
+        let callURL = resolveCallURL(baseURL: baseURL, endpointPath: endpointPath)
 
         let payload: [String: Any] = [
-            "baseURL": baseURL.absoluteString,
             "callURL": callURL,
             "ticket": session.ticket,
             "installId": installId,
@@ -106,9 +120,13 @@ final class RealtimeVoiceClient: NSObject, ObservableObject, RealtimeVoiceContro
         }
     }
 
-    func speak(text: String) async {
+    func speak(text: String, utteranceId: String? = nil) async {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        try? await send(command: "speak", payload: ["text": text])
+        var payload: [String: Any] = ["text": text]
+        if let utteranceId {
+            payload["utteranceId"] = utteranceId
+        }
+        try? await send(command: "speak", payload: payload)
     }
 
     func cancelAssistantSpeech() async {
@@ -121,13 +139,27 @@ final class RealtimeVoiceClient: NSObject, ObservableObject, RealtimeVoiceContro
 
     private func loadBridge() {
         bridgeReady = false
-        webView.loadHTMLString(Self.bridgeHTML, baseURL: URL(string: "https://backend-brown-ten-94.vercel.app"))
+        bridgeReadyFailure = nil
+        connectionContinuation = nil
+        // The bridge HTML is embedded locally. It only needs a secure origin for
+        // getUserMedia/WebRTC; the actual realtime call target comes from payload.callURL.
+        webView.loadHTMLString(Self.bridgeHTML, baseURL: Self.embeddedBridgeOriginURL)
     }
 
-    private func waitForBridgeReady() async {
+    private func waitForBridgeReady() async throws {
         guard !bridgeReady else { return }
-        await withCheckedContinuation { continuation in
-            bridgeReadyWaiters.append(continuation)
+
+        let deadline = Date().addingTimeInterval(Double(bridgeReadyTimeoutNanoseconds) / 1_000_000_000)
+        while !bridgeReady {
+            if let bridgeReadyFailure {
+                throw bridgeReadyFailure
+            }
+
+            if Date() >= deadline {
+                throw RealtimeError.bridgeReadyTimedOut
+            }
+
+            try? await Task.sleep(nanoseconds: 50_000_000)
         }
     }
 
@@ -152,15 +184,27 @@ final class RealtimeVoiceClient: NSObject, ObservableObject, RealtimeVoiceContro
         )
     }
 
+    private func resolveCallURL(baseURL: URL, endpointPath: String) -> String {
+        let trimmedPath = endpointPath.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if let absolute = URL(string: trimmedPath), absolute.scheme != nil {
+            return absolute.absoluteString
+        }
+
+        if let resolved = URL(string: trimmedPath, relativeTo: baseURL)?.absoluteURL {
+            return resolved.absoluteString
+        }
+
+        return baseURL.appending(path: trimmedPath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))).absoluteString
+    }
+
     private func handleBridgeMessage(_ message: [String: Any]) {
         guard let type = message["type"] as? String else { return }
 
         switch type {
         case "bridge_ready":
             bridgeReady = true
-            let waiters = bridgeReadyWaiters
-            bridgeReadyWaiters.removeAll()
-            waiters.forEach { $0.resume(returning: ()) }
+            bridgeReadyFailure = nil
 
         case "connected":
             connectionContinuation?.resume(returning: ())
@@ -168,8 +212,12 @@ final class RealtimeVoiceClient: NSObject, ObservableObject, RealtimeVoiceContro
             onConnected?()
 
         case "disconnected":
-            connectionContinuation?.resume(throwing: RealtimeError.invalidBridgeResponse)
-            connectionContinuation = nil
+            if connectionContinuation != nil {
+                connectionContinuation?.resume(throwing: RealtimeError.invalidBridgeResponse)
+                connectionContinuation = nil
+            } else if !bridgeReady {
+                bridgeReadyFailure = .disconnectedBeforeReady
+            }
             onDisconnected?()
 
         case "levels":
@@ -192,25 +240,41 @@ final class RealtimeVoiceClient: NSObject, ObservableObject, RealtimeVoiceContro
             }
 
         case "assistant_response_completed":
-            onAssistantResponseCompleted?()
+            onAssistantResponseCompleted?(message["utteranceId"] as? String)
 
         case "error":
             let errorMessage = message["message"] as? String ?? "Realtime bridge error"
-            connectionContinuation?.resume(throwing: NSError(domain: "StoryTimeRealtime", code: 1, userInfo: [
-                NSLocalizedDescriptionKey: errorMessage
-            ]))
-            connectionContinuation = nil
+            if connectionContinuation != nil {
+                connectionContinuation?.resume(throwing: RealtimeError.connectFailed(errorMessage))
+                connectionContinuation = nil
+            } else if !bridgeReady {
+                bridgeReadyFailure = .bridgeReadyFailed(errorMessage)
+            }
             onError?(errorMessage)
 
         default:
             break
         }
     }
+
+    private func failBridgeReadiness(_ failure: RealtimeError) {
+        guard !bridgeReady else { return }
+
+        bridgeReadyFailure = failure
+        if let connectionContinuation {
+            self.connectionContinuation = nil
+            connectionContinuation.resume(throwing: failure)
+        }
+        onError?(failure.localizedDescription)
+    }
 }
 
 extension RealtimeVoiceClient {
     func setBridgeReadyForTesting(_ ready: Bool = true) {
         bridgeReady = ready
+        if ready {
+            bridgeReadyFailure = nil
+        }
     }
 
     func handleBridgeMessageForTesting(_ message: [String: Any]) {
@@ -226,6 +290,18 @@ extension RealtimeVoiceClient: WKScriptMessageHandler {
 }
 
 extension RealtimeVoiceClient: WKNavigationDelegate, WKUIDelegate {
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        failBridgeReadiness(.bridgeReadyFailed(error.localizedDescription))
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        failBridgeReadiness(.bridgeReadyFailed(error.localizedDescription))
+    }
+
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        failBridgeReadiness(.bridgeReadyFailed("Realtime bridge stopped before it became ready."))
+    }
+
     func webView(
         _ webView: WKWebView,
         requestMediaCapturePermissionFor origin: WKSecurityOrigin,
@@ -297,6 +373,8 @@ private extension RealtimeVoiceClient {
             levelTimer: null,
             partialTranscript: "",
             userSpeaking: false,
+            pendingUtteranceIds: [],
+            responseUtteranceMap: new Map(),
 
             async receiveCommand(command, payload) {
               switch (command) {
@@ -417,6 +495,7 @@ private extension RealtimeVoiceClient {
 
               const text = (payload?.text || "").trim();
               if (!text) return;
+              this.pendingUtteranceIds.push(typeof payload?.utteranceId === "string" ? payload.utteranceId : null);
 
               this.dc.send(JSON.stringify({
                 type: "response.create",
@@ -460,10 +539,22 @@ private extension RealtimeVoiceClient {
               this.remoteAnalyser = null;
               this.partialTranscript = "";
               this.userSpeaking = false;
+              this.pendingUtteranceIds = [];
+              this.responseUtteranceMap.clear();
             },
 
             handleRealtimeEvent(event) {
               switch (event.type) {
+                case "response.created": {
+                  const responseId = event.response?.id;
+                  const utteranceId = this.pendingUtteranceIds.length > 0
+                    ? this.pendingUtteranceIds.shift()
+                    : null;
+                  if (responseId) {
+                    this.responseUtteranceMap.set(responseId, utteranceId ?? null);
+                  }
+                  break;
+                }
                 case "conversation.item.input_audio_transcription.delta":
                   this.partialTranscript = `${this.partialTranscript}${event.delta || ""}`;
                   post({ type: "transcript_partial", text: this.partialTranscript });
@@ -474,9 +565,18 @@ private extension RealtimeVoiceClient {
                     post({ type: "transcript_final", text: event.transcript.trim() });
                   }
                   break;
-                case "response.done":
-                  post({ type: "assistant_response_completed" });
+                case "response.done": {
+                  const responseId = event.response?.id;
+                  let utteranceId = null;
+                  if (responseId && this.responseUtteranceMap.has(responseId)) {
+                    utteranceId = this.responseUtteranceMap.get(responseId) ?? null;
+                    this.responseUtteranceMap.delete(responseId);
+                  } else if (this.pendingUtteranceIds.length > 0) {
+                    utteranceId = this.pendingUtteranceIds.shift();
+                  }
+                  post({ type: "assistant_response_completed", utteranceId });
                   break;
+                }
                 case "error":
                   post({ type: "error", message: event.error?.message || "Realtime API error." });
                   break;

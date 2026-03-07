@@ -13,8 +13,12 @@ final class PracticeSessionViewModelTests: XCTestCase {
             "storytime.continuity.memory.v1",
             "com.storytime.install-id",
             "com.storytime.session-token",
-            "com.storytime.session-expiry"
+            "com.storytime.session-expiry",
+            "com.storytime.session-id",
+            "com.storytime.session-region"
         ].forEach { defaults.removeObject(forKey: $0) }
+        StoryLibraryV2Storage(storageURL: StoryLibraryV2Storage.defaultStorageURL()).clear()
+        StartupURLProtocolStub.reset()
         await ContinuityMemoryStore.shared.clearAll()
     }
 
@@ -39,10 +43,416 @@ final class PracticeSessionViewModelTests: XCTestCase {
         XCTAssertEqual(api.fetchVoicesCallCount, 1)
         XCTAssertEqual(api.createRealtimeSessionCallCount, 1)
         XCTAssertEqual(voice.connectCallCount, 1)
-        XCTAssertEqual(viewModel.phase, .gatheringInput)
+        XCTAssertEqual(viewModel.phase, .ready)
         XCTAssertEqual(voice.spokenTexts.count, 1)
         XCTAssertTrue(voice.spokenTexts[0].contains("Tell me what kind"))
         XCTAssertEqual(viewModel.statusMessage, "Listening...")
+    }
+
+    func testStartSessionWithRealAPIClientExecutesFullStartupContractSequence() async throws {
+        let store = StoryLibraryStore()
+        let plan = makePlan(childProfileId: try XCTUnwrap(store.activeProfile?.id))
+        let session = makeStartupSession()
+        let baseURL = URL(string: "https://backend.example.com/")!
+        var requestPaths: [String] = []
+
+        StartupURLProtocolStub.handler = { request in
+            let url = try XCTUnwrap(request.url)
+            requestPaths.append(url.path)
+            XCTAssertEqual(request.value(forHTTPHeaderField: "x-storytime-install-id"), "install-startup")
+
+            switch url.path {
+            case "/health":
+                XCTAssertNil(request.value(forHTTPHeaderField: "x-storytime-session"))
+                return try Self.startupHTTPResponse(url: url, statusCode: 200, json: ["ok": true])
+
+            case "/v1/session/identity":
+                XCTAssertEqual(request.httpMethod, "POST")
+                XCTAssertNil(request.value(forHTTPHeaderField: "x-storytime-session"))
+                return try Self.startupHTTPResponse(
+                    url: url,
+                    statusCode: 200,
+                    json: ["session_id": "session-startup-1"],
+                    headers: [
+                        "x-storytime-session": "startup-session-token",
+                        "x-storytime-session-expires-at": String(Date().addingTimeInterval(300).timeIntervalSince1970)
+                    ]
+                )
+
+            case "/v1/voices":
+                XCTAssertEqual(request.value(forHTTPHeaderField: "x-storytime-session"), "startup-session-token")
+                return try Self.startupHTTPResponse(
+                    url: url,
+                    statusCode: 200,
+                    json: ["language": "en", "voices": ["alloy", "verse"]]
+                )
+
+            case "/v1/realtime/session":
+                XCTAssertEqual(request.value(forHTTPHeaderField: "x-storytime-session"), "startup-session-token")
+                let body = try Self.startupRequestBody(from: request)
+                let payload = try XCTUnwrap(
+                    JSONSerialization.jsonObject(with: body) as? [String: Any]
+                )
+                XCTAssertEqual(payload["child_profile_id"] as? String, plan.childProfileId.uuidString)
+                XCTAssertEqual(payload["voice"] as? String, "alloy")
+                XCTAssertEqual(payload["region"] as? String, "US")
+                return try Self.startupHTTPResponse(
+                    url: url,
+                    statusCode: 200,
+                    json: [
+                        "session": [
+                            "ticket": "ticket-startup",
+                            "expires_at": 120,
+                            "model": "gpt-realtime",
+                            "voice": "alloy",
+                            "input_audio_transcription_model": "gpt-4o-mini-transcribe"
+                        ],
+                        "transport": "webrtc",
+                        "endpoint": "/v1/realtime/call"
+                    ]
+                )
+
+            default:
+                XCTFail("Unexpected startup request: \(url.absoluteString)")
+                return try Self.startupHTTPResponse(url: url, statusCode: 500, json: ["error": "unexpected"])
+            }
+        }
+
+        let api = APIClient(baseURLs: [baseURL], session: session, installId: "install-startup")
+        let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [1])
+        let viewModel = PracticeSessionViewModel(
+            plan: plan,
+            sourceSeries: nil,
+            store: store,
+            api: api,
+            voiceCore: voice,
+            forceMockVoiceCore: false
+        )
+
+        await viewModel.startSession()
+
+        XCTAssertEqual(
+            requestPaths,
+            ["/health", "/v1/session/identity", "/v1/voices", "/v1/realtime/session"]
+        )
+        XCTAssertEqual(voice.connectCallCount, 1)
+        XCTAssertEqual(viewModel.phase, .ready)
+        XCTAssertEqual(viewModel.statusMessage, "Listening...")
+        XCTAssertEqual(viewModel.voices, ["alloy", "verse"])
+        XCTAssertEqual(viewModel.selectedVoice, "alloy")
+        XCTAssertEqual(voice.spokenTexts.count, 1)
+        XCTAssertTrue(try XCTUnwrap(voice.spokenTexts.first).contains("Tell me what kind"))
+    }
+
+    func testStartSessionUsesResolvedBackendRegionDuringRealtimeStartup() async throws {
+        let store = StoryLibraryStore()
+        let plan = makePlan(childProfileId: try XCTUnwrap(store.activeProfile?.id))
+        let session = makeStartupSession()
+        let baseURL = URL(string: "https://backend.example.com/")!
+
+        StartupURLProtocolStub.handler = { request in
+            let url = try XCTUnwrap(request.url)
+
+            switch url.path {
+            case "/health":
+                XCTAssertNil(request.value(forHTTPHeaderField: "x-storytime-region"))
+                return try Self.startupHTTPResponse(
+                    url: url,
+                    statusCode: 200,
+                    json: [
+                        "ok": true,
+                        "default_region": "EU",
+                        "allowed_regions": ["US", "EU"]
+                    ]
+                )
+
+            case "/v1/session/identity":
+                XCTAssertEqual(request.value(forHTTPHeaderField: "x-storytime-region"), "EU")
+                XCTAssertNil(request.value(forHTTPHeaderField: "x-storytime-session"))
+                return try Self.startupHTTPResponse(
+                    url: url,
+                    statusCode: 200,
+                    json: ["session_id": "session-region-1", "region": "EU"],
+                    headers: [
+                        "x-storytime-region": "EU",
+                        "x-storytime-session": "region-session-token",
+                        "x-storytime-session-expires-at": String(Date().addingTimeInterval(300).timeIntervalSince1970)
+                    ]
+                )
+
+            case "/v1/voices":
+                XCTAssertEqual(request.value(forHTTPHeaderField: "x-storytime-region"), "EU")
+                XCTAssertEqual(request.value(forHTTPHeaderField: "x-storytime-session"), "region-session-token")
+                return try Self.startupHTTPResponse(
+                    url: url,
+                    statusCode: 200,
+                    json: ["language": "en", "voices": ["alloy", "verse"], "regions": ["US", "EU"]]
+                )
+
+            case "/v1/realtime/session":
+                XCTAssertEqual(request.value(forHTTPHeaderField: "x-storytime-region"), "EU")
+                XCTAssertEqual(request.value(forHTTPHeaderField: "x-storytime-session"), "region-session-token")
+                let body = try Self.startupRequestBody(from: request)
+                let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+                XCTAssertEqual(payload["region"] as? String, "EU")
+                return try Self.startupHTTPResponse(
+                    url: url,
+                    statusCode: 200,
+                    json: [
+                        "session": [
+                            "ticket": "ticket-region",
+                            "expires_at": 120,
+                            "model": "gpt-realtime",
+                            "voice": "alloy",
+                            "input_audio_transcription_model": "gpt-4o-mini-transcribe"
+                        ],
+                        "transport": "webrtc",
+                        "endpoint": "/v1/realtime/call"
+                    ]
+                )
+
+            default:
+                XCTFail("Unexpected startup request: \(url.absoluteString)")
+                return try Self.startupHTTPResponse(url: url, statusCode: 500, json: ["error": "unexpected"])
+            }
+        }
+
+        let api = APIClient(baseURLs: [baseURL], session: session, installId: "install-startup")
+        let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [1])
+        let viewModel = PracticeSessionViewModel(
+            plan: plan,
+            sourceSeries: nil,
+            store: store,
+            api: api,
+            voiceCore: voice,
+            forceMockVoiceCore: false
+        )
+
+        await viewModel.startSession()
+
+        XCTAssertEqual(viewModel.phase, .ready)
+        XCTAssertEqual(api.resolvedRegion, .eu)
+        XCTAssertEqual(AppSession.currentRegion, .eu)
+        XCTAssertEqual(voice.connectCallCount, 1)
+    }
+
+    func testStartSessionRefreshesStaleSessionTokenBeforeRealtimeStartupFails() async throws {
+        let defaults = UserDefaults.standard
+        defaults.set("stale-startup-token", forKey: "com.storytime.session-token")
+        defaults.set(Date().addingTimeInterval(300).timeIntervalSince1970, forKey: "com.storytime.session-expiry")
+        defaults.set("stale-startup-session", forKey: "com.storytime.session-id")
+
+        let store = StoryLibraryStore()
+        let plan = makePlan(childProfileId: try XCTUnwrap(store.activeProfile?.id))
+        let session = makeStartupSession()
+        let baseURL = URL(string: "https://backend.example.com/")!
+        var requestPaths: [String] = []
+        var realtimeAttempts = 0
+
+        StartupURLProtocolStub.handler = { request in
+            let url = try XCTUnwrap(request.url)
+            requestPaths.append(url.path)
+            XCTAssertEqual(request.value(forHTTPHeaderField: "x-storytime-install-id"), "install-startup")
+
+            switch url.path {
+            case "/health":
+                XCTAssertEqual(request.value(forHTTPHeaderField: "x-storytime-session"), "stale-startup-token")
+                return try Self.startupHTTPResponse(url: url, statusCode: 200, json: ["ok": true])
+
+            case "/v1/voices":
+                XCTAssertEqual(request.value(forHTTPHeaderField: "x-storytime-session"), "stale-startup-token")
+                return try Self.startupHTTPResponse(
+                    url: url,
+                    statusCode: 200,
+                    json: ["language": "en", "voices": ["alloy", "verse"]]
+                )
+
+            case "/v1/realtime/session":
+                realtimeAttempts += 1
+                if realtimeAttempts == 1 {
+                    XCTAssertEqual(request.value(forHTTPHeaderField: "x-storytime-session"), "stale-startup-token")
+                    return try Self.startupHTTPResponse(
+                        url: url,
+                        statusCode: 401,
+                        json: [
+                            "error": "invalid_session_token",
+                            "message": "Invalid signed token",
+                            "request_id": "req-startup-stale"
+                        ]
+                    )
+                }
+
+                XCTAssertEqual(request.value(forHTTPHeaderField: "x-storytime-session"), "fresh-startup-token")
+                return try Self.startupHTTPResponse(
+                    url: url,
+                    statusCode: 200,
+                    json: [
+                        "session": [
+                            "ticket": "ticket-startup-refresh",
+                            "expires_at": 120,
+                            "model": "gpt-realtime",
+                            "voice": "alloy",
+                            "input_audio_transcription_model": "gpt-4o-mini-transcribe"
+                        ],
+                        "transport": "webrtc",
+                        "endpoint": "/v1/realtime/call"
+                    ]
+                )
+
+            case "/v1/session/identity":
+                XCTAssertNil(request.value(forHTTPHeaderField: "x-storytime-session"))
+                return try Self.startupHTTPResponse(
+                    url: url,
+                    statusCode: 200,
+                    json: ["session_id": "fresh-startup-session"],
+                    headers: [
+                        "x-storytime-session": "fresh-startup-token",
+                        "x-storytime-session-expires-at": String(Date().addingTimeInterval(300).timeIntervalSince1970)
+                    ]
+                )
+
+            default:
+                XCTFail("Unexpected startup request: \(url.absoluteString)")
+                return try Self.startupHTTPResponse(url: url, statusCode: 500, json: ["error": "unexpected"])
+            }
+        }
+
+        let api = APIClient(baseURLs: [baseURL], session: session, installId: "install-startup")
+        let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [1])
+        let viewModel = PracticeSessionViewModel(
+            plan: plan,
+            sourceSeries: nil,
+            store: store,
+            api: api,
+            voiceCore: voice,
+            forceMockVoiceCore: false
+        )
+
+        await viewModel.startSession()
+
+        XCTAssertEqual(
+            requestPaths,
+            ["/health", "/v1/voices", "/v1/realtime/session", "/v1/session/identity", "/v1/realtime/session"]
+        )
+        XCTAssertEqual(viewModel.phase, .ready)
+        XCTAssertEqual(viewModel.statusMessage, "Listening...")
+        XCTAssertEqual(voice.connectCallCount, 1)
+        XCTAssertEqual(AppSession.currentToken, "fresh-startup-token")
+        XCTAssertEqual(AppSession.currentSessionId, "fresh-startup-session")
+    }
+
+    func testTraceEventsCaptureSessionLifecycleWithRequestAndSessionCorrelation() async throws {
+        let api = MockAPIClient()
+        api.discoveryResponses = [
+            DiscoveryEnvelope(
+                blocked: false,
+                safeMessage: nil,
+                data: DiscoveryData(
+                    slotState: DiscoverySlotState(
+                        theme: "a lantern parade",
+                        characters: ["Bunny", "Fox"],
+                        setting: "the moonlit meadow",
+                        tone: "cozy",
+                        episodeIntent: "a happy standalone adventure"
+                    ),
+                    questionCount: 1,
+                    readyToGenerate: true,
+                    assistantMessage: "I have enough details now.",
+                    transcript: "Tell a lantern parade story"
+                )
+            )
+        ]
+        api.generateStoryResult = makeGeneratedEnvelope(title: "Lantern Parade", sceneCount: 1)
+        api.reviseStoryResult = makeRevisedEnvelope(
+            scenes: [
+                StoryScene(
+                    sceneId: "1",
+                    text: "Bunny and Fox added a rainbow lantern to the parade.",
+                    durationSec: 1
+                )
+            ]
+        )
+
+        let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [1])
+        let store = StoryLibraryStore()
+        let plan = makePlan(childProfileId: try XCTUnwrap(store.activeProfile?.id))
+        let viewModel = PracticeSessionViewModel(
+            plan: plan,
+            sourceSeries: nil,
+            store: store,
+            api: api,
+            voiceCore: voice,
+            forceMockVoiceCore: false
+        )
+
+        await viewModel.startSession()
+        voice.emitTranscriptFinal("Tell a lantern parade story")
+        await waitUntil { viewModel.phase == .narrating && api.generateRequests.count == 1 }
+
+        voice.emitTranscriptFinal("Please add a rainbow lantern")
+        await waitUntil {
+            viewModel.phase == .narrating &&
+            api.reviseRequests.count == 1 &&
+            viewModel.traceEvents.contains { $0.kind == .revision }
+        }
+
+        let finalUtteranceID = try XCTUnwrap(voice.spokenUtteranceIDs.compactMap { $0 }.last)
+        voice.emitAssistantResponseCompleted(finalUtteranceID)
+        await waitUntil { viewModel.phase == .completed }
+
+        XCTAssertEqual(viewModel.traceEvents.map(\.kind), [.startup, .discovery, .generation, .revision, .completion])
+        XCTAssertEqual(viewModel.traceEvents.map(\.source), ["connected", "readyToGenerate", "resolved", "resolved", "completed"])
+        XCTAssertEqual(viewModel.traceEvents.map(\.apiOperation), [.realtimeSession, .storyDiscovery, .storyGeneration, .storyRevision, nil])
+        XCTAssertTrue(viewModel.traceEvents.dropLast().allSatisfy { $0.requestId?.hasPrefix("mock-") == true })
+        XCTAssertTrue(viewModel.traceEvents.allSatisfy { $0.sessionId == "mock-session-123" })
+        XCTAssertTrue(viewModel.traceEvents.allSatisfy { !$0.source.contains("lantern parade") })
+        XCTAssertTrue(viewModel.traceEvents.allSatisfy { !$0.source.contains("rainbow lantern") })
+    }
+
+    func testCriticalPathAcceptanceHappyPathExercisesFullCoordinatorLifecycle() async throws {
+        let result = try await runCriticalPathHappyPathAcceptance()
+
+        XCTAssertEqual(result.api.prepareConnectionCallCount, 1)
+        XCTAssertEqual(result.api.fetchVoicesCallCount, 1)
+        XCTAssertEqual(result.api.createRealtimeSessionCallCount, 1)
+        XCTAssertEqual(result.api.discoveryRequests.count, 1)
+        XCTAssertEqual(result.api.generateRequests.count, 1)
+        XCTAssertEqual(result.api.reviseRequests.count, 1)
+        XCTAssertEqual(result.voice.connectCallCount, 1)
+        XCTAssertEqual(result.voice.cancelCallCount, 1)
+        XCTAssertEqual(result.viewModel.phase, .completed)
+        XCTAssertNil(result.viewModel.lastAppError)
+        XCTAssertEqual(result.viewModel.errorMessage, "")
+        XCTAssertEqual(
+            result.viewModel.traceEvents.map(\.kind),
+            [.startup, .discovery, .generation, .revision, .completion]
+        )
+        XCTAssertTrue(result.voice.spokenTexts.contains(result.revisedScenes[0].text))
+        XCTAssertTrue(result.voice.spokenTexts.contains(result.revisedScenes[1].text))
+
+        let reviseRequest = try XCTUnwrap(result.api.reviseRequests.first)
+        XCTAssertEqual(reviseRequest.completedScenes.count, 1)
+        XCTAssertEqual(reviseRequest.remainingScenes.count, 2)
+        XCTAssertEqual(reviseRequest.userUpdate, result.revisionText)
+    }
+
+    func testCriticalPathAcceptanceHappyPathPersistsRevisedStoryAcrossReload() async throws {
+        let result = try await runCriticalPathHappyPathAcceptance()
+
+        XCTAssertEqual(result.store.series.count, 1)
+        XCTAssertEqual(result.savedSeries.childProfileId, result.plan.childProfileId)
+        XCTAssertEqual(result.savedSeries.episodes.count, 1)
+        XCTAssertEqual(result.savedSeries.latestEpisode?.title, "Picnic Clues")
+        XCTAssertEqual(result.savedSeries.latestEpisode?.scenes.map(\.text), result.expectedSceneTexts)
+
+        let reloadedStore = StoryLibraryStore()
+        reloadedStore.selectActiveProfile(result.plan.childProfileId)
+        let reloadedSeries = try XCTUnwrap(reloadedStore.seriesById(result.savedSeries.id))
+
+        XCTAssertEqual(reloadedStore.visibleSeries.map(\.id), [result.savedSeries.id])
+        XCTAssertEqual(reloadedSeries.childProfileId, result.plan.childProfileId)
+        XCTAssertEqual(reloadedSeries.latestEpisode?.title, "Picnic Clues")
+        XCTAssertEqual(reloadedSeries.latestEpisode?.scenes.map(\.text), result.expectedSceneTexts)
     }
 
     func testDiscoveryUsesActualTranscriptAndGeneratesStory() async throws {
@@ -92,6 +502,133 @@ final class PracticeSessionViewModelTests: XCTestCase {
         XCTAssertEqual(api.generateRequests.first?.storyBrief.tone, "cozy, gentle and playful")
         XCTAssertEqual(viewModel.phase, .narrating)
         XCTAssertEqual(viewModel.generatedStory?.title, "Lantern Trail")
+    }
+
+    func testCanonicalSessionStateProgressionStaysAlignedWithDerivedPhase() async throws {
+        let api = MockAPIClient()
+        api.discoveryDelayNanoseconds = 120_000_000
+        api.generateStoryDelayNanoseconds = 120_000_000
+        api.discoveryResponses = [
+            DiscoveryEnvelope(
+                blocked: false,
+                safeMessage: nil,
+                data: DiscoveryData(
+                    slotState: DiscoverySlotState(
+                        theme: "a lantern race",
+                        characters: ["Bunny", "Fox"],
+                        setting: "the moonlit park",
+                        tone: "cozy",
+                        episodeIntent: "a happy standalone adventure"
+                    ),
+                    questionCount: 1,
+                    readyToGenerate: true,
+                    assistantMessage: "I have enough details now.",
+                    transcript: "Tell a lantern race story"
+                )
+            )
+        ]
+        api.generateStoryResult = makeGeneratedEnvelope(title: "Lantern Race", sceneCount: 2)
+
+        let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [1])
+        let store = StoryLibraryStore()
+        let plan = makePlan(childProfileId: try XCTUnwrap(store.activeProfile?.id))
+        let viewModel = PracticeSessionViewModel(
+            plan: plan,
+            sourceSeries: nil,
+            store: store,
+            api: api,
+            voiceCore: voice,
+            forceMockVoiceCore: false
+        )
+
+        await viewModel.startSession()
+        XCTAssertEqual(viewModel.sessionState, .ready(VoiceSessionReadyState(mode: .discovery(stepNumber: 1))))
+        XCTAssertEqual(viewModel.phase, .ready)
+
+        voice.emitTranscriptFinal("Tell a lantern race story")
+
+        await waitUntil {
+            if case .discovering = viewModel.sessionState {
+                return true
+            }
+            return false
+        }
+        XCTAssertEqual(viewModel.phase, .discovering)
+
+        await waitUntil {
+            if case .generating = viewModel.sessionState {
+                return true
+            }
+            return false
+        }
+        XCTAssertEqual(viewModel.phase, .generating)
+
+        await waitUntil {
+            if case .narrating(sceneIndex: 0) = viewModel.sessionState {
+                return true
+            }
+            return false
+        }
+        XCTAssertEqual(viewModel.phase, .narrating)
+        XCTAssertEqual(viewModel.currentSceneIndex, 0)
+    }
+
+    func testGenerationDoesNotStartUntilDiscoveryResolves() async throws {
+        let api = MockAPIClient()
+        api.discoveryDelayNanoseconds = 250_000_000
+        api.discoveryResponses = [
+            DiscoveryEnvelope(
+                blocked: false,
+                safeMessage: nil,
+                data: DiscoveryData(
+                    slotState: DiscoverySlotState(
+                        theme: "a lantern race",
+                        characters: ["Bunny", "Fox"],
+                        setting: "the moonlit park",
+                        tone: "cozy",
+                        episodeIntent: "a happy standalone adventure"
+                    ),
+                    questionCount: 1,
+                    readyToGenerate: true,
+                    assistantMessage: "I have enough details now.",
+                    transcript: "Tell a lantern race story"
+                )
+            )
+        ]
+        api.generateStoryResult = makeGeneratedEnvelope(title: "Lantern Race", sceneCount: 2)
+
+        let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [1])
+        let store = StoryLibraryStore()
+        let plan = makePlan(childProfileId: try XCTUnwrap(store.activeProfile?.id))
+        let viewModel = PracticeSessionViewModel(
+            plan: plan,
+            sourceSeries: nil,
+            store: store,
+            api: api,
+            voiceCore: voice,
+            forceMockVoiceCore: false
+        )
+
+        await viewModel.startSession()
+        voice.emitTranscriptFinal("Tell a lantern race story")
+
+        await waitUntil {
+            if case .discovering = viewModel.sessionState {
+                return true
+            }
+            return false
+        }
+
+        try? await Task.sleep(nanoseconds: 80_000_000)
+
+        XCTAssertEqual(api.discoveryRequests.count, 1)
+        XCTAssertEqual(api.generateRequests.count, 0)
+        XCTAssertEqual(viewModel.phase, .discovering)
+
+        await waitUntil { api.generateRequests.count == 1 && viewModel.generatedStory != nil }
+
+        XCTAssertEqual(viewModel.phase, .narrating)
+        XCTAssertEqual(viewModel.generatedStory?.title, "Lantern Race")
     }
 
     func testInterruptionCancelsAssistantAndRevisesOnlyFutureScenes() async throws {
@@ -144,7 +681,7 @@ final class PracticeSessionViewModelTests: XCTestCase {
         XCTAssertEqual(reviseRequest.completedScenes.count, 1)
         XCTAssertEqual(reviseRequest.remainingScenes.count, 2)
         XCTAssertEqual(reviseRequest.userUpdate, "Please make the ending funnier and add a rainbow clue")
-        XCTAssertGreaterThanOrEqual(voice.cancelCallCount, 1)
+        XCTAssertEqual(voice.cancelCallCount, 1)
         XCTAssertEqual(viewModel.generatedStory?.scenes[0].sceneId, "1")
         XCTAssertEqual(viewModel.generatedStory?.scenes.count, 3)
     }
@@ -205,6 +742,7 @@ final class PracticeSessionViewModelTests: XCTestCase {
         await waitUntil { viewModel.phase == .narrating && viewModel.currentSceneIndex == 1 && voice.spokenTexts.count >= 3 }
 
         voice.emitTranscriptFinal("Add a rainbow clue")
+        await waitUntil { viewModel.phase == .revising }
         try? await Task.sleep(nanoseconds: 60_000_000)
         voice.emitTranscriptFinal("Also make it extra cozy")
 
@@ -213,6 +751,619 @@ final class PracticeSessionViewModelTests: XCTestCase {
         XCTAssertEqual(api.maxConcurrentRevises, 1)
         XCTAssertEqual(api.reviseRequests.map(\.userUpdate), ["Add a rainbow clue", "Also make it extra cozy"])
         XCTAssertTrue(viewModel.generatedStory?.scenes[1].text.contains("moonbeam slide") == true)
+    }
+
+    func testStartSessionWhileNarratingIsRejectedWithStateContext() async throws {
+        let api = MockAPIClient()
+        api.discoveryResponses = [
+            DiscoveryEnvelope(
+                blocked: false,
+                safeMessage: nil,
+                data: DiscoveryData(
+                    slotState: DiscoverySlotState(
+                        theme: "a moon parade",
+                        characters: ["Bunny", "Fox"],
+                        setting: "the lantern park",
+                        tone: "cozy",
+                        episodeIntent: "a happy standalone adventure"
+                    ),
+                    questionCount: 1,
+                    readyToGenerate: true,
+                    assistantMessage: "I have enough details now.",
+                    transcript: "Tell a moon parade story"
+                )
+            )
+        ]
+        api.generateStoryResult = makeGeneratedEnvelope(title: "Moon Parade", sceneCount: 2)
+
+        let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [1])
+        let store = StoryLibraryStore()
+        let plan = makePlan(childProfileId: try XCTUnwrap(store.activeProfile?.id))
+        let viewModel = PracticeSessionViewModel(
+            plan: plan,
+            sourceSeries: nil,
+            store: store,
+            api: api,
+            voiceCore: voice,
+            forceMockVoiceCore: false
+        )
+
+        await viewModel.startSession()
+        voice.emitTranscriptFinal("Tell a moon parade story")
+
+        await waitUntil {
+            if case .narrating(sceneIndex: 0) = viewModel.sessionState {
+                return true
+            }
+            return false
+        }
+
+        let invalidCount = viewModel.invalidTransitionMessages.count
+        await viewModel.startSession()
+
+        XCTAssertEqual(viewModel.sessionState, .narrating(sceneIndex: 0))
+        XCTAssertEqual(api.prepareConnectionCallCount, 1)
+        XCTAssertEqual(viewModel.invalidTransitionMessages.count, invalidCount + 1)
+        XCTAssertEqual(
+            viewModel.invalidTransitionMessages.last,
+            "Rejected startRequested while in narrating(sceneIndex: 0)"
+        )
+    }
+
+    func testStaleDiscoveryResultAfterFailureIsIgnored() async throws {
+        let api = MockAPIClient()
+        api.discoveryDelayNanoseconds = 250_000_000
+        api.discoveryResponses = [
+            DiscoveryEnvelope(
+                blocked: false,
+                safeMessage: nil,
+                data: DiscoveryData(
+                    slotState: DiscoverySlotState(
+                        theme: "a lantern race",
+                        characters: ["Bunny", "Fox"],
+                        setting: "the moonlit park",
+                        tone: "cozy",
+                        episodeIntent: "a happy standalone adventure"
+                    ),
+                    questionCount: 1,
+                    readyToGenerate: true,
+                    assistantMessage: "I have enough details now.",
+                    transcript: "Tell a lantern race story"
+                )
+            )
+        ]
+        api.generateStoryResult = makeGeneratedEnvelope(title: "Lantern Race", sceneCount: 2)
+
+        let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [1])
+        let store = StoryLibraryStore()
+        let plan = makePlan(childProfileId: try XCTUnwrap(store.activeProfile?.id))
+        let viewModel = PracticeSessionViewModel(
+            plan: plan,
+            sourceSeries: nil,
+            store: store,
+            api: api,
+            voiceCore: voice,
+            forceMockVoiceCore: false
+        )
+
+        await viewModel.startSession()
+        voice.emitTranscriptFinal("Tell a lantern race story")
+
+        await waitUntil {
+            if case .discovering = viewModel.sessionState {
+                return true
+            }
+            return false
+        }
+
+        voice.emitDisconnected()
+        await waitUntil { viewModel.phase == .failed }
+        await waitUntil {
+            viewModel.invalidTransitionMessages.contains {
+                $0.contains("Ignored stale discovery result")
+            }
+        }
+
+        XCTAssertEqual(api.generateRequests.count, 0)
+        XCTAssertEqual(viewModel.phase, .failed)
+        XCTAssertNil(viewModel.generatedStory)
+    }
+
+    func testNormalSessionProgressionCompletesAndSavesOnce() async throws {
+        let api = MockAPIClient()
+        api.discoveryResponses = [
+            DiscoveryEnvelope(
+                blocked: false,
+                safeMessage: nil,
+                data: DiscoveryData(
+                    slotState: DiscoverySlotState(
+                        theme: "a moonlight picnic",
+                        characters: ["Bunny", "Fox"],
+                        setting: "the lantern park",
+                        tone: "cozy",
+                        episodeIntent: "a happy standalone adventure"
+                    ),
+                    questionCount: 1,
+                    readyToGenerate: true,
+                    assistantMessage: "I have enough details now.",
+                    transcript: "Tell a moonlight picnic story"
+                )
+            )
+        ]
+        api.generateStoryResult = makeGeneratedEnvelope(title: "Moonlight Picnic", sceneCount: 1)
+
+        let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [1, 2])
+        let store = StoryLibraryStore()
+        let plan = makePlan(childProfileId: try XCTUnwrap(store.activeProfile?.id))
+        let viewModel = PracticeSessionViewModel(
+            plan: plan,
+            sourceSeries: nil,
+            store: store,
+            api: api,
+            voiceCore: voice,
+            forceMockVoiceCore: false
+        )
+
+        await viewModel.startSession()
+        XCTAssertEqual(store.series.count, 0)
+
+        voice.emitTranscriptFinal("Tell a moonlight picnic story")
+
+        await waitUntil { viewModel.phase == .completed }
+
+        XCTAssertEqual(store.series.count, 1)
+        XCTAssertEqual(store.series.first?.episodes.count, 1)
+        XCTAssertEqual(viewModel.statusMessage, "Story complete")
+    }
+
+    func testInterruptionDuringGenerationIsRejectedDeterministically() async throws {
+        let api = MockAPIClient()
+        api.discoveryResponses = [
+            DiscoveryEnvelope(
+                blocked: false,
+                safeMessage: nil,
+                data: DiscoveryData(
+                    slotState: DiscoverySlotState(
+                        theme: "a dragon picnic",
+                        characters: ["Bunny", "Dragon"],
+                        setting: "the fountain park",
+                        tone: "funny",
+                        episodeIntent: "a happy standalone adventure"
+                    ),
+                    questionCount: 1,
+                    readyToGenerate: true,
+                    assistantMessage: "I have enough details now.",
+                    transcript: "Bunny and Dragon should have a picnic adventure"
+                )
+            )
+        ]
+        api.generateStoryDelayNanoseconds = 250_000_000
+        api.generateStoryResult = makeGeneratedEnvelope(title: "Picnic Clues", sceneCount: 3)
+
+        let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [1])
+        let store = StoryLibraryStore()
+        let plan = makePlan(childProfileId: try XCTUnwrap(store.activeProfile?.id))
+        let viewModel = PracticeSessionViewModel(
+            plan: plan,
+            sourceSeries: nil,
+            store: store,
+            api: api,
+            voiceCore: voice,
+            forceMockVoiceCore: false
+        )
+
+        await viewModel.startSession()
+        voice.emitTranscriptFinal("Bunny and Dragon should have a picnic adventure")
+        await waitUntil { viewModel.phase == .generating }
+
+        let invalidCount = viewModel.invalidTransitionMessages.count
+        voice.emitTranscriptFinal("Actually make it sillier")
+
+        await waitUntil { viewModel.invalidTransitionMessages.count > invalidCount }
+
+        XCTAssertEqual(api.reviseRequests.count, 0)
+        XCTAssertEqual(api.generateRequests.count, 1)
+        XCTAssertTrue(viewModel.invalidTransitionMessages.last?.contains("transcriptFinal") == true)
+    }
+
+    func testTranscriptStartedDuringGenerationIsRejectedAfterNarrationBegins() async throws {
+        let api = MockAPIClient()
+        api.discoveryResponses = [
+            DiscoveryEnvelope(
+                blocked: false,
+                safeMessage: nil,
+                data: DiscoveryData(
+                    slotState: DiscoverySlotState(
+                        theme: "a dragon picnic",
+                        characters: ["Bunny", "Dragon"],
+                        setting: "the fountain park",
+                        tone: "funny",
+                        episodeIntent: "a happy standalone adventure"
+                    ),
+                    questionCount: 1,
+                    readyToGenerate: true,
+                    assistantMessage: "I have enough details now.",
+                    transcript: "Bunny and Dragon should have a picnic adventure"
+                )
+            )
+        ]
+        api.generateStoryDelayNanoseconds = 250_000_000
+        api.generateStoryResult = makeGeneratedEnvelope(title: "Picnic Clues", sceneCount: 3)
+
+        let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [1])
+        let store = StoryLibraryStore()
+        let plan = makePlan(childProfileId: try XCTUnwrap(store.activeProfile?.id))
+        let viewModel = PracticeSessionViewModel(
+            plan: plan,
+            sourceSeries: nil,
+            store: store,
+            api: api,
+            voiceCore: voice,
+            forceMockVoiceCore: false
+        )
+
+        await viewModel.startSession()
+        voice.emitTranscriptFinal("Bunny and Dragon should have a picnic adventure")
+        await waitUntil { viewModel.phase == .generating }
+
+        voice.emitUserSpeechChanged(true)
+        await waitUntil { viewModel.phase == .narrating }
+        let invalidCount = viewModel.invalidTransitionMessages.count
+
+        voice.emitTranscriptFinal("Actually make it sillier")
+
+        await waitUntil { viewModel.invalidTransitionMessages.count > invalidCount }
+
+        XCTAssertEqual(api.reviseRequests.count, 0)
+        XCTAssertEqual(viewModel.sessionState, .narrating(sceneIndex: 0))
+        XCTAssertEqual(
+            viewModel.invalidTransitionMessages.last,
+            "Rejected transcriptFinalDeferredFromGenerating while in narrating(sceneIndex: 0)"
+        )
+    }
+
+    func testLateGenerationResultAfterFailureIsIgnoredAndDoesNotStartNarration() async throws {
+        let api = MockAPIClient()
+        api.discoveryResponses = [
+            DiscoveryEnvelope(
+                blocked: false,
+                safeMessage: nil,
+                data: DiscoveryData(
+                    slotState: DiscoverySlotState(
+                        theme: "a dragon picnic",
+                        characters: ["Bunny", "Dragon"],
+                        setting: "the fountain park",
+                        tone: "funny",
+                        episodeIntent: "a happy standalone adventure"
+                    ),
+                    questionCount: 1,
+                    readyToGenerate: true,
+                    assistantMessage: "I have enough details now.",
+                    transcript: "Bunny and Dragon should have a picnic adventure"
+                )
+            )
+        ]
+        api.generateStoryDelayNanoseconds = 250_000_000
+        api.generateStoryResult = makeGeneratedEnvelope(title: "Picnic Clues", sceneCount: 3)
+
+        let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [1])
+        let store = StoryLibraryStore()
+        let plan = makePlan(childProfileId: try XCTUnwrap(store.activeProfile?.id))
+        let viewModel = PracticeSessionViewModel(
+            plan: plan,
+            sourceSeries: nil,
+            store: store,
+            api: api,
+            voiceCore: voice,
+            forceMockVoiceCore: false
+        )
+
+        await viewModel.startSession()
+        voice.emitTranscriptFinal("Bunny and Dragon should have a picnic adventure")
+        await waitUntil { viewModel.phase == .generating }
+
+        voice.emitDisconnected()
+        await waitUntil { viewModel.phase == .failed }
+        await waitUntil {
+            viewModel.invalidTransitionMessages.contains {
+                $0.contains("Ignored stale generation result")
+            }
+        }
+
+        XCTAssertNil(viewModel.generatedStory)
+        XCTAssertEqual(viewModel.phase, .failed)
+        XCTAssertEqual(voice.spokenTexts.count, 1)
+    }
+
+    func testTranscriptStartedDuringRevisionIsRejectedAfterNarrationResumes() async throws {
+        let api = MockAPIClient()
+        api.discoveryResponses = [
+            DiscoveryEnvelope(
+                blocked: false,
+                safeMessage: nil,
+                data: DiscoveryData(
+                    slotState: DiscoverySlotState(
+                        theme: "a dragon picnic",
+                        characters: ["Bunny", "Dragon"],
+                        setting: "the fountain park",
+                        tone: "funny",
+                        episodeIntent: "a happy standalone adventure"
+                    ),
+                    questionCount: 1,
+                    readyToGenerate: true,
+                    assistantMessage: "I have enough details now.",
+                    transcript: "Bunny and Dragon should have a picnic adventure"
+                )
+            )
+        ]
+        api.generateStoryResult = makeGeneratedEnvelope(title: "Picnic Clues", sceneCount: 3)
+        api.reviseStoryDelayNanoseconds = 250_000_000
+        api.reviseStoryResult = makeRevisedEnvelope()
+
+        let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [1, 2])
+        let store = StoryLibraryStore()
+        let plan = makePlan(childProfileId: try XCTUnwrap(store.activeProfile?.id))
+        let viewModel = PracticeSessionViewModel(
+            plan: plan,
+            sourceSeries: nil,
+            store: store,
+            api: api,
+            voiceCore: voice,
+            forceMockVoiceCore: false
+        )
+
+        await viewModel.startSession()
+        voice.emitTranscriptFinal("Bunny and Dragon should have a picnic adventure")
+        await waitUntil { viewModel.phase == .narrating && viewModel.currentSceneIndex == 1 }
+
+        voice.emitTranscriptFinal("Please make the ending funnier and add a rainbow clue")
+        await waitUntil { viewModel.phase == .revising }
+
+        voice.emitUserSpeechChanged(true)
+        await waitUntil { viewModel.phase == .narrating && viewModel.currentSceneIndex == 1 }
+        let invalidCount = viewModel.invalidTransitionMessages.count
+
+        voice.emitTranscriptFinal("Also add a moonbeam slide")
+
+        await waitUntil { viewModel.invalidTransitionMessages.count > invalidCount }
+
+        XCTAssertEqual(api.reviseRequests.count, 1)
+        XCTAssertEqual(viewModel.sessionState, .narrating(sceneIndex: 1))
+        XCTAssertEqual(
+            viewModel.invalidTransitionMessages.last,
+            "Rejected transcriptFinalDeferredFromRevising while in narrating(sceneIndex: 1)"
+        )
+    }
+
+    func testRevisionQueueRejectsAdditionalUpdateBeyondOneQueuedRequest() async throws {
+        let api = MockAPIClient()
+        api.discoveryResponses = [
+            DiscoveryEnvelope(
+                blocked: false,
+                safeMessage: nil,
+                data: DiscoveryData(
+                    slotState: DiscoverySlotState(
+                        theme: "a dragon picnic",
+                        characters: ["Bunny", "Dragon"],
+                        setting: "the fountain park",
+                        tone: "funny",
+                        episodeIntent: "a happy standalone adventure"
+                    ),
+                    questionCount: 1,
+                    readyToGenerate: true,
+                    assistantMessage: "I have enough details now.",
+                    transcript: "Bunny and Dragon should have a picnic adventure"
+                )
+            )
+        ]
+        api.generateStoryResult = makeGeneratedEnvelope(title: "Picnic Clues", sceneCount: 3)
+        api.reviseStoryDelayNanoseconds = 250_000_000
+        api.reviseStoryResponses = [
+            makeRevisedEnvelope(
+                scenes: [
+                    StoryScene(sceneId: "2", text: "The rainbow clue made Dragon laugh.", durationSec: 25),
+                    StoryScene(sceneId: "3", text: "They hugged at home with a happy picnic.", durationSec: 35)
+                ]
+            ),
+            makeRevisedEnvelope(
+                scenes: [
+                    StoryScene(sceneId: "2", text: "The rainbow clue now led to a moonbeam slide.", durationSec: 25),
+                    StoryScene(sceneId: "3", text: "They ended with a cozy song by the fountain.", durationSec: 35)
+                ]
+            )
+        ]
+
+        let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [1, 2])
+        let store = StoryLibraryStore()
+        let plan = makePlan(childProfileId: try XCTUnwrap(store.activeProfile?.id))
+        let viewModel = PracticeSessionViewModel(
+            plan: plan,
+            sourceSeries: nil,
+            store: store,
+            api: api,
+            voiceCore: voice,
+            forceMockVoiceCore: false
+        )
+
+        await viewModel.startSession()
+        voice.emitTranscriptFinal("Bunny and Dragon should have a picnic adventure")
+
+        await waitUntil { viewModel.phase == .narrating && viewModel.currentSceneIndex == 1 }
+
+        voice.emitTranscriptFinal("Add a rainbow clue")
+        await waitUntil { viewModel.phase == .revising }
+        voice.emitTranscriptFinal("Also make it extra cozy")
+        try? await Task.sleep(nanoseconds: 60_000_000)
+        let invalidCount = viewModel.invalidTransitionMessages.count
+        voice.emitTranscriptFinal("And add a moonbeam slide too")
+
+        await waitUntil { viewModel.invalidTransitionMessages.count > invalidCount }
+        await waitUntil { api.reviseRequests.count == 2 && viewModel.phase == .narrating }
+
+        XCTAssertEqual(api.maxConcurrentRevises, 1)
+        XCTAssertEqual(api.reviseRequests.map(\.userUpdate), ["Add a rainbow clue", "Also make it extra cozy"])
+        XCTAssertEqual(
+            viewModel.invalidTransitionMessages.last,
+            "Rejected revision update while queue full for scene 1"
+        )
+        XCTAssertTrue(viewModel.generatedStory?.scenes[1].text.contains("moonbeam slide") == true)
+    }
+
+    func testResumeNarrationFromCorrectSceneAfterRevision() async throws {
+        let api = MockAPIClient()
+        api.discoveryResponses = [
+            DiscoveryEnvelope(
+                blocked: false,
+                safeMessage: nil,
+                data: DiscoveryData(
+                    slotState: DiscoverySlotState(
+                        theme: "a dragon picnic",
+                        characters: ["Bunny", "Dragon"],
+                        setting: "the fountain park",
+                        tone: "funny",
+                        episodeIntent: "a happy standalone adventure"
+                    ),
+                    questionCount: 1,
+                    readyToGenerate: true,
+                    assistantMessage: "I have enough details now.",
+                    transcript: "Bunny and Dragon should have a picnic adventure"
+                )
+            )
+        ]
+        api.generateStoryResult = makeGeneratedEnvelope(title: "Picnic Clues", sceneCount: 3)
+        api.reviseStoryResult = makeRevisedEnvelope()
+
+        let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [1, 2])
+        let store = StoryLibraryStore()
+        let plan = makePlan(childProfileId: try XCTUnwrap(store.activeProfile?.id))
+        let viewModel = PracticeSessionViewModel(
+            plan: plan,
+            sourceSeries: nil,
+            store: store,
+            api: api,
+            voiceCore: voice,
+            forceMockVoiceCore: false
+        )
+
+        await viewModel.startSession()
+        voice.emitTranscriptFinal("Bunny and Dragon should have a picnic adventure")
+        await waitUntil { viewModel.phase == .narrating && viewModel.currentSceneIndex == 1 && voice.spokenTexts.count >= 3 }
+
+        voice.emitTranscriptFinal("Please make the ending funnier and add a rainbow clue")
+
+        await waitUntil {
+            viewModel.phase == .narrating &&
+            viewModel.currentSceneIndex == 1 &&
+            voice.spokenTexts.last == "The rainbow clue made Dragon laugh."
+        }
+
+        XCTAssertEqual(viewModel.sessionState, .narrating(sceneIndex: 1))
+        XCTAssertEqual(api.reviseRequests.first?.currentSceneIndex, 1)
+        XCTAssertEqual(voice.spokenTexts.last, "The rainbow clue made Dragon laugh.")
+    }
+
+    func testDuplicateCompletionAndSavePrevention() async throws {
+        let api = MockAPIClient()
+        api.discoveryResponses = [
+            DiscoveryEnvelope(
+                blocked: false,
+                safeMessage: nil,
+                data: DiscoveryData(
+                    slotState: DiscoverySlotState(
+                        theme: "a moonlight picnic",
+                        characters: ["Bunny", "Fox"],
+                        setting: "the lantern park",
+                        tone: "cozy",
+                        episodeIntent: "a happy standalone adventure"
+                    ),
+                    questionCount: 1,
+                    readyToGenerate: true,
+                    assistantMessage: "I have enough details now.",
+                    transcript: "Tell a moonlight picnic story"
+                )
+            )
+        ]
+        api.generateStoryResult = makeGeneratedEnvelope(title: "Moonlight Picnic", sceneCount: 1)
+
+        let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [1, 2])
+        let store = StoryLibraryStore()
+        let plan = makePlan(childProfileId: try XCTUnwrap(store.activeProfile?.id))
+        let viewModel = PracticeSessionViewModel(
+            plan: plan,
+            sourceSeries: nil,
+            store: store,
+            api: api,
+            voiceCore: voice,
+            forceMockVoiceCore: false
+        )
+
+        await viewModel.startSession()
+        voice.emitTranscriptFinal("Tell a moonlight picnic story")
+        await waitUntil { viewModel.phase == .completed }
+
+        let initialSeriesCount = store.series.count
+        XCTAssertEqual(viewModel.latestUserTranscript, "")
+        let lastUtteranceID = try XCTUnwrap(voice.spokenUtteranceIDs.last ?? nil)
+        voice.emitAssistantResponseCompleted(lastUtteranceID)
+        voice.emitDisconnected()
+        try? await Task.sleep(nanoseconds: 120_000_000)
+
+        XCTAssertEqual(store.series.count, initialSeriesCount)
+        XCTAssertEqual(store.series.first?.episodes.count, 1)
+        XCTAssertEqual(viewModel.phase, .completed)
+    }
+
+    func testStartSessionRestartsCleanlyFromCompletedTerminalState() async throws {
+        let api = MockAPIClient()
+        api.discoveryResponses = [
+            DiscoveryEnvelope(
+                blocked: false,
+                safeMessage: nil,
+                data: DiscoveryData(
+                    slotState: DiscoverySlotState(
+                        theme: "a moonlight picnic",
+                        characters: ["Bunny", "Fox"],
+                        setting: "the lantern park",
+                        tone: "cozy",
+                        episodeIntent: "a happy standalone adventure"
+                    ),
+                    questionCount: 1,
+                    readyToGenerate: true,
+                    assistantMessage: "I have enough details now.",
+                    transcript: "Tell a moonlight picnic story"
+                )
+            )
+        ]
+        api.generateStoryResult = makeGeneratedEnvelope(title: "Moonlight Picnic", sceneCount: 1)
+
+        let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [1, 2, 3])
+        let store = StoryLibraryStore()
+        let plan = makePlan(childProfileId: try XCTUnwrap(store.activeProfile?.id))
+        let viewModel = PracticeSessionViewModel(
+            plan: plan,
+            sourceSeries: nil,
+            store: store,
+            api: api,
+            voiceCore: voice,
+            forceMockVoiceCore: false
+        )
+
+        await viewModel.startSession()
+        voice.emitTranscriptFinal("Tell a moonlight picnic story")
+        await waitUntil { viewModel.phase == .completed }
+
+        XCTAssertEqual(store.series.count, 1)
+        XCTAssertEqual(viewModel.sessionState, .completed)
+
+        await viewModel.startSession()
+
+        XCTAssertEqual(viewModel.phase, .ready)
+        XCTAssertEqual(viewModel.sessionState, .ready(VoiceSessionReadyState(mode: .discovery(stepNumber: 1))))
+        XCTAssertNil(viewModel.generatedStory)
+        XCTAssertEqual(viewModel.errorMessage, "")
+        XCTAssertEqual(viewModel.invalidTransitionMessages, [])
+        XCTAssertEqual(api.prepareConnectionCallCount, 2)
+        XCTAssertEqual(voice.connectCallCount, 2)
     }
 
     func testBlockedDiscoveryTurnUsesSafeReplyWithoutGenerating() async throws {
@@ -249,8 +1400,130 @@ final class PracticeSessionViewModelTests: XCTestCase {
         await waitUntil { voice.spokenTexts.count >= 2 }
 
         XCTAssertEqual(api.generateRequests.count, 0)
-        XCTAssertEqual(viewModel.phase, .gatheringInput)
+        XCTAssertEqual(viewModel.phase, .ready)
         XCTAssertTrue(viewModel.aiPrompt.contains("gentle and friendly"))
+        XCTAssertEqual(viewModel.lastAppError?.category, .moderationBlock)
+        XCTAssertEqual(
+            viewModel.lastAppError?.userMessage,
+            "Let's make it gentle and friendly. What kind of kind adventure should we tell?"
+        )
+    }
+
+    func testBlockedGenerationUsesModerationCategoryAndSafeMessage() async throws {
+        let api = MockAPIClient()
+        api.discoveryResponses = [
+            DiscoveryEnvelope(
+                blocked: false,
+                safeMessage: nil,
+                data: DiscoveryData(
+                    slotState: DiscoverySlotState(
+                        theme: "a dragon parade",
+                        characters: ["Dragon", "Bunny"],
+                        setting: "the sunny hill",
+                        tone: "playful",
+                        episodeIntent: "a happy standalone adventure"
+                    ),
+                    questionCount: 1,
+                    readyToGenerate: true,
+                    assistantMessage: "I have enough details now.",
+                    transcript: "Tell a dragon parade story"
+                )
+            )
+        ]
+        let blockedStory = makeGeneratedEnvelope(title: "Dragon Parade", sceneCount: 2).data
+        api.generateStoryResult = GenerateStoryEnvelope(
+            blocked: true,
+            safeMessage: "We kept this story extra gentle while it was being created.",
+            data: blockedStory
+        )
+
+        let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [1])
+        let store = StoryLibraryStore()
+        let plan = makePlan(childProfileId: try XCTUnwrap(store.activeProfile?.id))
+        let viewModel = PracticeSessionViewModel(
+            plan: plan,
+            sourceSeries: nil,
+            store: store,
+            api: api,
+            voiceCore: voice,
+            forceMockVoiceCore: false
+        )
+
+        await viewModel.startSession()
+        voice.emitTranscriptFinal("Tell a dragon parade story")
+
+        await waitUntil { viewModel.phase == .narrating }
+
+        XCTAssertEqual(viewModel.lastAppError?.category, .moderationBlock)
+        XCTAssertEqual(
+            viewModel.lastAppError?.userMessage,
+            "We kept this story extra gentle while it was being created."
+        )
+        XCTAssertEqual(viewModel.errorMessage, "")
+    }
+
+    func testBlockedRevisionUsesModerationCategoryAndSafeMessage() async throws {
+        let api = MockAPIClient()
+        api.discoveryResponses = [
+            DiscoveryEnvelope(
+                blocked: false,
+                safeMessage: nil,
+                data: DiscoveryData(
+                    slotState: DiscoverySlotState(
+                        theme: "a rainbow picnic",
+                        characters: ["Bunny", "Fox"],
+                        setting: "the sunny meadow",
+                        tone: "gentle",
+                        episodeIntent: "a happy standalone adventure"
+                    ),
+                    questionCount: 1,
+                    readyToGenerate: true,
+                    assistantMessage: "I have enough details now.",
+                    transcript: "Tell a rainbow picnic story"
+                )
+            )
+        ]
+        api.generateStoryResult = makeGeneratedEnvelope(title: "Rainbow Picnic", sceneCount: 2)
+        api.reviseStoryResult = ReviseStoryEnvelope(
+            blocked: true,
+            safeMessage: "We softened the update to keep the story kind and calm.",
+            data: RevisedStoryData(
+                storyId: UUID().uuidString,
+                revisedFromSceneIndex: 0,
+                scenes: [
+                    StoryScene(sceneId: "1", text: "Bunny spread a rainbow picnic blanket.", durationSec: 40),
+                    StoryScene(sceneId: "2", text: "Fox added soft music and everyone smiled.", durationSec: 40)
+                ],
+                safety: StorySafety(inputModeration: "pass", outputModeration: "pass"),
+                engine: nil
+            )
+        )
+
+        let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [1])
+        let store = StoryLibraryStore()
+        let plan = makePlan(childProfileId: try XCTUnwrap(store.activeProfile?.id))
+        let viewModel = PracticeSessionViewModel(
+            plan: plan,
+            sourceSeries: nil,
+            store: store,
+            api: api,
+            voiceCore: voice,
+            forceMockVoiceCore: false
+        )
+
+        await viewModel.startSession()
+        voice.emitTranscriptFinal("Tell a rainbow picnic story")
+        await waitUntil { viewModel.phase == .narrating }
+
+        voice.emitTranscriptFinal("Make the ending much softer")
+        await waitUntil { viewModel.phase == .narrating && viewModel.generatedStory?.scenes.last?.text.contains("soft music") == true }
+
+        XCTAssertEqual(viewModel.lastAppError?.category, .moderationBlock)
+        XCTAssertEqual(
+            viewModel.lastAppError?.userMessage,
+            "We softened the update to keep the story kind and calm."
+        )
+        XCTAssertEqual(viewModel.errorMessage, "")
     }
 
     func testPartialAndBlankTranscriptsDoNotTriggerNetworkCalls() async throws {
@@ -276,12 +1549,18 @@ final class PracticeSessionViewModelTests: XCTestCase {
         XCTAssertEqual(api.discoveryRequests.count, 0)
         XCTAssertEqual(api.generateRequests.count, 0)
         XCTAssertEqual(viewModel.latestUserTranscript, "Bunny wants")
-        XCTAssertEqual(viewModel.phase, .gatheringInput)
+        XCTAssertEqual(viewModel.phase, .ready)
     }
 
-    func testConnectionFailureSurfacesError() async throws {
+    func testStartupHealthCheckFailureUsesSafeMessageAndCategory() async throws {
         let api = MockAPIClient()
-        api.prepareConnectionError = URLError(.cannotConnectToHost)
+        api.prepareConnectionError = APIError.invalidResponse(
+            statusCode: 503,
+            code: "internal_error",
+            message: "Unexpected server error",
+            requestId: "req-startup-health",
+            body: "{\"error\":\"db password leaked\"}"
+        )
         let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [])
         let store = StoryLibraryStore()
         let plan = makePlan(childProfileId: try XCTUnwrap(store.activeProfile?.id))
@@ -297,8 +1576,210 @@ final class PracticeSessionViewModelTests: XCTestCase {
         await viewModel.startSession()
 
         XCTAssertEqual(viewModel.statusMessage, "Connection failed")
-        XCTAssertFalse(viewModel.errorMessage.isEmpty)
+        XCTAssertEqual(viewModel.lastStartupFailure, .healthCheck)
+        XCTAssertEqual(viewModel.lastAppError?.category, .startup)
+        XCTAssertEqual(viewModel.errorMessage, "I couldn't reach StoryTime right now. Please try again in a moment.")
+        XCTAssertFalse(viewModel.errorMessage.contains("db password"))
         XCTAssertEqual(voice.connectCallCount, 0)
+    }
+
+    func testStartupSessionBootstrapFailureUsesSafeMessageAndCategory() async throws {
+        let api = MockAPIClient()
+        api.bootstrapSessionIdentityError = APIError.invalidResponse(
+            statusCode: 401,
+            code: "invalid_session_token",
+            message: "Invalid signed token",
+            requestId: "req-startup-bootstrap",
+            body: "{\"message\":\"signed token invalid\"}"
+        )
+        let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [])
+        let store = StoryLibraryStore()
+        let plan = makePlan(childProfileId: try XCTUnwrap(store.activeProfile?.id))
+        let viewModel = PracticeSessionViewModel(
+            plan: plan,
+            sourceSeries: nil,
+            store: store,
+            api: api,
+            voiceCore: voice,
+            forceMockVoiceCore: false
+        )
+
+        await viewModel.startSession()
+
+        XCTAssertEqual(api.bootstrapSessionIdentityCallCount, 1)
+        XCTAssertEqual(api.createRealtimeSessionCallCount, 0)
+        XCTAssertEqual(viewModel.phase, .failed)
+        XCTAssertEqual(viewModel.lastStartupFailure, .sessionBootstrap)
+        XCTAssertEqual(viewModel.statusMessage, "Session unavailable")
+        XCTAssertEqual(viewModel.errorMessage, "I couldn't start the live story session right now. Please try again.")
+        XCTAssertFalse(viewModel.errorMessage.contains("signed token invalid"))
+    }
+
+    func testStartupRealtimeSessionFailureUsesSafeMessageAndCategory() async throws {
+        let api = MockAPIClient()
+        api.createRealtimeSessionError = APIError.invalidResponse(
+            statusCode: 500,
+            code: "internal_error",
+            message: "Unexpected server error",
+            requestId: "req-startup-realtime",
+            body: "{\"error\":\"internal upstream response\"}"
+        )
+        let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [])
+        let store = StoryLibraryStore()
+        let plan = makePlan(childProfileId: try XCTUnwrap(store.activeProfile?.id))
+        let viewModel = PracticeSessionViewModel(
+            plan: plan,
+            sourceSeries: nil,
+            store: store,
+            api: api,
+            voiceCore: voice,
+            forceMockVoiceCore: false
+        )
+
+        await viewModel.startSession()
+
+        XCTAssertEqual(api.createRealtimeSessionCallCount, 1)
+        XCTAssertEqual(voice.connectCallCount, 0)
+        XCTAssertEqual(viewModel.phase, .failed)
+        XCTAssertEqual(viewModel.lastStartupFailure, .realtimeSession)
+        XCTAssertEqual(viewModel.statusMessage, "Session unavailable")
+        XCTAssertEqual(viewModel.errorMessage, "I couldn't prepare the live story session right now. Please try again.")
+        XCTAssertFalse(viewModel.errorMessage.contains("internal upstream response"))
+    }
+
+    func testStartupUnsupportedRegionFailureUsesSafeMessage() async throws {
+        let api = MockAPIClient()
+        api.createRealtimeSessionError = APIError.invalidResponse(
+            statusCode: 403,
+            code: "unsupported_region",
+            message: "Unsupported processing region",
+            requestId: "req-startup-region",
+            body: "{\"allowed_regions\":[\"EU\"]}"
+        )
+        let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [])
+        let store = StoryLibraryStore()
+        let plan = makePlan(childProfileId: try XCTUnwrap(store.activeProfile?.id))
+        let viewModel = PracticeSessionViewModel(
+            plan: plan,
+            sourceSeries: nil,
+            store: store,
+            api: api,
+            voiceCore: voice,
+            forceMockVoiceCore: false
+        )
+
+        await viewModel.startSession()
+
+        XCTAssertEqual(viewModel.phase, .failed)
+        XCTAssertEqual(viewModel.lastStartupFailure, .realtimeSession)
+        XCTAssertEqual(viewModel.statusMessage, "Session unavailable")
+        XCTAssertEqual(viewModel.errorMessage, "StoryTime isn't available in this region right now.")
+        XCTAssertFalse(viewModel.errorMessage.contains("allowed_regions"))
+    }
+
+    func testStartupBridgeReadinessFailureUsesSafeMessageAndCategory() async throws {
+        let api = MockAPIClient()
+        let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [])
+        voice.connectError = RealtimeVoiceClient.RealtimeError.bridgeReadyTimedOut
+        let store = StoryLibraryStore()
+        let plan = makePlan(childProfileId: try XCTUnwrap(store.activeProfile?.id))
+        let viewModel = PracticeSessionViewModel(
+            plan: plan,
+            sourceSeries: nil,
+            store: store,
+            api: api,
+            voiceCore: voice,
+            forceMockVoiceCore: false
+        )
+
+        await viewModel.startSession()
+
+        XCTAssertEqual(viewModel.phase, .failed)
+        XCTAssertEqual(viewModel.lastStartupFailure, .bridgeReadiness)
+        XCTAssertEqual(viewModel.statusMessage, "Voice unavailable")
+        XCTAssertEqual(viewModel.errorMessage, "The live storyteller isn't ready yet. Please try again.")
+    }
+
+    func testStartupCallConnectFailureUsesSafeMessageAndCategory() async throws {
+        let api = MockAPIClient()
+        let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [])
+        voice.connectError = RealtimeVoiceClient.RealtimeError.connectFailed("Socket failed: raw token")
+        let store = StoryLibraryStore()
+        let plan = makePlan(childProfileId: try XCTUnwrap(store.activeProfile?.id))
+        let viewModel = PracticeSessionViewModel(
+            plan: plan,
+            sourceSeries: nil,
+            store: store,
+            api: api,
+            voiceCore: voice,
+            forceMockVoiceCore: false
+        )
+
+        await viewModel.startSession()
+
+        XCTAssertEqual(viewModel.phase, .failed)
+        XCTAssertEqual(viewModel.lastStartupFailure, .callConnect)
+        XCTAssertEqual(viewModel.statusMessage, "Connection failed")
+        XCTAssertEqual(viewModel.errorMessage, "I couldn't connect the live storyteller right now. Please try again.")
+        XCTAssertFalse(viewModel.errorMessage.contains("raw token"))
+    }
+
+    func testStartupDisconnectBeforeReadyFailsOnceAndLateConnectedDoesNotReviveSession() async throws {
+        let api = MockAPIClient()
+        let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [])
+        voice.emitsConnectedOnConnect = false
+        voice.onConnectAction = { mock in
+            mock.emitDisconnected()
+        }
+        let store = StoryLibraryStore()
+        let plan = makePlan(childProfileId: try XCTUnwrap(store.activeProfile?.id))
+        let viewModel = PracticeSessionViewModel(
+            plan: plan,
+            sourceSeries: nil,
+            store: store,
+            api: api,
+            voiceCore: voice,
+            forceMockVoiceCore: false
+        )
+
+        await viewModel.startSession()
+        voice.emitConnected()
+        await Task.yield()
+
+        XCTAssertEqual(viewModel.phase, .failed)
+        XCTAssertEqual(viewModel.lastStartupFailure, .disconnectBeforeReady)
+        XCTAssertEqual(viewModel.statusMessage, "Voice session disconnected")
+        XCTAssertEqual(viewModel.errorMessage, "The live storyteller disconnected before it was ready. Please try again.")
+        XCTAssertEqual(viewModel.aiPrompt, "Starting story conversation...")
+    }
+
+    func testStartupBridgeErrorEventFailsOnceAndDoesNotReviveSession() async throws {
+        let api = MockAPIClient()
+        let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [])
+        voice.emitsConnectedOnConnect = false
+        voice.onConnectAction = { mock in
+            mock.emitError("Socket failed: raw body")
+        }
+        let store = StoryLibraryStore()
+        let plan = makePlan(childProfileId: try XCTUnwrap(store.activeProfile?.id))
+        let viewModel = PracticeSessionViewModel(
+            plan: plan,
+            sourceSeries: nil,
+            store: store,
+            api: api,
+            voiceCore: voice,
+            forceMockVoiceCore: false
+        )
+
+        await viewModel.startSession()
+        voice.emitConnected()
+        await Task.yield()
+
+        XCTAssertEqual(viewModel.phase, .failed)
+        XCTAssertEqual(viewModel.lastStartupFailure, .callConnect)
+        XCTAssertEqual(viewModel.statusMessage, "Connection failed")
+        XCTAssertEqual(viewModel.errorMessage, "I couldn't connect the live storyteller right now. Please try again.")
+        XCTAssertFalse(viewModel.errorMessage.contains("raw body"))
     }
 
     func testMockVoiceCoreJourneyCanProgressWithoutManualTextEntry() async throws {
@@ -324,7 +1805,7 @@ final class PracticeSessionViewModelTests: XCTestCase {
 
         XCTAssertEqual(api.generateRequests.count, 0)
         XCTAssertEqual(viewModel.generatedStory?.scenes.count, 3)
-        XCTAssertEqual(viewModel.statusMessage, "Story ready")
+        XCTAssertTrue(viewModel.statusMessage.contains("Narrating scene"))
     }
 
     func testRepeatEpisodeModeReplaysLatestEpisode() async throws {
@@ -359,7 +1840,52 @@ final class PracticeSessionViewModelTests: XCTestCase {
 
         XCTAssertEqual(viewModel.phase, .narrating)
         XCTAssertEqual(viewModel.generatedStory?.title, "Moonlight Picnic")
-        XCTAssertEqual(viewModel.aiPrompt, "Replaying the latest episode now.")
+        XCTAssertEqual(viewModel.currentSceneIndex, 0)
+    }
+
+    func testRepeatEpisodeCompletionDoesNotCreateNewHistory() async throws {
+        let api = MockAPIClient()
+        let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [1])
+        let store = StoryLibraryStore()
+        let profileId = try XCTUnwrap(store.activeProfile?.id)
+        let basePlan = makePlan(childProfileId: profileId)
+        let story = StoryData(
+            storyId: "repeat-story-1",
+            title: "Moonlight Picnic",
+            estimatedDurationSec: 10,
+            scenes: [StoryScene(sceneId: "1", text: "Bunny shared a lantern picnic.", durationSec: 1)],
+            safety: StorySafety(inputModeration: "pass", outputModeration: "pass"),
+            engine: nil
+        )
+        let seriesId = try XCTUnwrap(store.addStory(story, characters: ["Bunny"], plan: basePlan))
+        let originalSeries = try XCTUnwrap(store.seriesById(seriesId))
+        let repeatPlan = StoryLaunchPlan(
+            mode: .repeatEpisode(seriesId: seriesId),
+            childProfileId: profileId,
+            experienceMode: .classic,
+            usePastStory: true,
+            selectedSeriesId: seriesId,
+            usePastCharacters: true,
+            lengthMinutes: 3
+        )
+
+        let viewModel = PracticeSessionViewModel(
+            plan: repeatPlan,
+            sourceSeries: originalSeries,
+            store: store,
+            api: api,
+            voiceCore: voice,
+            forceMockVoiceCore: false
+        )
+
+        await viewModel.startSession()
+        await waitUntil { viewModel.phase == .completed }
+
+        let replayedSeries = try XCTUnwrap(store.seriesById(seriesId))
+        XCTAssertEqual(store.series.count, 1)
+        XCTAssertEqual(replayedSeries, originalSeries)
+        XCTAssertEqual(replayedSeries.episodes.count, 1)
+        XCTAssertEqual(replayedSeries.episodes.first?.storyId, story.storyId)
     }
 
     func testMockNarrationChildDidSpeakUsesScriptedUpdateRequest() async throws {
@@ -402,6 +1928,176 @@ final class PracticeSessionViewModelTests: XCTestCase {
 
         XCTAssertEqual(api.reviseRequests.first?.userUpdate, "Please add a new clue and a happy rainbow ending to the remaining story.")
         XCTAssertTrue(viewModel.generatedStory?.scenes.last?.text.contains("silly parade") == true)
+    }
+
+    func testRepeatEpisodeRevisionReplacesExistingHistoryWithoutAddingEpisodes() async throws {
+        let api = MockAPIClient()
+        api.reviseStoryResult = ReviseStoryEnvelope(
+            blocked: false,
+            safeMessage: nil,
+            data: RevisedStoryData(
+                storyId: "ignored-by-client",
+                revisedFromSceneIndex: 0,
+                scenes: [StoryScene(sceneId: "1", text: "Bunny added a rainbow clue to the replay.", durationSec: 1)],
+                safety: StorySafety(inputModeration: "pass", outputModeration: "pass"),
+                engine: nil
+            )
+        )
+        let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [])
+        let store = StoryLibraryStore()
+        let profileId = try XCTUnwrap(store.activeProfile?.id)
+        let basePlan = makePlan(childProfileId: profileId)
+        let originalStory = StoryData(
+            storyId: "repeat-story-2",
+            title: "Moonlight Picnic",
+            estimatedDurationSec: 10,
+            scenes: [StoryScene(sceneId: "1", text: "Bunny shared a lantern picnic.", durationSec: 1)],
+            safety: StorySafety(inputModeration: "pass", outputModeration: "pass"),
+            engine: nil
+        )
+        let seriesId = try XCTUnwrap(store.addStory(originalStory, characters: ["Bunny"], plan: basePlan))
+        let series = try XCTUnwrap(store.seriesById(seriesId))
+        let repeatPlan = StoryLaunchPlan(
+            mode: .repeatEpisode(seriesId: seriesId),
+            childProfileId: profileId,
+            experienceMode: .classic,
+            usePastStory: true,
+            selectedSeriesId: seriesId,
+            usePastCharacters: true,
+            lengthMinutes: 3
+        )
+
+        let viewModel = PracticeSessionViewModel(
+            plan: repeatPlan,
+            sourceSeries: series,
+            store: store,
+            api: api,
+            voiceCore: voice,
+            forceMockVoiceCore: true
+        )
+
+        await viewModel.startSession()
+        await waitUntil { viewModel.phase == .narrating && viewModel.currentSceneIndex == 0 }
+
+        await viewModel.childDidSpeak()
+        await waitUntil { viewModel.phase == .completed }
+
+        let updatedSeries = try XCTUnwrap(store.seriesById(seriesId))
+        XCTAssertEqual(store.series.count, 1)
+        XCTAssertEqual(updatedSeries.episodes.count, 1)
+        XCTAssertEqual(updatedSeries.episodes.first?.storyId, originalStory.storyId)
+        XCTAssertEqual(updatedSeries.episodes.first?.scenes.first?.text, "Bunny added a rainbow clue to the replay.")
+    }
+
+    func testRepeatEpisodeRevisionReplacesContinuityFactsAndClearsClosedOpenLoops() async throws {
+        let api = MockAPIClient()
+        api.reviseStoryResult = ReviseStoryEnvelope(
+            blocked: false,
+            safeMessage: nil,
+            data: RevisedStoryData(
+                storyId: "ignored-by-client",
+                revisedFromSceneIndex: 0,
+                scenes: [StoryScene(sceneId: "1", text: "Bunny followed the rainbow brook with Fox.", durationSec: 1)],
+                safety: StorySafety(inputModeration: "pass", outputModeration: "pass"),
+                engine: try makeEngineData(
+                    episodeRecap: "Bunny followed the rainbow brook with Fox.",
+                    recurringCharacters: ["Bunny", "Fox"],
+                    priorEpisodeRecap: "Bunny followed the lantern clue.",
+                    worldFacts: ["Rainbow Brook sparkles after the rain."],
+                    openLoops: [],
+                    favoritePlaces: ["Rainbow Brook"],
+                    relationshipFacts: ["Bunny and Fox share clues."],
+                    arcSummary: "Bunny and Fox are following rainbow clues together.",
+                    nextEpisodeHook: "A silver bell rings beside the brook.",
+                    continuityFacts: ["Rainbow Brook sparkles after the rain."],
+                    characterBible: [
+                        ["name": "Bunny", "role": "main story friend", "traits": ["kind", "curious"]],
+                        ["name": "Fox", "role": "returning friend", "traits": ["warm", "helpful"]]
+                    ]
+                )
+            )
+        )
+        let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [])
+        let store = StoryLibraryStore()
+        let profileId = try XCTUnwrap(store.activeProfile?.id)
+        let basePlan = makePlan(childProfileId: profileId)
+        let originalStory = StoryData(
+            storyId: "repeat-story-continuity",
+            title: "Moonlight Picnic",
+            estimatedDurationSec: 10,
+            scenes: [StoryScene(sceneId: "1", text: "Bunny followed a lantern clue through the park.", durationSec: 1)],
+            safety: StorySafety(inputModeration: "pass", outputModeration: "pass"),
+            engine: try makeEngineData(
+                episodeRecap: "Bunny followed a lantern clue through the park.",
+                recurringCharacters: ["Bunny", "Fox"],
+                priorEpisodeRecap: "Bunny followed a lantern clue through the park.",
+                worldFacts: ["Moonlit Park glows after sunset."],
+                openLoops: ["Find the hidden gate"],
+                favoritePlaces: ["Moonlit Park"],
+                relationshipFacts: ["Bunny trusts Fox"],
+                arcSummary: "Bunny is following lantern clues through the park.",
+                nextEpisodeHook: "The hidden gate starts to glow.",
+                continuityFacts: ["Moonlit Park glows after sunset."],
+                characterBible: [
+                    ["name": "Bunny", "role": "main story friend", "traits": ["kind", "curious"]],
+                    ["name": "Fox", "role": "returning friend", "traits": ["warm", "helpful"]]
+                ]
+            )
+        )
+        let seriesId = try XCTUnwrap(store.addStory(originalStory, characters: ["Bunny"], plan: basePlan))
+        let series = try XCTUnwrap(store.seriesById(seriesId))
+        let repeatPlan = StoryLaunchPlan(
+            mode: .repeatEpisode(seriesId: seriesId),
+            childProfileId: profileId,
+            experienceMode: .classic,
+            usePastStory: true,
+            selectedSeriesId: seriesId,
+            usePastCharacters: true,
+            lengthMinutes: 3
+        )
+
+        await ContinuityMemoryStore.shared.replaceFacts(
+            seriesId: seriesId,
+            storyId: originalStory.storyId,
+            texts: ["Open loop: Find the hidden gate", "Place: Moonlit Park"],
+            embeddings: [[1.0, 0.0], [0.9, 0.1]]
+        )
+
+        let viewModel = PracticeSessionViewModel(
+            plan: repeatPlan,
+            sourceSeries: series,
+            store: store,
+            api: api,
+            voiceCore: voice,
+            forceMockVoiceCore: true
+        )
+
+        await viewModel.startSession()
+        await waitUntil { viewModel.phase == .narrating && viewModel.currentSceneIndex == 0 }
+
+        await viewModel.childDidSpeak()
+        await waitUntil { viewModel.phase == .completed }
+        await waitUntilAsync {
+            let records = await ContinuityMemoryStore.shared.factRecords(seriesId: seriesId, storyId: originalStory.storyId)
+            return records.contains { $0.text == "Place: Rainbow Brook" }
+        }
+
+        let updatedSeries = try XCTUnwrap(store.seriesById(seriesId))
+        XCTAssertEqual(updatedSeries.episodes.count, 1)
+        XCTAssertEqual(updatedSeries.episodes.first?.storyId, originalStory.storyId)
+        XCTAssertEqual(updatedSeries.favoritePlaces, ["Rainbow Brook"])
+        XCTAssertEqual(updatedSeries.relationshipFacts, ["Bunny and Fox share clues."])
+        XCTAssertNil(updatedSeries.unresolvedThreads)
+
+        let revisedRecords = await ContinuityMemoryStore.shared.factRecords(
+            seriesId: seriesId,
+            storyId: originalStory.storyId
+        )
+        let revisedTexts = revisedRecords.map(\.text)
+        XCTAssertTrue(revisedTexts.contains("Place: Rainbow Brook"))
+        XCTAssertTrue(revisedTexts.contains("Relationship: Bunny and Fox share clues."))
+        XCTAssertFalse(revisedTexts.contains("Place: Moonlit Park"))
+        XCTAssertFalse(revisedTexts.contains("Open loop: Find the hidden gate"))
     }
 
     func testRepeatEpisodeWithoutSourceSeriesFallsBackCleanly() async throws {
@@ -547,7 +2243,7 @@ final class PracticeSessionViewModelTests: XCTestCase {
         await waitUntil {
             viewModel.generatedStory != nil &&
             api.generateRequests.count == 1 &&
-            api.embeddingInputs.count >= 2
+            api.embeddingInputs.count >= 1
         }
 
         XCTAssertTrue(api.generateRequests[0].continuityFacts.contains { $0.contains("Open loop:") })
@@ -595,7 +2291,7 @@ final class PracticeSessionViewModelTests: XCTestCase {
 
         await viewModel.startSession()
 
-        XCTAssertEqual(viewModel.phase, .gatheringInput)
+        XCTAssertEqual(viewModel.phase, .ready)
         XCTAssertTrue(viewModel.aiPrompt.contains("ended with a happy moment"))
         XCTAssertTrue(viewModel.aiPrompt.contains("bedtime story"))
     }
@@ -620,10 +2316,31 @@ final class PracticeSessionViewModelTests: XCTestCase {
 
         XCTAssertEqual(viewModel.phase, .idle)
         XCTAssertEqual(viewModel.aiPrompt, initialPrompt)
-        XCTAssertEqual(viewModel.privacySummary, "Live conversation is on. Raw audio is not saved.")
+        XCTAssertEqual(
+            viewModel.privacySummary,
+            "Live conversation is on. Raw audio is not saved. Spoken prompts are sent for live processing."
+        )
     }
 
-    func testRealtimeCallbacksUpdateSpeakerLevelsAndErrors() async throws {
+    func testPrivacySummaryMentionsLocalTranscriptClearingWhenEnabled() throws {
+        let store = StoryLibraryStore()
+        let plan = makePlan(childProfileId: try XCTUnwrap(store.activeProfile?.id))
+        let viewModel = PracticeSessionViewModel(
+            plan: plan,
+            sourceSeries: nil,
+            store: store,
+            api: MockAPIClient(),
+            voiceCore: MockRealtimeVoiceCore(autoCompleteSpeakIndices: []),
+            forceMockVoiceCore: true
+        )
+
+        XCTAssertEqual(
+            viewModel.privacySummary,
+            "Live conversation is on. Raw audio is not saved. Spoken prompts are sent for live processing, and the on-screen transcript clears when the session ends."
+        )
+    }
+
+    func testRealtimeCallbacksUpdateSpeakerLevelsAndUseSafeRuntimeVoiceFailures() async throws {
         let api = MockAPIClient()
         let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [])
         let store = StoryLibraryStore()
@@ -654,13 +2371,52 @@ final class PracticeSessionViewModelTests: XCTestCase {
 
         voice.emitError("Mic unavailable")
         await Task.yield()
+        XCTAssertEqual(viewModel.phase, .failed)
+        XCTAssertEqual(viewModel.lastAppError?.category, .backendFailure)
         XCTAssertEqual(viewModel.statusMessage, "Voice session error")
-        XCTAssertEqual(viewModel.errorMessage, "Mic unavailable")
+        XCTAssertEqual(viewModel.errorMessage, "The live storyteller had a problem. Please try again.")
+        XCTAssertFalse(viewModel.errorMessage.contains("Mic unavailable"))
 
         voice.emitDisconnected()
         await Task.yield()
-        XCTAssertEqual(viewModel.statusMessage, "Voice session disconnected")
+        XCTAssertEqual(viewModel.statusMessage, "Voice session error")
         XCTAssertEqual(viewModel.activeSpeaker, .idle)
+    }
+
+    func testFailureTraceCapturesBackendRequestCorrelationWithoutTranscriptContent() async throws {
+        let api = MockAPIClient()
+        api.discoveryError = APIError.invalidResponse(
+            statusCode: 500,
+            code: "internal_error",
+            message: "Unexpected server error",
+            requestId: "req-discovery-failure",
+            body: "{\"error\":\"internal_error\",\"details\":\"secret\"}"
+        )
+        let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [1])
+        let store = StoryLibraryStore()
+        let plan = makePlan(childProfileId: try XCTUnwrap(store.activeProfile?.id))
+        let viewModel = PracticeSessionViewModel(
+            plan: plan,
+            sourceSeries: nil,
+            store: store,
+            api: api,
+            voiceCore: voice,
+            forceMockVoiceCore: false
+        )
+
+        await viewModel.startSession()
+        voice.emitTranscriptFinal("Tell a stormy story")
+        await waitUntil { viewModel.phase == .failed }
+
+        let failureTrace = try XCTUnwrap(viewModel.traceEvents.last { $0.kind == .failure })
+        XCTAssertEqual(failureTrace.requestId, "req-discovery-failure")
+        XCTAssertEqual(failureTrace.sessionId, "mock-session-123")
+        XCTAssertEqual(failureTrace.apiOperation, .storyDiscovery)
+        XCTAssertEqual(failureTrace.statusCode, 500)
+        XCTAssertEqual(failureTrace.state, viewModel.sessionState.logDescription)
+        XCTAssertEqual(failureTrace.source, "discovery failed")
+        XCTAssertFalse(failureTrace.source.contains("stormy"))
+        XCTAssertEqual(viewModel.errorMessage, "I couldn't finish the story right now. Please try again.")
     }
 
     func testDiscoveryAndGenerationFailuresEndSession() async throws {
@@ -682,8 +2438,11 @@ final class PracticeSessionViewModelTests: XCTestCase {
 
             await viewModel.startSession()
             voice.emitTranscriptFinal("Tell a bunny story")
-            await waitUntil { viewModel.phase == .completed }
-            XCTAssertFalse(viewModel.errorMessage.isEmpty)
+            await waitUntil { viewModel.phase == .failed }
+            XCTAssertEqual(viewModel.lastAppError?.category, .backendFailure)
+            XCTAssertEqual(viewModel.statusMessage, "Session failed")
+            XCTAssertEqual(viewModel.errorMessage, "I couldn't finish the story right now. Please try again.")
+            XCTAssertEqual(viewModel.latestUserTranscript, "")
         }
 
         do {
@@ -720,10 +2479,324 @@ final class PracticeSessionViewModelTests: XCTestCase {
 
             await viewModel.startSession()
             voice.emitTranscriptFinal("Tell a bunny story")
-            await waitUntil { viewModel.phase == .completed }
+            await waitUntil { viewModel.phase == .failed }
             XCTAssertEqual(viewModel.activeSpeaker, .idle)
-            XCTAssertFalse(viewModel.errorMessage.isEmpty)
+            XCTAssertEqual(viewModel.lastAppError?.category, .networkFailure)
+            XCTAssertEqual(viewModel.statusMessage, "Connection failed")
+            XCTAssertEqual(viewModel.errorMessage, "I couldn't reach StoryTime right now. Please try again.")
+            XCTAssertEqual(viewModel.latestUserTranscript, "")
         }
+    }
+
+    func testGenerationDecodeFailureUsesSafeAppErrorModel() async throws {
+        let api = MockAPIClient()
+        api.discoveryResponses = [
+            DiscoveryEnvelope(
+                blocked: false,
+                safeMessage: nil,
+                data: DiscoveryData(
+                    slotState: DiscoverySlotState(
+                        theme: "a river walk",
+                        characters: ["Bunny"],
+                        setting: "the riverbank",
+                        tone: "cozy",
+                        episodeIntent: "a happy standalone adventure"
+                    ),
+                    questionCount: 1,
+                    readyToGenerate: true,
+                    assistantMessage: "I have enough details now.",
+                    transcript: "Tell a river walk story"
+                )
+            )
+        ]
+        api.generateStoryError = DecodingError.dataCorrupted(
+            DecodingError.Context(codingPath: [], debugDescription: "bad payload")
+        )
+        let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [1])
+        let store = StoryLibraryStore()
+        let plan = makePlan(childProfileId: try XCTUnwrap(store.activeProfile?.id))
+        let viewModel = PracticeSessionViewModel(
+            plan: plan,
+            sourceSeries: nil,
+            store: store,
+            api: api,
+            voiceCore: voice,
+            forceMockVoiceCore: false
+        )
+
+        await viewModel.startSession()
+        voice.emitTranscriptFinal("Tell a river walk story")
+        await waitUntil { viewModel.phase == .failed }
+
+        XCTAssertEqual(viewModel.lastAppError?.category, .decodeFailure)
+        XCTAssertEqual(viewModel.statusMessage, "Story unavailable")
+        XCTAssertEqual(viewModel.errorMessage, "I couldn't understand StoryTime's reply right now. Please try again.")
+    }
+
+    func testRevisionConflictUsesBackendPublicMessageAndSafeCategory() async throws {
+        let api = MockAPIClient()
+        api.discoveryResponses = [
+            DiscoveryEnvelope(
+                blocked: false,
+                safeMessage: nil,
+                data: DiscoveryData(
+                    slotState: DiscoverySlotState(
+                        theme: "a kite day",
+                        characters: ["Bunny", "Fox"],
+                        setting: "the breezy hill",
+                        tone: "playful",
+                        episodeIntent: "a happy standalone adventure"
+                    ),
+                    questionCount: 1,
+                    readyToGenerate: true,
+                    assistantMessage: "I have enough details now.",
+                    transcript: "Tell a kite day story"
+                )
+            )
+        ]
+        api.generateStoryResult = makeGeneratedEnvelope(title: "Kite Day", sceneCount: 2)
+        api.reviseStoryError = APIError.invalidResponse(
+            statusCode: 409,
+            code: "revision_conflict",
+            message: "Use a current scene before revising.",
+            requestId: "req-revision-conflict",
+            body: "{\"error\":\"revision_conflict\"}"
+        )
+
+        let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [1])
+        let store = StoryLibraryStore()
+        let plan = makePlan(childProfileId: try XCTUnwrap(store.activeProfile?.id))
+        let viewModel = PracticeSessionViewModel(
+            plan: plan,
+            sourceSeries: nil,
+            store: store,
+            api: api,
+            voiceCore: voice,
+            forceMockVoiceCore: false
+        )
+
+        await viewModel.startSession()
+        voice.emitTranscriptFinal("Tell a kite day story")
+        await waitUntil { viewModel.phase == .narrating }
+
+        voice.emitTranscriptFinal("Please add more kites")
+        await waitUntil { viewModel.phase == .failed }
+
+        XCTAssertEqual(viewModel.lastAppError?.category, .backendFailure)
+        XCTAssertEqual(viewModel.statusMessage, "Update unavailable")
+        XCTAssertEqual(viewModel.errorMessage, "Use a current scene before revising.")
+    }
+
+    func testSessionAuthBackendErrorUsesSafeMappedMessage() async throws {
+        let api = MockAPIClient()
+        api.discoveryError = APIError.invalidResponse(
+            statusCode: 401,
+            code: "invalid_session_token",
+            message: "Invalid signed token",
+            requestId: "req-invalid-session",
+            body: "{\"error\":\"invalid_session_token\"}"
+        )
+        let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [1])
+        let store = StoryLibraryStore()
+        let plan = makePlan(childProfileId: try XCTUnwrap(store.activeProfile?.id))
+        let viewModel = PracticeSessionViewModel(
+            plan: plan,
+            sourceSeries: nil,
+            store: store,
+            api: api,
+            voiceCore: voice,
+            forceMockVoiceCore: false
+        )
+
+        await viewModel.startSession()
+        voice.emitTranscriptFinal("Tell a bunny story")
+        await waitUntil { viewModel.phase == .failed }
+
+        XCTAssertEqual(viewModel.lastAppError?.category, .backendFailure)
+        XCTAssertEqual(viewModel.statusMessage, "Session unavailable")
+        XCTAssertEqual(viewModel.errorMessage, "StoryTime needs a fresh session before it can continue. Please try again.")
+        XCTAssertFalse(viewModel.errorMessage.contains("Invalid signed token"))
+    }
+
+    func testDiscoveryCancellationDoesNotFailSession() async throws {
+        let api = MockAPIClient()
+        api.discoveryError = CancellationError()
+        let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [1])
+        let store = StoryLibraryStore()
+        let plan = makePlan(childProfileId: try XCTUnwrap(store.activeProfile?.id))
+        let viewModel = PracticeSessionViewModel(
+            plan: plan,
+            sourceSeries: nil,
+            store: store,
+            api: api,
+            voiceCore: voice,
+            forceMockVoiceCore: false
+        )
+
+        await viewModel.startSession()
+        voice.emitTranscriptFinal("Tell a bunny story")
+        await waitUntil { api.discoveryRequests.count == 1 }
+        await waitUntil {
+            viewModel.phase == .ready && viewModel.lastAppError?.category == .cancellation
+        }
+
+        XCTAssertEqual(viewModel.lastAppError?.category, .cancellation)
+        XCTAssertEqual(viewModel.errorMessage, "")
+        XCTAssertEqual(viewModel.statusMessage, "Listening...")
+        XCTAssertNotEqual(viewModel.phase, .failed)
+    }
+
+    func testRevisionCancellationDoesNotFailSession() async throws {
+        let api = MockAPIClient()
+        api.discoveryResponses = [
+            DiscoveryEnvelope(
+                blocked: false,
+                safeMessage: nil,
+                data: DiscoveryData(
+                    slotState: DiscoverySlotState(
+                        theme: "a kite day",
+                        characters: ["Bunny", "Fox"],
+                        setting: "the breezy hill",
+                        tone: "playful",
+                        episodeIntent: "a happy standalone adventure"
+                    ),
+                    questionCount: 1,
+                    readyToGenerate: true,
+                    assistantMessage: "I have enough details now.",
+                    transcript: "Tell a kite day story"
+                )
+            )
+        ]
+        api.generateStoryResult = makeGeneratedEnvelope(title: "Kite Day", sceneCount: 2)
+        api.reviseStoryError = CancellationError()
+
+        let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [1])
+        let store = StoryLibraryStore()
+        let plan = makePlan(childProfileId: try XCTUnwrap(store.activeProfile?.id))
+        let viewModel = PracticeSessionViewModel(
+            plan: plan,
+            sourceSeries: nil,
+            store: store,
+            api: api,
+            voiceCore: voice,
+            forceMockVoiceCore: false
+        )
+
+        await viewModel.startSession()
+        voice.emitTranscriptFinal("Tell a kite day story")
+        await waitUntil { viewModel.phase == .narrating }
+
+        voice.emitTranscriptFinal("Please add more kites")
+        await waitUntil {
+            if case .interrupting = viewModel.sessionState,
+               viewModel.lastAppError?.category == .cancellation {
+                return true
+            }
+            return false
+        }
+
+        XCTAssertEqual(viewModel.lastAppError?.category, .cancellation)
+        XCTAssertEqual(viewModel.errorMessage, "")
+        XCTAssertEqual(viewModel.statusMessage, "Listening for a story update")
+        if case .interrupting(let sceneIndex) = viewModel.sessionState {
+            XCTAssertEqual(sceneIndex, 0)
+        } else {
+            XCTFail("Expected interrupting state after cancelled revision")
+        }
+    }
+
+    private struct CriticalPathAcceptanceResult {
+        let api: MockAPIClient
+        let voice: MockRealtimeVoiceCore
+        let store: StoryLibraryStore
+        let viewModel: PracticeSessionViewModel
+        let plan: StoryLaunchPlan
+        let savedSeries: StorySeries
+        let revisionText: String
+        let revisedScenes: [StoryScene]
+
+        var expectedSceneTexts: [String] {
+            [
+                "Scene 1 ends with a happy smile.",
+                revisedScenes[0].text,
+                revisedScenes[1].text
+            ]
+        }
+    }
+
+    private func runCriticalPathHappyPathAcceptance() async throws -> CriticalPathAcceptanceResult {
+        let initialTranscript = "Bunny and Dragon should have a picnic adventure"
+        let revisionText = "Please add a rainbow clue and a happy parade ending"
+        let revisedScenes = [
+            StoryScene(sceneId: "2", text: "The rainbow clue made Dragon laugh.", durationSec: 25),
+            StoryScene(sceneId: "3", text: "They ended with a happy parade by the fountain.", durationSec: 35)
+        ]
+
+        let api = MockAPIClient()
+        api.discoveryResponses = [
+            DiscoveryEnvelope(
+                blocked: false,
+                safeMessage: nil,
+                data: DiscoveryData(
+                    slotState: DiscoverySlotState(
+                        theme: "a dragon picnic",
+                        characters: ["Bunny", "Dragon"],
+                        setting: "the fountain park",
+                        tone: "funny",
+                        episodeIntent: "a happy standalone adventure"
+                    ),
+                    questionCount: 1,
+                    readyToGenerate: true,
+                    assistantMessage: "I have enough details now.",
+                    transcript: initialTranscript
+                )
+            )
+        ]
+        api.generateStoryResult = makeGeneratedEnvelope(title: "Picnic Clues", sceneCount: 3)
+        api.reviseStoryResult = makeRevisedEnvelope(scenes: revisedScenes)
+
+        let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [1, 2, 4, 5])
+        let store = StoryLibraryStore()
+        let plan = makePlan(childProfileId: try XCTUnwrap(store.activeProfile?.id))
+        let viewModel = PracticeSessionViewModel(
+            plan: plan,
+            sourceSeries: nil,
+            store: store,
+            api: api,
+            voiceCore: voice,
+            forceMockVoiceCore: false
+        )
+
+        await viewModel.startSession()
+        XCTAssertEqual(viewModel.phase, .ready)
+
+        voice.emitTranscriptFinal(initialTranscript)
+        await waitUntil {
+            viewModel.phase == .narrating &&
+            viewModel.currentSceneIndex == 1 &&
+            voice.spokenTexts.count >= 3
+        }
+
+        voice.emitUserSpeechChanged(true)
+        voice.emitTranscriptFinal(revisionText)
+
+        await waitUntil {
+            api.reviseRequests.count == 1 &&
+            viewModel.traceEvents.contains { $0.kind == .revision }
+        }
+        await waitUntil { viewModel.phase == .completed }
+
+        let savedSeries = try XCTUnwrap(store.series.first)
+        return CriticalPathAcceptanceResult(
+            api: api,
+            voice: voice,
+            store: store,
+            viewModel: viewModel,
+            plan: plan,
+            savedSeries: savedSeries,
+            revisionText: revisionText,
+            revisedScenes: revisedScenes
+        )
     }
 
     private func makePlan(childProfileId: UUID) -> StoryLaunchPlan {
@@ -748,6 +2821,24 @@ final class PracticeSessionViewModelTests: XCTestCase {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if condition() {
+                return
+            }
+            try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
+        }
+
+        XCTFail("Condition was not met before timeout", file: file, line: line)
+    }
+
+    private func waitUntilAsync(
+        timeout: TimeInterval = 2.0,
+        pollIntervalNanoseconds: UInt64 = 20_000_000,
+        condition: @escaping () async -> Bool,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if await condition() {
                 return
             }
             try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
@@ -832,10 +2923,61 @@ final class PracticeSessionViewModelTests: XCTestCase {
         let data = try JSONSerialization.data(withJSONObject: payload)
         return try JSONDecoder().decode(StoryEngineData.self, from: data)
     }
+
+    private func makeStartupSession() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [StartupURLProtocolStub.self]
+        return URLSession(configuration: configuration)
+    }
+
+    private static func startupHTTPResponse(
+        url: URL,
+        statusCode: Int,
+        json: Any,
+        headers: [String: String] = [:]
+    ) throws -> (HTTPURLResponse, Data) {
+        let data = try JSONSerialization.data(withJSONObject: json)
+        let response = HTTPURLResponse(url: url, statusCode: statusCode, httpVersion: nil, headerFields: headers)!
+        return (response, data)
+    }
+
+    private static func startupRequestBody(from request: URLRequest) throws -> Data {
+        if let body = request.httpBody {
+            return body
+        }
+
+        guard let stream = request.httpBodyStream else {
+            throw URLError(.badServerResponse)
+        }
+
+        stream.open()
+        defer { stream.close() }
+
+        var data = Data()
+        let bufferSize = 1_024
+        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
+        defer { buffer.deallocate() }
+
+        while stream.hasBytesAvailable {
+            let readCount = stream.read(buffer, maxLength: bufferSize)
+            if readCount < 0 {
+                throw stream.streamError ?? URLError(.badServerResponse)
+            }
+            if readCount == 0 {
+                break
+            }
+            data.append(buffer, count: readCount)
+        }
+
+        return data
+    }
 }
 
 final class MockAPIClient: APIClienting {
+    var traceHandler: ((APIClientTraceEvent) -> Void)?
+    var resolvedRegion: StoryTimeRegion?
     var prepareConnectionCallCount = 0
+    var bootstrapSessionIdentityCallCount = 0
     var fetchVoicesCallCount = 0
     var createRealtimeSessionCallCount = 0
     var discoveryRequests: [DiscoveryRequest] = []
@@ -844,14 +2986,22 @@ final class MockAPIClient: APIClienting {
     var embeddingInputs: [[String]] = []
 
     var prepareConnectionError: Error?
+    var bootstrapSessionIdentityError: Error?
+    var createRealtimeSessionError: Error?
     var discoveryError: Error?
     var generateStoryError: Error?
     var reviseStoryError: Error?
     var embeddingsError: Error?
+    var discoveryDelayNanoseconds: UInt64 = 0
+    var generateStoryDelayNanoseconds: UInt64 = 0
     var reviseStoryDelayNanoseconds: UInt64 = 0
     var maxConcurrentRevises = 0
     private var inFlightRevises = 0
+    private var traceRequestCounter = 0
     var voices = ["alloy"]
+    var bootstrapSessionId = "mock-session-123"
+    var bootstrapSessionToken = "mock-session-token"
+    var bootstrapSessionRegion: StoryTimeRegion = .us
     var realtimeSessionResult = RealtimeSessionEnvelope(
         session: RealtimeSessionData(
             ticket: "ticket",
@@ -891,32 +3041,73 @@ final class MockAPIClient: APIClienting {
     var embeddingsResult: [[Double]] = [[0.1, 0.2, 0.3]]
 
     func prepareConnection() async throws -> URL {
+        let requestId = emitStartedTrace(for: .healthCheck)
         prepareConnectionCallCount += 1
         if let prepareConnectionError {
+            emitFailureTrace(for: .healthCheck, requestId: requestId, error: prepareConnectionError)
             throw prepareConnectionError
         }
+        emitCompletedTrace(for: .healthCheck, requestId: requestId, statusCode: 200)
         return URL(string: "https://backend.example.com")!
     }
 
+    func bootstrapSessionIdentity(baseURL: URL) async throws {
+        let requestId = emitStartedTrace(for: .sessionBootstrap)
+        bootstrapSessionIdentityCallCount += 1
+        if let bootstrapSessionIdentityError {
+            emitFailureTrace(for: .sessionBootstrap, requestId: requestId, error: bootstrapSessionIdentityError)
+            throw bootstrapSessionIdentityError
+        }
+        let response = HTTPURLResponse(
+            url: baseURL.appending(path: "v1").appending(path: "session").appending(path: "identity"),
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: [
+                "x-storytime-session": bootstrapSessionToken,
+                "x-storytime-session-expires-at": String(Date().addingTimeInterval(300).timeIntervalSince1970),
+                "x-storytime-region": bootstrapSessionRegion.rawValue
+            ]
+        )!
+        AppSession.store(from: response)
+        AppSession.store(sessionId: bootstrapSessionId)
+        resolvedRegion = bootstrapSessionRegion
+        emitCompletedTrace(for: .sessionBootstrap, requestId: requestId, statusCode: 200)
+    }
+
     func fetchVoices() async throws -> [String] {
+        let requestId = emitStartedTrace(for: .voices)
         fetchVoicesCallCount += 1
+        emitCompletedTrace(for: .voices, requestId: requestId, statusCode: 200)
         return voices
     }
 
     func createRealtimeSession(request body: RealtimeSessionRequest) async throws -> RealtimeSessionEnvelope {
+        let requestId = emitStartedTrace(for: .realtimeSession)
         createRealtimeSessionCallCount += 1
+        if let createRealtimeSessionError {
+            emitFailureTrace(for: .realtimeSession, requestId: requestId, error: createRealtimeSessionError)
+            throw createRealtimeSessionError
+        }
+        emitCompletedTrace(for: .realtimeSession, requestId: requestId, statusCode: 200)
         return realtimeSessionResult
     }
 
     func discoverStoryTurn(request body: DiscoveryRequest) async throws -> DiscoveryEnvelope {
+        let requestId = emitStartedTrace(for: .storyDiscovery)
         discoveryRequests.append(body)
         if let discoveryError {
+            emitFailureTrace(for: .storyDiscovery, requestId: requestId, error: discoveryError)
             throw discoveryError
         }
-        if !discoveryResponses.isEmpty {
-            return discoveryResponses.removeFirst()
+        if discoveryDelayNanoseconds > 0 {
+            try? await Task.sleep(nanoseconds: discoveryDelayNanoseconds)
         }
-        return DiscoveryEnvelope(
+        if !discoveryResponses.isEmpty {
+            let response = discoveryResponses.removeFirst()
+            emitCompletedTrace(for: .storyDiscovery, requestId: requestId, statusCode: response.blocked ? 422 : 200)
+            return response
+        }
+        let response = DiscoveryEnvelope(
             blocked: false,
             safeMessage: nil,
             data: DiscoveryData(
@@ -927,39 +3118,140 @@ final class MockAPIClient: APIClienting {
                 transcript: body.transcript
             )
         )
+        emitCompletedTrace(for: .storyDiscovery, requestId: requestId, statusCode: 200)
+        return response
     }
 
     func generateStory(request body: GenerateStoryRequest) async throws -> GenerateStoryEnvelope {
+        let requestId = emitStartedTrace(for: .storyGeneration)
         generateRequests.append(body)
         if let generateStoryError {
+            emitFailureTrace(for: .storyGeneration, requestId: requestId, error: generateStoryError)
             throw generateStoryError
         }
+        if generateStoryDelayNanoseconds > 0 {
+            try? await Task.sleep(nanoseconds: generateStoryDelayNanoseconds)
+        }
+        emitCompletedTrace(for: .storyGeneration, requestId: requestId, statusCode: generateStoryResult.blocked ? 422 : 200)
         return generateStoryResult
     }
 
     func reviseStory(request body: ReviseStoryRequest) async throws -> ReviseStoryEnvelope {
+        let requestId = emitStartedTrace(for: .storyRevision)
         reviseRequests.append(body)
         inFlightRevises += 1
         maxConcurrentRevises = max(maxConcurrentRevises, inFlightRevises)
         defer { inFlightRevises -= 1 }
         if let reviseStoryError {
+            emitFailureTrace(for: .storyRevision, requestId: requestId, error: reviseStoryError)
             throw reviseStoryError
         }
         if reviseStoryDelayNanoseconds > 0 {
             try? await Task.sleep(nanoseconds: reviseStoryDelayNanoseconds)
         }
         if !reviseStoryResponses.isEmpty {
-            return reviseStoryResponses.removeFirst()
+            let response = reviseStoryResponses.removeFirst()
+            emitCompletedTrace(for: .storyRevision, requestId: requestId, statusCode: response.blocked ? 422 : 200)
+            return response
         }
+        emitCompletedTrace(for: .storyRevision, requestId: requestId, statusCode: reviseStoryResult.blocked ? 422 : 200)
         return reviseStoryResult
     }
 
     func createEmbeddings(inputs: [String]) async throws -> [[Double]] {
+        let requestId = emitStartedTrace(for: .embeddings)
         embeddingInputs.append(inputs)
         if let embeddingsError {
+            emitFailureTrace(for: .embeddings, requestId: requestId, error: embeddingsError)
             throw embeddingsError
         }
+        emitCompletedTrace(for: .embeddings, requestId: requestId, statusCode: 200)
         return Array(repeating: embeddingsResult.first ?? [0.1, 0.2, 0.3], count: inputs.count)
+    }
+
+    private func emitStartedTrace(for operation: APIClientTraceOperation) -> String {
+        let requestId = nextTraceRequestId(for: operation)
+        traceHandler?(
+            APIClientTraceEvent(
+                operation: operation,
+                phase: .started,
+                route: route(for: operation),
+                requestId: requestId,
+                sessionId: AppSession.currentSessionId,
+                statusCode: nil
+            )
+        )
+        return requestId
+    }
+
+    private func emitCompletedTrace(
+        for operation: APIClientTraceOperation,
+        requestId: String,
+        statusCode: Int
+    ) {
+        traceHandler?(
+            APIClientTraceEvent(
+                operation: operation,
+                phase: .completed,
+                route: route(for: operation),
+                requestId: requestId,
+                sessionId: AppSession.currentSessionId,
+                statusCode: statusCode
+            )
+        )
+    }
+
+    private func emitFailureTrace(
+        for operation: APIClientTraceOperation,
+        requestId: String,
+        error: Error
+    ) {
+        if let apiError = error as? APIError,
+           case .invalidResponse(let statusCode, _, _, let responseRequestId, _) = apiError {
+            emitCompletedTrace(
+                for: operation,
+                requestId: responseRequestId ?? requestId,
+                statusCode: statusCode
+            )
+            return
+        }
+
+        traceHandler?(
+            APIClientTraceEvent(
+                operation: operation,
+                phase: .transportFailed,
+                route: route(for: operation),
+                requestId: requestId,
+                sessionId: AppSession.currentSessionId,
+                statusCode: nil
+            )
+        )
+    }
+
+    private func nextTraceRequestId(for operation: APIClientTraceOperation) -> String {
+        traceRequestCounter += 1
+        return "mock-\(operation.rawValue)-\(traceRequestCounter)"
+    }
+
+    private func route(for operation: APIClientTraceOperation) -> String {
+        switch operation {
+        case .healthCheck:
+            return "/health"
+        case .sessionBootstrap:
+            return "/v1/session/identity"
+        case .voices:
+            return "/v1/voices"
+        case .realtimeSession:
+            return "/v1/realtime/session"
+        case .storyDiscovery:
+            return "/v1/story/discovery"
+        case .storyGeneration:
+            return "/v1/story/generate"
+        case .storyRevision:
+            return "/v1/story/revise"
+        case .embeddings:
+            return "/v1/embeddings/create"
+        }
     }
 }
 
@@ -971,15 +3263,19 @@ final class MockRealtimeVoiceCore: RealtimeVoiceControlling {
     var onTranscriptFinal: ((String) -> Void)?
     var onLevels: ((CGFloat, CGFloat) -> Void)?
     var onUserSpeechChanged: ((Bool) -> Void)?
-    var onAssistantResponseCompleted: (() -> Void)?
+    var onAssistantResponseCompleted: ((String?) -> Void)?
     var onError: ((String) -> Void)?
 
     private let autoCompleteSpeakIndices: Set<Int>
+    var connectError: Error?
+    var emitsConnectedOnConnect = true
+    var onConnectAction: ((MockRealtimeVoiceCore) -> Void)?
 
     private(set) var connectCallCount = 0
     private(set) var cancelCallCount = 0
     private(set) var disconnectCallCount = 0
     private(set) var spokenTexts: [String] = []
+    private(set) var spokenUtteranceIDs: [String?] = []
 
     init(autoCompleteSpeakIndices: Set<Int>) {
         self.autoCompleteSpeakIndices = autoCompleteSpeakIndices
@@ -987,13 +3283,20 @@ final class MockRealtimeVoiceCore: RealtimeVoiceControlling {
 
     func connect(baseURL: URL, endpointPath: String, session: RealtimeSessionData, installId: String) async throws {
         connectCallCount += 1
-        onConnected?()
+        onConnectAction?(self)
+        if let connectError {
+            throw connectError
+        }
+        if emitsConnectedOnConnect {
+            onConnected?()
+        }
     }
 
-    func speak(text: String) async {
+    func speak(text: String, utteranceId: String?) async {
         spokenTexts.append(text)
+        spokenUtteranceIDs.append(utteranceId)
         if autoCompleteSpeakIndices.contains(spokenTexts.count) {
-            onAssistantResponseCompleted?()
+            onAssistantResponseCompleted?(utteranceId)
         }
     }
 
@@ -1029,4 +3332,46 @@ final class MockRealtimeVoiceCore: RealtimeVoiceControlling {
     func emitDisconnected() {
         onDisconnected?()
     }
+
+    func emitAssistantResponseCompleted(_ utteranceId: String?) {
+        onAssistantResponseCompleted?(utteranceId)
+    }
+
+    func emitConnected() {
+        onConnected?()
+    }
+}
+
+private final class StartupURLProtocolStub: URLProtocol {
+    static var handler: ((URLRequest) throws -> (URLResponse, Data))?
+
+    static func reset() {
+        handler = nil
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        true
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        guard let handler = Self.handler else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+            return
+        }
+
+        do {
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
 }

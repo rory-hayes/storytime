@@ -4,6 +4,11 @@ import { createApp, type AppServices } from "../app.js";
 import { AppError } from "../lib/errors.js";
 import { makeTestEnv } from "./testHelpers.js";
 
+const validRealtimeOfferSdp =
+  "v=0\r\no=- 46117355 2 IN IP4 127.0.0.1\r\ns=StoryTime\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=fingerprint:sha-256 offer-test\r\n";
+const validRealtimeAnswerSdp =
+  "v=0\r\no=- 46117355 3 IN IP4 127.0.0.1\r\ns=StoryTime\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=fingerprint:sha-256 answer-test\r\n";
+
 function mockServices(): AppServices {
   return {
     moderation: {
@@ -39,7 +44,7 @@ function mockServices(): AppServices {
         input_audio_transcription_model: "gpt-4o-mini-transcribe"
       }),
       createCall: async () => ({
-        answer_sdp: "v=0\r\n"
+        answer_sdp: validRealtimeAnswerSdp
       })
     },
     story: {
@@ -82,6 +87,20 @@ describe("v1 API", () => {
 
     expect(response.status).toBe(200);
     expect(response.body.voices.length).toBeGreaterThan(0);
+  });
+
+  it("echoes requested region during session bootstrap", async () => {
+    const app = createApp({ env: makeTestEnv(), services: mockServices() });
+    const response = await request(app)
+      .post("/v1/session/identity")
+      .set("x-storytime-install-id", "install-123")
+      .set("x-storytime-region", "EU")
+      .send({});
+
+    expect(response.status).toBe(200);
+    expect(response.body.region).toBe("EU");
+    expect(response.headers["x-storytime-region"]).toBe("EU");
+    expect(response.headers["x-storytime-session"]).toBeTruthy();
   });
 
 
@@ -134,6 +153,15 @@ describe("v1 API", () => {
     expect(response.headers["x-storytime-session"]).toBeTruthy();
   });
 
+  it("rejects missing install ids on the session identity startup route", async () => {
+    const app = createApp({ env: makeTestEnv(), services: mockServices() });
+    const response = await request(app)
+      .post("/v1/session/identity");
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe("missing_install_id");
+  });
+
   it("issues a realtime session ticket without exposing an OpenAI key", async () => {
     const app = createApp({ env: makeTestEnv(), services: mockServices() });
     const response = await request(app)
@@ -151,6 +179,22 @@ describe("v1 API", () => {
     expect(response.headers["x-storytime-session"]).toBeTruthy();
   });
 
+  it("rejects invalid session tokens on the realtime session startup route", async () => {
+    const app = createApp({ env: makeTestEnv({ API_AUTH_REQUIRED: true }), services: mockServices() });
+    const response = await request(app)
+      .post("/v1/realtime/session")
+      .set("x-storytime-install-id", "install-123")
+      .set("x-storytime-session", "not-a-valid-session-token")
+      .send({
+        child_profile_id: "fbeafe23-42d5-4ea7-8035-5680419504e9",
+        voice: "alloy",
+        region: "US"
+      });
+
+    expect(response.status).toBe(401);
+    expect(response.body.error).toBe("invalid_session_token");
+  });
+
   it("accepts a realtime call offer via the backend proxy", async () => {
     const app = createApp({ env: makeTestEnv(), services: mockServices() });
     const response = await request(app)
@@ -158,11 +202,25 @@ describe("v1 API", () => {
       .set("x-storytime-install-id", "install-123")
       .send({
         ticket: "signed-ticket-value-long-enough",
-        sdp: "v=0\r\no=- 46117355 2 IN IP4 127.0.0.1\r\ns=StoryTime\r\n"
+        sdp: validRealtimeOfferSdp
       });
 
     expect(response.status).toBe(200);
     expect(response.body.answer_sdp).toContain("v=0");
+  });
+
+  it("rejects invalid realtime call offers before reaching the proxy", async () => {
+    const app = createApp({ env: makeTestEnv(), services: mockServices() });
+    const response = await request(app)
+      .post("/v1/realtime/call")
+      .set("x-storytime-install-id", "install-123")
+      .send({
+        ticket: "signed-ticket-value-long-enough",
+        sdp: "not-an-sdp-offer"
+      });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe("invalid_request");
   });
 
   it("returns a discovery follow-up for transcript analysis", async () => {
@@ -184,6 +242,27 @@ describe("v1 API", () => {
     expect(response.body.data.assistant_message).toBeTruthy();
     expect(response.body.data.transcript).toContain("bunny");
     expect(response.body.request_id ?? response.headers["x-request-id"]).toBeTruthy();
+  });
+
+  it("echoes a caller supplied request id on discovery routes", async () => {
+    const app = createApp({ env: makeTestEnv(), services: mockServices() });
+    const response = await request(app)
+      .post("/v1/story/discovery")
+      .set("x-storytime-install-id", "install-123")
+      .set("x-request-id", "req-client-discovery-123")
+      .send({
+        child_profile_id: "fbeafe23-42d5-4ea7-8035-5680419504e9",
+        transcript: "I want a calm moonlit story",
+        question_count: 1,
+        slot_state: {
+          theme: "a moonlit walk"
+        },
+        mode: "new"
+      });
+
+    expect(response.status).toBe(200);
+    expect(response.headers["x-request-id"]).toBe("req-client-discovery-123");
+    expect(response.body.request_id ?? response.headers["x-request-id"]).toBe("req-client-discovery-123");
   });
 
   it("generates a story payload with expected shape", async () => {
@@ -329,6 +408,8 @@ describe("v1 API", () => {
 
     expect(response.status).toBe(500);
     expect(response.body.error).toBe("internal_error");
+    expect(response.body.message).toBe("Unexpected server error");
+    expect(response.body.request_id).toBeTruthy();
   });
 
   it("enforces general rate limits across authenticated routes", async () => {
@@ -354,7 +435,9 @@ describe("v1 API", () => {
   it("returns explicit app errors from services", async () => {
     const services = mockServices();
     services.story.reviseStory = async () => {
-      throw new AppError("No active revision", 409, "revision_conflict");
+      throw new AppError("No active revision", 409, "revision_conflict", undefined, {
+        publicMessage: "Use a current scene before revising."
+      });
     };
 
     const app = createApp({ env: makeTestEnv(), services });
@@ -376,6 +459,8 @@ describe("v1 API", () => {
 
     expect(response.status).toBe(409);
     expect(response.body.error).toBe("revision_conflict");
+    expect(response.body.message).toBe("Use a current scene before revising.");
+    expect(response.body.request_id).toBeTruthy();
   });
 
   it("rejects unsupported regions", async () => {

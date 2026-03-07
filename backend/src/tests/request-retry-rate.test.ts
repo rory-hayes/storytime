@@ -14,6 +14,12 @@ import { makeRequest, makeRequestContext, makeTestEnv } from "./testHelpers.js";
 describe("request context, retry, rate limiting, analytics", () => {
   it("resolves request ids and regions", () => {
     const env = makeTestEnv({ DEFAULT_REGION: "EU", ALLOWED_REGIONS: ["EU"] });
+    const exactRequest = makeRequest({
+      headers: {
+        "x-request-id": "req-client-123",
+        "x-storytime-region": "eu"
+      }
+    });
     const request = makeRequest({
       headers: {
         "x-request-id": ` ${"r".repeat(140)} `,
@@ -22,8 +28,10 @@ describe("request context, retry, rate limiting, analytics", () => {
       body: { region: "US" }
     });
 
+    expect(resolveRequestId(exactRequest)).toBe("req-client-123");
     expect(resolveRequestId(request)).toHaveLength(120);
     expect(resolveRequestedRegion(request, env)).toBe("EU");
+    expect(resolveRequestedRegion(makeRequest(), env)).toBe("EU");
     expect(() => resolveRequestedRegion(makeRequest({ body: { region: "US" } }), env)).toThrowError(
       expect.objectContaining({ code: "unsupported_region" })
     );
@@ -86,7 +94,8 @@ describe("request context, retry, rate limiting, analytics", () => {
       method: "POST",
       status: 200,
       durationMs: 12,
-      region: "US"
+      region: "US",
+      sessionId: `session-${suffix}`
     });
     analytics.recordOpenAI({
       requestId: `req-openai-${suffix}`,

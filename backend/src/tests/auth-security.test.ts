@@ -49,29 +49,52 @@ describe("auth and security", () => {
     );
   });
 
-  it("verifies session tokens and refreshes them near expiry", () => {
-    const env = makeTestEnv({ SESSION_TOKEN_TTL_SECONDS: 60, SESSION_TOKEN_REFRESH_SECONDS: 120 });
-    const issued = createSessionToken(
+  it("verifies session tokens and only refreshes them inside the refresh window", () => {
+    const steadyEnv = makeTestEnv({ SESSION_TOKEN_TTL_SECONDS: 600, SESSION_TOKEN_REFRESH_SECONDS: 120 });
+    const steadyIssued = createSessionToken(
       {
         install_id: "install-123",
         session_id: "session-abc",
         region: "US"
       },
-      env
+      steadyEnv
     );
 
-    const request = makeRequest({
+    const steadyRequest = makeRequest({
       headers: {
         "x-storytime-install-id": "install-123",
-        [SESSION_HEADER]: issued.token
+        [SESSION_HEADER]: steadyIssued.token
       }
     });
 
-    const identity = resolveSessionIdentityWithOptions(request, env, "US", {});
+    const steadyIdentity = resolveSessionIdentityWithOptions(steadyRequest, steadyEnv, "US", {});
 
-    expect(identity.authLevel).toBe("verified_session");
-    expect(identity.sessionId).toBe("session-abc");
-    expect(identity.sessionToken?.token).toBeTruthy();
+    expect(steadyIdentity.authLevel).toBe("verified_session");
+    expect(steadyIdentity.sessionId).toBe("session-abc");
+    expect(steadyIdentity.sessionToken).toBeUndefined();
+
+    const refreshEnv = makeTestEnv({ SESSION_TOKEN_TTL_SECONDS: 60, SESSION_TOKEN_REFRESH_SECONDS: 120 });
+    const refreshIssued = createSessionToken(
+      {
+        install_id: "install-123",
+        session_id: "session-refresh",
+        region: "US"
+      },
+      refreshEnv
+    );
+
+    const refreshRequest = makeRequest({
+      headers: {
+        "x-storytime-install-id": "install-123",
+        [SESSION_HEADER]: refreshIssued.token
+      }
+    });
+
+    const refreshIdentity = resolveSessionIdentityWithOptions(refreshRequest, refreshEnv, "US", {});
+
+    expect(refreshIdentity.authLevel).toBe("verified_session");
+    expect(refreshIdentity.sessionId).toBe("session-refresh");
+    expect(refreshIdentity.sessionToken?.token).toBeTruthy();
   });
 
   it("creates and verifies realtime tickets and session tokens", () => {

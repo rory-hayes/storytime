@@ -4,7 +4,7 @@ import { StoryDiscoveryService } from "../services/storyDiscoveryService.js";
 import { buildStoryPlan } from "../services/storyPlannerService.js";
 import { StoryService } from "../services/storyService.js";
 import type { DiscoveryRequest, StoryScene } from "../types.js";
-import { makeRequestContext, makeTestEnv } from "./testHelpers.js";
+import { makeCapturedLogger, makeRequestContext, makeTestEnv } from "./testHelpers.js";
 
 function discoveryRequest(overrides: Partial<DiscoveryRequest> = {}): DiscoveryRequest {
   return {
@@ -142,6 +142,182 @@ describe("story engine advanced coverage", () => {
     await expect(service.analyzeTurn(discoveryRequest(), makeRequestContext())).rejects.toMatchObject({
       code: "model_empty_output"
     });
+  });
+
+  it("logs discovery lifecycle retries without transcript content", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const openai = {
+      responses: {
+        create: vi
+          .fn()
+          .mockRejectedValueOnce(Object.assign(new Error("temporary discovery failure"), { status: 503 }))
+          .mockResolvedValueOnce({
+            output: [
+              {
+                type: "message",
+                content: [
+                  {
+                    type: "output_text",
+                    text: JSON.stringify({
+                      slot_state: {
+                        theme: "lantern adventure",
+                        characters: ["Bunny", "Fox"],
+                        setting: "park",
+                        tone: "cozy",
+                        episode_intent: "a complete and happy standalone adventure"
+                      },
+                      ready_to_generate: true,
+                      next_focus_slot: null,
+                      assistant_message: "I have enough details now."
+                    })
+                  }
+                ]
+              }
+            ]
+          })
+      }
+    } as any;
+    const moderation = {
+      moderateText: vi.fn().mockResolvedValue({ flagged: false, categories: [] })
+    } as any;
+    const captured = makeCapturedLogger();
+    const service = new StoryDiscoveryService(openai, makeTestEnv({ OPENAI_MAX_RETRIES: 1, OPENAI_RETRY_BASE_MS: 0 }), moderation);
+
+    const result = await service.analyzeTurn(discoveryRequest(), makeRequestContext({ logger: captured.logger }));
+
+    expect(result.blocked).toBe(false);
+    const lifecycleEntries = captured.entries.filter((entry) => entry.bindings.event_type === "lifecycle_event");
+    expect(
+      lifecycleEntries.map((entry) => `${entry.bindings.component}.${entry.bindings.action}.${entry.bindings.status}`)
+    ).toEqual(
+      expect.arrayContaining([
+        "story_discovery.analyze_turn.started",
+        "story_discovery.analyze_turn.retrying",
+        "story_discovery.analyze_turn.completed"
+      ])
+    );
+    const serializedLogs = JSON.stringify(lifecycleEntries);
+    expect(serializedLogs).not.toContain("Bunny wants a lantern story in the park");
+    expect(serializedLogs).not.toContain("temporary discovery failure");
+  });
+
+  it("logs generate lifecycle retries and completion without story text", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const openai = {
+      responses: {
+        create: vi
+          .fn()
+          .mockRejectedValueOnce(Object.assign(new Error("transient generate failure"), { status: 503 }))
+          .mockResolvedValueOnce({
+            output: [
+              {
+                type: "message",
+                content: [
+                  {
+                    type: "output_text",
+                    text: JSON.stringify({
+                      title: "Lantern Trail",
+                      scenes: [
+                        { scene_id: "1", text: "Bunny smiled in the park.", duration_sec: 40 },
+                        { scene_id: "2", text: "Fox found the clue and everyone cheered happily.", duration_sec: 50 },
+                        { scene_id: "3", text: "They followed the lantern path past the pond together.", duration_sec: 45 },
+                        { scene_id: "4", text: "They walked home happy beneath the moon.", duration_sec: 45 }
+                      ]
+                    })
+                  }
+                ]
+              }
+            ]
+          })
+      }
+    } as any;
+
+    const moderation = {
+      moderateText: vi.fn().mockResolvedValue({ flagged: false, categories: [] }),
+      moderateManyText: vi.fn().mockResolvedValue({ flagged: false, categories: [] })
+    } as any;
+    const continuity = {
+      enrichEngine: vi.fn().mockResolvedValue({
+        episode_recap: "Bunny and Fox followed the lantern trail.",
+        series_memory: {
+          title: "Lantern Trail",
+          recurring_characters: ["Bunny", "Fox"],
+          prior_episode_recap: "Bunny and Fox followed the lantern trail.",
+          world_facts: ["Lanterns glow in the park."],
+          open_loops: [],
+          favorite_places: ["park"],
+          relationship_facts: ["Bunny and Fox help each other."],
+          arc_summary: "They follow happy clues together.",
+          next_episode_hook: "Another lantern appears by the pond."
+        },
+        character_bible: [
+          { name: "Bunny", role: "main friend", traits: ["kind", "curious"] },
+          { name: "Fox", role: "returning friend", traits: ["warm", "helpful"] }
+        ],
+        continuity_facts: ["Lanterns glow in the park."]
+      })
+    } as any;
+    const captured = makeCapturedLogger();
+    const service = new StoryService(
+      openai,
+      makeTestEnv({ OPENAI_MAX_RETRIES: 1, OPENAI_RETRY_BASE_MS: 0 }),
+      moderation,
+      continuity
+    );
+
+    const result = await service.generateStory(generateRequest(), makeRequestContext({ logger: captured.logger }));
+
+    expect(result.blocked).toBe(false);
+    const lifecycleEntries = captured.entries.filter((entry) => entry.bindings.event_type === "lifecycle_event");
+    expect(
+      lifecycleEntries.map((entry) => `${entry.bindings.component}.${entry.bindings.action}.${entry.bindings.status}`)
+    ).toEqual(
+      expect.arrayContaining([
+        "story_generate.generate_story.started",
+        "story_generate.generate_story.retrying",
+        "story_generate.generate_story.completed"
+      ])
+    );
+    const serializedLogs = JSON.stringify(lifecycleEntries);
+    expect(serializedLogs).not.toContain("Fox found the clue and everyone cheered happily.");
+    expect(serializedLogs).not.toContain("transient generate failure");
+  });
+
+  it("logs revise lifecycle failures without remaining-scene text", async () => {
+    const openai = {
+      responses: {
+        create: vi.fn().mockRejectedValue(new Error("revision backend down"))
+      }
+    } as any;
+    const moderation = {
+      moderateText: vi.fn().mockResolvedValue({ flagged: false, categories: [] }),
+      moderateManyText: vi.fn().mockResolvedValue({ flagged: false, categories: [] })
+    } as any;
+    const continuity = { enrichEngine: vi.fn() } as any;
+    const captured = makeCapturedLogger();
+    const service = new StoryService(openai, makeTestEnv({ OPENAI_MAX_RETRIES: 0 }), moderation, continuity);
+
+    await expect(service.reviseStory(revisionRequest(), makeRequestContext({ logger: captured.logger }))).rejects.toThrow(
+      "revision backend down"
+    );
+
+    const lifecycleEntries = captured.entries.filter((entry) => entry.bindings.event_type === "lifecycle_event");
+    expect(
+      lifecycleEntries.map((entry) => `${entry.bindings.component}.${entry.bindings.action}.${entry.bindings.status}`)
+    ).toEqual(
+      expect.arrayContaining([
+        "story_revise.revise_story.started",
+        "story_revise.revise_story.failed"
+      ])
+    );
+    const failedEntry = lifecycleEntries.find(
+      (entry) => entry.bindings.component === "story_revise" && entry.bindings.status === "failed"
+    );
+    expect(failedEntry?.bindings.error_name).toBe("Error");
+
+    const serializedLogs = JSON.stringify(lifecycleEntries);
+    expect(serializedLogs).not.toContain("The dragon looked worried by the fountain.");
+    expect(serializedLogs).not.toContain("revision backend down");
   });
 
   it("extracts continuity from message-part output and merges plan memory", async () => {

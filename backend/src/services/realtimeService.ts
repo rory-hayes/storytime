@@ -5,6 +5,7 @@ import { createRealtimeTicket, verifyRealtimeTicket } from "../lib/security.js";
 import type { RequestContext } from "../lib/requestContext.js";
 import { withRetry } from "../lib/retry.js";
 import { analytics } from "../lib/analytics.js";
+import { logLifecycle } from "../lib/lifecycle.js";
 import { looksLikeSdp } from "../types.js";
 import type {
   RealtimeCallRequest,
@@ -26,48 +27,125 @@ export class RealtimeService {
   }
 
   issueSessionTicket(request: RealtimeSessionRequest, context: RequestContext): RealtimeSessionTicket {
-    this.enforceRateLimit(context, "ticket");
+    const startedAt = Date.now();
+    logLifecycle(context, {
+      component: "realtime",
+      action: "session_ticket",
+      phase: "started",
+      details: {
+        voice: request.voice
+      }
+    });
 
-    const ticket = createRealtimeTicket(
-      {
-        child_profile_id: request.child_profile_id,
+    try {
+      this.enforceRateLimit(context, "ticket");
+
+      const ticket = createRealtimeTicket(
+        {
+          child_profile_id: request.child_profile_id,
+          voice: request.voice,
+          region: request.region,
+          install_id: context.installId
+        },
+        this.env
+      );
+
+      this.recordSecurityEvent(context, "realtime_ticket_issued");
+      logLifecycle(context, {
+        component: "realtime",
+        action: "session_ticket",
+        phase: "completed",
+        details: {
+          voice: request.voice
+        },
+        durationMs: Date.now() - startedAt
+      });
+
+      return {
+        ticket: ticket.ticket,
+        expires_at: ticket.expires_at,
+        model: this.env.OPENAI_REALTIME_MODEL,
         voice: request.voice,
-        region: request.region,
-        install_id: context.installId
-      },
-      this.env
-    );
-
-    this.recordSecurityEvent(context, "realtime_ticket_issued");
-
-    return {
-      ticket: ticket.ticket,
-      expires_at: ticket.expires_at,
-      model: this.env.OPENAI_REALTIME_MODEL,
-      voice: request.voice,
-      input_audio_transcription_model: this.env.OPENAI_REALTIME_TRANSCRIPTION_MODEL
-    };
+        input_audio_transcription_model: this.env.OPENAI_REALTIME_TRANSCRIPTION_MODEL
+      };
+    } catch (error) {
+      logLifecycle(context, {
+        component: "realtime",
+        action: "session_ticket",
+        phase: "failed",
+        details: {
+          voice: request.voice
+        },
+        durationMs: Date.now() - startedAt,
+        error
+      });
+      throw error;
+    }
   }
 
   async createCall(request: RealtimeCallRequest, context: RequestContext): Promise<RealtimeCallResult> {
-    this.enforceRateLimit(context, "call");
-    const ticket = verifyRealtimeTicket(request.ticket, context.installId, this.env);
     const startedAt = Date.now();
     let attempts = 1;
+    logLifecycle(context, {
+      component: "realtime",
+      action: "call_proxy",
+      phase: "started",
+      details: {
+        offer_bytes: request.sdp.length
+      }
+    });
 
     try {
+      this.enforceRateLimit(context, "call");
+      const ticket = verifyRealtimeTicket(request.ticket, context.installId, this.env);
       const { result, attempts: usedAttempts } = await withRetry(
         () => this.fetchOpenAIAnswerSdp(ticket.voice, request.sdp),
         {
           retries: this.env.OPENAI_MAX_RETRIES,
-          baseDelayMs: this.env.OPENAI_RETRY_BASE_MS
+          baseDelayMs: this.env.OPENAI_RETRY_BASE_MS,
+          onRetry: (error, attempt, nextDelayMs) => {
+            logLifecycle(context, {
+              component: "realtime",
+              action: "call_proxy",
+              phase: "retrying",
+              details: {
+                retry_attempt: attempt,
+                retry_in_ms: nextDelayMs,
+                retry_source: "openai",
+                voice: ticket.voice
+              },
+              error
+            });
+          }
         }
       );
       attempts = usedAttempts;
       this.recordUsage(context, attempts, Date.now() - startedAt, true);
+      logLifecycle(context, {
+        component: "realtime",
+        action: "call_proxy",
+        phase: "completed",
+        details: {
+          voice: ticket.voice,
+          offer_bytes: request.sdp.length
+        },
+        attempts,
+        durationMs: Date.now() - startedAt
+      });
       return { answer_sdp: result };
     } catch (error) {
       this.recordUsage(context, attempts, Date.now() - startedAt, false);
+      logLifecycle(context, {
+        component: "realtime",
+        action: "call_proxy",
+        phase: "failed",
+        details: {
+          offer_bytes: request.sdp.length
+        },
+        attempts,
+        durationMs: Date.now() - startedAt,
+        error
+      });
       throw error;
     }
   }
@@ -111,8 +189,6 @@ export class RealtimeService {
 
       if (!openAIResponse.ok) {
         const body = await openAIResponse.text();
-        const details = { status: openAIResponse.status, body };
-        loggerForContext(controller, undefined); // noop placeholder? 
         throw new AppError(`Realtime call creation failed (${openAIResponse.status})`, 502, "realtime_call_failed", {
           status: openAIResponse.status,
           body
