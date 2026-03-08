@@ -309,6 +309,7 @@ export class StoryDiscoveryService {
       requestId: context.requestId,
       route: context.route,
       operation: "responses.discovery",
+      runtimeStage: "discovery",
       provider: "openai",
       model: this.env.OPENAI_RESPONSES_MODEL,
       region: context.region,

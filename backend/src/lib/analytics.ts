@@ -17,6 +17,8 @@ export type OpenAIMetrics = {
   requestId: string;
   route: string;
   operation: string;
+  runtimeStage?: string;
+  runtimeStageGroup?: string;
   provider: "openai";
   model: string;
   region: Region;
@@ -57,8 +59,15 @@ class AnalyticsSink {
   }
 
   recordOpenAI(metrics: OpenAIMetrics) {
+    const runtimeStageGroup = metrics.runtimeStageGroup ?? mapRuntimeStageGroup(metrics.runtimeStage);
     this.meter.increment(`openai:${metrics.operation}:${metrics.success ? "success" : "failure"}`);
-    logger.info({ event_type: "openai_usage", ...metrics }, "openai usage");
+    if (metrics.runtimeStage) {
+      this.meter.increment(`openai_stage:${metrics.runtimeStage}:${metrics.success ? "success" : "failure"}`);
+    }
+    if (runtimeStageGroup) {
+      this.meter.increment(`openai_stage_group:${runtimeStageGroup}:${metrics.success ? "success" : "failure"}`);
+    }
+    logger.info({ event_type: "openai_usage", ...metrics, runtimeStageGroup }, "openai usage");
   }
 
   recordSecurity(metrics: SecurityMetrics) {
@@ -72,3 +81,20 @@ class AnalyticsSink {
 }
 
 export const analytics = new AnalyticsSink();
+
+function mapRuntimeStageGroup(runtimeStage?: string): string | undefined {
+  switch (runtimeStage) {
+    case "interaction":
+    case "discovery":
+    case "answer_only_interaction":
+      return "interaction";
+    case "story_generation":
+      return "generation";
+    case "tts_generation":
+      return "narration";
+    case "revise_future_scenes":
+      return "revision";
+    default:
+      return undefined;
+  }
+}

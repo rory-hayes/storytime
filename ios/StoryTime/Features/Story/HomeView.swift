@@ -66,26 +66,34 @@ struct HomeView: View {
     }
 
     private var header: some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("StoryTime")
-                    .font(.system(size: 36, weight: .black, design: .rounded))
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("StoryTime")
+                        .font(.system(size: 36, weight: .black, design: .rounded))
 
-                Text("Voice stories with parent controls built in")
-                    .font(.system(size: 15, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.secondary)
+                    Text("Kids shape the story while it is happening.")
+                        .font(.system(size: 17, weight: .bold, design: .rounded))
+                        .foregroundStyle(.primary)
+                        .accessibilityIdentifier("homeHeroTitle")
+                }
+
+                Spacer()
+
+                Button {
+                    parentSheet = .gate
+                } label: {
+                    Label("Parent", systemImage: "lock.shield")
+                        .font(.system(size: 14, weight: .bold, design: .rounded))
+                }
+                .buttonStyle(.bordered)
+                .accessibilityIdentifier("parentControlsButton")
             }
 
-            Spacer()
-
-            Button {
-                parentSheet = .gate
-            } label: {
-                Label("Parent", systemImage: "lock.shield")
-                    .font(.system(size: 14, weight: .bold, design: .rounded))
-            }
-            .buttonStyle(.bordered)
-            .accessibilityIdentifier("parentControlsButton")
+            Text("Start with a few live questions, then StoryTime narrates the adventure scene by scene.")
+                .font(.system(size: 15, weight: .semibold, design: .rounded))
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("homeHeroSummary")
         }
     }
 
@@ -142,10 +150,15 @@ struct HomeView: View {
                 }
             }
 
+            Text(activeProfileSummary)
+                .font(.system(size: 14, weight: .semibold, design: .rounded))
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("homeActiveProfileSummary")
+
             Button {
                 showingNewJourney = true
             } label: {
-                Label("New Story", systemImage: "plus.circle.fill")
+                Label("Start New Story", systemImage: "plus.circle.fill")
                     .font(.system(size: 16, weight: .bold, design: .rounded))
             }
             .buttonStyle(.borderedProminent)
@@ -164,7 +177,7 @@ struct HomeView: View {
 
     private var privacyCard: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Trust controls")
+            Text("Parent controls and privacy")
                 .font(.system(size: 18, weight: .bold, design: .rounded))
 
             HStack(spacing: 10) {
@@ -172,10 +185,24 @@ struct HomeView: View {
                 trustPill(title: "History", value: store.storyHistorySummary)
             }
 
-            Text("Parents manage profiles, sensitivity, retention, and deletion. Raw audio is not saved. Story prompts and generated stories are sent for live processing, and saved history stays on this device after each session.")
+            Text("Parent Controls cover child setup, safety defaults, retention, and deletion. Raw audio is not saved. Live questions and story generation are processed during each session. Saved history and continuity stay on this device afterward.")
                 .font(.system(size: 13, weight: .medium, design: .rounded))
                 .foregroundStyle(.secondary)
                 .accessibilityIdentifier("homePrivacySummary")
+
+            Button {
+                parentSheet = .gate
+            } label: {
+                Label("Open Parent Controls", systemImage: "lock.shield")
+                    .font(.system(size: 14, weight: .bold, design: .rounded))
+            }
+            .buttonStyle(.bordered)
+            .accessibilityIdentifier("homeParentControlsEntryButton")
+
+            Text("PARENT is a lightweight check on this device. It is not account authentication.")
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("homeParentControlsFootnote")
         }
         .padding(16)
         .background(
@@ -190,8 +217,13 @@ struct HomeView: View {
 
     private var storiesSection: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Past Stories")
+            Text("Saved stories")
                 .font(.system(size: 20, weight: .bold, design: .rounded))
+
+            Text(librarySummary)
+                .font(.system(size: 14, weight: .semibold, design: .rounded))
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("homeLibrarySummary")
 
             if store.visibleSeries.isEmpty {
                 RoundedRectangle(cornerRadius: 18)
@@ -228,6 +260,28 @@ struct HomeView: View {
             return "No stories yet for \(active.displayName)."
         }
         return "No stories yet."
+    }
+
+    private var activeProfileSummary: String {
+        if let active = store.activeProfile {
+            return "\(active.displayName) will answer a few live questions first, then StoryTime tells the story scene by scene."
+        }
+        return "Start with a few live questions, then StoryTime tells the story scene by scene."
+    }
+
+    private var librarySummary: String {
+        if let active = store.activeProfile {
+            if store.visibleSeries.isEmpty {
+                return "Start a first story for \(active.displayName). Saved adventures can come back here for replay or a new episode."
+            }
+            return "Replay favorites or start a new episode for \(active.displayName) without losing the saved story world."
+        }
+
+        if store.visibleSeries.isEmpty {
+            return "Start a first story. Saved adventures can come back here for replay or a new episode."
+        }
+
+        return "Replay favorites or start a new episode from the saved library."
     }
 
     private func trustPill(title: String, value: String) -> some View {
@@ -272,11 +326,17 @@ private struct ParentAccessGateView: View {
                 .font(.system(size: 28, weight: .black, design: .rounded))
                 .accessibilityIdentifier("parentAccessGateTitle")
 
-            Text("Type PARENT to open profile, privacy, and story-history controls.")
+            Text("Type PARENT for a lightweight parent check before opening profile, privacy, and saved-story controls.")
                 .multilineTextAlignment(.center)
                 .font(.system(size: 16, weight: .semibold, design: .rounded))
                 .foregroundStyle(.secondary)
                 .accessibilityIdentifier("parentAccessGateMessage")
+
+            Text("This keeps quick taps out on this device. It is not a password or purchase login.")
+                .multilineTextAlignment(.center)
+                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("parentAccessGateFootnote")
 
             TextField("Type PARENT", text: $confirmationText)
                 .textInputAutocapitalization(.characters)
@@ -349,9 +409,21 @@ private struct StorySeriesCard: View {
                 }
 
                 if let latest = series.latestEpisode {
-                    Text("Latest: \(latest.createdAt.formatted(date: .abbreviated, time: .omitted))")
+                    Text("Latest adventure: \(latest.createdAt.formatted(date: .abbreviated, time: .omitted))")
                         .font(.system(size: 12, weight: .medium, design: .rounded))
                         .foregroundStyle(.secondary)
+                }
+
+                HStack(spacing: 10) {
+                    Text(episodeSummary)
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                        .foregroundStyle(.primary)
+                        .accessibilityIdentifier("seriesCardEpisodeSummary-\(series.id.uuidString)")
+
+                    Text("Repeat or continue")
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("seriesCardActionHint-\(series.id.uuidString)")
                 }
             }
             .padding(16)
@@ -366,7 +438,15 @@ private struct StorySeriesCard: View {
                 .padding(12)
                 .accessibilityIdentifier("episodeCountBadge")
         }
-        .frame(height: 132)
+        .frame(height: 154)
+    }
+
+    private var episodeSummary: String {
+        if series.episodeCount == 1 {
+            return "1 episode saved"
+        }
+
+        return "\(series.episodeCount) episodes saved"
     }
 }
 
@@ -378,6 +458,7 @@ private struct ParentTrustCenterView: View {
     @State private var editingProfile: ChildProfile?
     @State private var showProfileEditor = false
     @State private var pendingProfileDeletion: ChildProfile?
+    @State private var pendingSeriesDeletion: StorySeries?
     @State private var showDeleteHistoryConfirmation = false
 
     var body: some View {
@@ -386,6 +467,18 @@ private struct ParentTrustCenterView: View {
                 Label("Raw audio is not saved", systemImage: "waveform.slash")
                     .foregroundStyle(.primary)
                     .accessibilityIdentifier("parentRawAudioStatusLabel")
+                Text("Use Parent Controls for child setup, privacy, retention, and deletion on this device.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("parentPrivacySummary")
+                Text("What stays on this device: saved stories and continuity after the session ends.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("parentPrivacyLocalSummary")
+                Text("What goes live during a session: microphone audio, spoken prompts, story generation, and revisions. Raw audio is not saved.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("parentPrivacyLiveSummary")
                 Toggle("Save story history", isOn: Binding(
                     get: { store.privacySettings.saveStoryHistory },
                     set: { store.setSaveStoryHistory($0) }
@@ -407,10 +500,6 @@ private struct ParentTrustCenterView: View {
                     set: { store.setClearTranscriptsAfterSession($0) }
                 ))
                 .accessibilityIdentifier("clearTranscriptsToggle")
-                Text("Saved stories and continuity stay on this device after the session ends. Raw audio is not saved. Live microphone audio, spoken prompts, story generation, and revisions are sent for live processing.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("parentPrivacySummary")
             }
 
             Section("Child profiles") {
@@ -492,10 +581,42 @@ private struct ParentTrustCenterView: View {
                 }
             }
 
-            Section("Story history controls") {
-                Text("\(store.visibleSeries.count) saved series for the active child")
+            Section("Saved story management") {
+                Text(storyHistoryScopeSummary)
                     .foregroundStyle(.secondary)
-                Button("Delete All Saved Story History", role: .destructive) {
+                    .accessibilityIdentifier("storyHistoryScopeLabel")
+
+                if store.series.isEmpty {
+                    Text("No saved story history on this device yet.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("storyHistoryEmptyStateLabel")
+                } else {
+                    ForEach(store.series) { series in
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(series.title)
+                                .font(.headline)
+                            Text(seriesHistorySubtitle(for: series))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+
+                            Button("Delete Series", role: .destructive) {
+                                pendingSeriesDeletion = series
+                            }
+                            .buttonStyle(.bordered)
+                            .accessibilityIdentifier("deleteManagedSeriesButton-\(series.id.uuidString)")
+                        }
+                        .padding(.vertical, 4)
+                        .accessibilityIdentifier("managedSeriesRow-\(series.id.uuidString)")
+                    }
+                }
+
+                Text("Deletes saved stories and local continuity for every child profile on this device.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("deleteAllStoryHistoryHint")
+
+                Button("Delete All Saved Story History on This Device", role: .destructive) {
                     showDeleteHistoryConfirmation = true
                 }
                 .accessibilityIdentifier("deleteAllStoryHistoryButton")
@@ -531,6 +652,26 @@ private struct ParentTrustCenterView: View {
                 secondaryButton: .cancel()
             )
         }
+        .alert(item: $pendingSeriesDeletion) { series in
+            Alert(
+                title: Text("Delete \(series.title)?"),
+                message: Text("This removes the saved episodes and local continuity memory for this series on this device."),
+                primaryButton: .destructive(Text("Delete")) {
+                    store.deleteSeries(series.id)
+                },
+                secondaryButton: .cancel()
+            )
+        }
+    }
+
+    private var storyHistoryScopeSummary: String {
+        let count = store.series.count
+        return "\(count) saved series across all children on this device"
+    }
+
+    private func seriesHistorySubtitle(for series: StorySeries) -> String {
+        let profileName = store.profileById(series.childProfileId)?.displayName ?? "Shared or legacy story"
+        return "\(profileName) • \(series.episodeCount) episode\(series.episodeCount == 1 ? "" : "s")"
     }
 
     private var activeAgeBinding: Binding<Int> {

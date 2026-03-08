@@ -4,17 +4,20 @@
 
 StoryTime is a voice-first iOS app for generating child-safe personalized audio stories.
 
+Product position:
+- StoryTime lets kids shape the story while it's happening.
+
 Active product loop:
 1. A parent configures child profile and privacy defaults.
 2. A child starts a new story or continues an existing story series.
-3. The app collects a small number of live voice follow-up prompts.
-4. The backend generates a structured story.
-5. The app narrates the story scene by scene in a live voice session.
-6. The child can interrupt during narration and ask for changes.
-7. The backend revises only the remaining story scenes.
+3. The app collects a small number of live voice follow-up prompts in interaction mode.
+4. The backend generates a structured scene-based story.
+5. The app narrates the story scene by scene, with TTS as the target default for long-form narration and realtime reserved for live interaction.
+6. The child can interrupt during narration to ask a question, ask for repetition or clarification, or change what happens next.
+7. The runtime classifies interruptions before deciding whether to answer or revise, and any revision changes only future scenes unless a milestone explicitly widens scope.
 8. Story continuity is stored locally for future episodes.
 
-The current mission is to harden this loop. Stability and correctness take priority over feature expansion.
+The hybrid runtime migration is materially stabilized, verified, and acceptance-hardened enough to support the next workstream. The current mission is to turn that runtime into a productized, monetization-aware experience with coherent parent/child journeys, truthful trust messaging, and economically sane upgrade decisions. Stability, correctness, low-latency interaction feel, deterministic session behavior, stage-level telemetry, and cost-aware routing remain gating requirements, but broad core-runtime rescue work is no longer the default next step unless a new defect is discovered.
 
 ## Active Code Areas
 
@@ -57,22 +60,29 @@ Primary test surfaces:
 
 - `HomeView` is the active iOS entry surface for child profile selection, privacy controls, saved stories, and the parent hub.
 - `NewStoryJourneyView` builds the launch plan for a session, including child selection, mode, continuity reuse, and length.
-- `VoiceSessionView` is a thin UI wrapper that starts the session and hosts a hidden `RealtimeVoiceBridgeView`.
-- `PracticeSessionViewModel` is the active client session coordinator. It owns discovery, generation, narration, interruption, revision, completion, and persistence triggers.
-- `VoiceSessionState` in `StoryDomain.swift` is the canonical client state model currently used by the coordinator.
-- `RealtimeVoiceClient` uses a hidden `WKWebView` bridge to manage microphone capture, the WebRTC peer connection, data channel events, and `/v1/realtime/call` SDP exchange.
+- `VoiceSessionView` is a thin UI wrapper that starts the session and hosts the active transport surfaces. Today it hosts the hidden `RealtimeVoiceBridgeView` for live interaction while long-form scene narration runs through the coordinator-owned TTS transport.
+- `PracticeSessionViewModel` is the active client session coordinator. It owns discovery, generation, narration, interruption, revision, completion, and persistence triggers, and it is the authority boundary for the active hybrid runtime split between interaction mode, narration mode, and story state.
+- `VoiceSessionState` in `StoryDomain.swift` is the canonical client state model currently used by the coordinator. Structured story state and scene state are the authoritative control layer for runtime decisions.
+- `RealtimeVoiceClient` uses a hidden `WKWebView` bridge to manage microphone capture, the WebRTC peer connection, data channel events, and `/v1/realtime/call` SDP exchange. It is the live interaction transport; long-form scene narration should stay on the TTS path unless a milestone explicitly says otherwise.
 - `APIClient` handles backend base URL failover, session identity bootstrap, story endpoints, embeddings, and app install/session headers.
-- `StoryLibraryStore` is the active local store for story series, child profiles, privacy settings, and continuity cleanup coordination. It currently persists large blobs in `UserDefaults`.
+- `StoryLibraryStore` is the active local store for story series, child profiles, privacy settings, and continuity cleanup coordination. Primary story and continuity data now persist through the Core Data-backed `storytime-v2.sqlite` store; `UserDefaults` remains only for install/session bootstrap keys and legacy migration sources.
 - The backend `app.ts` owns request context, auth/session identity, rate limiting, structured error responses, and the active HTTP routes.
 - `RealtimeService` issues signed realtime tickets and proxies `/v1/realtime/call` to OpenAI.
-- `StoryDiscoveryService`, `StoryService`, `StoryPlannerService`, and `StoryContinuityService` make up the active discovery, generation, revision, quality, and continuity pipeline.
+- `StoryDiscoveryService`, `StoryService`, `StoryPlannerService`, and `StoryContinuityService` make up the active discovery, generation, revision, quality, and continuity pipeline. Backend generation and revision are already scene-based and should stay authoritative as narration transport changes.
 
 ## Current Program Priorities
 
 - Stability
 - Correctness
 - Deterministic session behavior
+- Productization and monetization-aware UX on top of the verified hybrid runtime
+- User-journey clarity across onboarding, launch, live session, saved stories, and parent controls
+- Entitlement architecture and upgrade-flow planning grounded in real cost telemetry
+- Parent trust and privacy communication as product flows, not isolated copy tweaks
+- Low-latency live interaction feel
+- Hybrid runtime separation between interaction, narration, and story state
 - Voice startup reliability
+- Cost-aware model routing
 - Safe error handling
 - Local persistence integrity
 - Child-profile data isolation
@@ -84,8 +94,8 @@ Primary test surfaces:
 
 ## Non-Goals
 
-- UI polish
-- Marketing or onboarding work
+- Broad core-runtime refactors without a reproduced defect or explicit reprioritization
+- Marketing-site or acquisition work outside the in-app product flow
 - New growth features
 - Cloud sync
 - Multi-device account systems
@@ -106,17 +116,28 @@ Primary test surfaces:
 
 - `PracticeSessionViewModel` is the active client session coordinator. Do not bypass it with UI-only flags or transport-side side effects.
 - `VoiceSessionState` in `StoryDomain.swift` is the canonical state model. Keep session states explicit and finite.
-- All discovery, generation, narration, interruption, revision, and completion events must route through the coordinator.
+- All discovery, generation, narration, interruption, revision, answer, and completion events must route through the coordinator.
+- Realtime voice is for live interaction. Do not treat it as the default long-form narration transport in new runtime work.
+- TTS is the target default narration mechanism for long-form story delivery. Keep long-form narration scene-based and coordinator-owned.
+- Story state and scene state are authoritative. Transport layers must consume coordinator state, not invent their own story progression.
 - State transitions must be deterministic. Invalid transitions must fail safely and log context.
 - Startup, interruption, revision, and completion side effects must be serialized.
 - Do not reintroduce hidden state drift through extra booleans, parallel tasks, or callbacks that mutate UI state directly.
+- Separate interaction mode from narration mode explicitly. Mode handoff rules must be testable and finite.
+- Interruptions must be classified before deciding whether to answer, repeat, clarify, or revise.
+- Answer-only interruptions must avoid unnecessary regeneration or future-scene revision.
+- Revision must affect future scenes only unless a milestone explicitly defines an earlier-scene rewrite path and its protections.
 - Protect scene index continuity during revise-and-continue flows.
+- Resume narration only from an explicit scene boundary owned by story state.
 - Completion and save behavior must run once.
 - Treat the hidden `WKWebView` bridge and `/v1/realtime/call` SDP contract as critical-path infrastructure. Changes to either side require coordinated client, backend, and test updates.
+- Cost-aware model routing is a product requirement. Runtime work must keep live interaction cheap and low latency where possible, and keep heavier model use scoped to the stages that need it.
+- All runtime work must preserve determinism and a low-latency interaction feel.
 
 ## Persistence And Data Integrity Rules
 
-- `StoryLibraryStore` is the current active store, but its use of large serialized `UserDefaults` blobs is technical debt.
+- `StoryLibraryStore` is the current active store, and primary story plus continuity data should remain in the Core Data-backed v2 store.
+- Legacy `UserDefaults` story blobs are migration-source technical debt only; do not treat them as an active primary store.
 - New primary story storage must favor durable, queryable storage over large serialized blobs.
 - Do not add more primary story or continuity storage to `UserDefaults`.
 - Keep app install ID and session token handling separate from primary story storage decisions.
@@ -150,10 +171,28 @@ Primary test surfaces:
 - Do not mark a milestone done unless its required tests pass.
 - If a change touches the realtime startup path, update client transport tests and backend realtime contract tests.
 - If a change touches session coordination, update `PracticeSessionViewModelTests`.
+- If a change touches narration transport, add or update deterministic narration transport tests at the coordinator boundary.
 - If a change touches the bridge, update `RealtimeVoiceClientTests`.
 - If a change touches API contract handling, update `APIClientTests` and backend route or service tests.
 - If a change touches storage or child scoping, update `StoryLibraryStoreTests`.
+- If a change touches interruption classification, answer-only behavior, or future-scene revision boundaries, test those coordinator paths explicitly.
 - If a change spans client and backend, test both.
+
+## Verification And Measurement Rules
+
+- After hybrid stabilization, verification still matters, but productization and monetization-aware UX are now the default priority unless a new runtime defect is discovered.
+- Runtime verification reports must label each material behavior as `VERIFIED BY TEST`, `VERIFIED BY CODE INSPECTION`, `PARTIALLY VERIFIED`, or `UNVERIFIED`.
+- Verification reports must record the exact commands, test files, docs, and code paths inspected, plus the remaining gaps that still need direct evidence.
+- Telemetry milestones must keep runtime stages explicit where applicable. At minimum, preserve stage-based cost and latency attribution for `interaction`, `generation`, `narration`, and `revision`; document supporting stages separately instead of collapsing them into those four.
+- Do not default back into broad hybrid-runtime refactors once the baseline is stable; if a new defect is discovered, record it in `PLANS.md` and reprioritize explicitly in `SPRINT.md`.
+
+## Productization And Monetization Rules
+
+- UX work must stay grounded in the current technical architecture: realtime for live interaction, TTS for long-form narration, and story/scene state as the authoritative control layer.
+- Monetization work must use model-routing economics and runtime-stage cost telemetry instead of arbitrary package or cap guesses.
+- Onboarding, paywall, upgrade, and parent-trust work should be handled as end-to-end product flows across `HomeView`, `NewStoryJourneyView`, `VoiceSessionView`, `StorySeriesDetailView`, and the parent hub, not as isolated cosmetic screens.
+- Prefer parent-managed upgrade entry points and trust-sensitive surfaces unless a milestone explicitly defines a child-facing prompt and its protections.
+- Verification remains required for productization work: planning milestones must cite repo evidence, and implementation milestones must update the directly affected UI/unit/backend tests as appropriate.
 
 ## Documentation And Status Update Rules
 

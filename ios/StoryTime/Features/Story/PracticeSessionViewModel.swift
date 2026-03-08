@@ -4,6 +4,122 @@ import Foundation
 import OSLog
 
 @MainActor
+struct PreparedNarrationScene: Hashable {
+    let sceneId: String
+    let text: String
+    let estimatedDurationSec: Int
+
+    var cacheKey: String {
+        "\(sceneId)|\(estimatedDurationSec)|\(text)"
+    }
+}
+
+@MainActor
+protocol StoryNarrationTransporting: AnyObject {
+    func prepareScene(_ scene: PreparedNarrationScene) async
+    func playScene(_ scene: PreparedNarrationScene, utteranceID: String) async -> Bool
+    func invalidatePreparedScenes(keeping cacheKeys: Set<String>)
+    func pause() -> Bool
+    func resume() -> Bool
+    func stop()
+}
+
+@MainActor
+final class SystemSpeechNarrationTransport: NSObject, StoryNarrationTransporting, @preconcurrency AVSpeechSynthesizerDelegate {
+    private struct PreparedScenePayload {
+        let cleanText: String
+        let voiceLanguage: String
+    }
+
+    private let synthesizer: AVSpeechSynthesizer
+    private var completionContinuation: CheckedContinuation<Bool, Never>?
+    private var preparedPayloadsByKey: [String: PreparedScenePayload] = [:]
+
+    override init() {
+        let synthesizer = AVSpeechSynthesizer()
+        self.synthesizer = synthesizer
+        super.init()
+        self.synthesizer.delegate = self
+    }
+
+    func prepareScene(_ scene: PreparedNarrationScene) async {
+        preparedPayloadsByKey[scene.cacheKey] = buildPayload(for: scene)
+    }
+
+    func playScene(_ scene: PreparedNarrationScene, utteranceID: String) async -> Bool {
+        let payload = preparedPayloadsByKey[scene.cacheKey] ?? buildPayload(for: scene)
+        preparedPayloadsByKey[scene.cacheKey] = payload
+        guard !payload.cleanText.isEmpty else { return true }
+
+        stop()
+
+        let utterance = AVSpeechUtterance(string: payload.cleanText)
+        utterance.voice = AVSpeechSynthesisVoice(language: payload.voiceLanguage)
+            ?? AVSpeechSynthesisVoice(language: "en-US")
+        utterance.rate = AVSpeechUtteranceDefaultSpeechRate
+        utterance.prefersAssistiveTechnologySettings = true
+
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { [weak self] (continuation: CheckedContinuation<Bool, Never>) in
+                guard let self else {
+                    continuation.resume(returning: false)
+                    return
+                }
+
+                self.completionContinuation = continuation
+                self.synthesizer.speak(utterance)
+            }
+        } onCancel: { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.stop()
+            }
+        }
+    }
+
+    func pause() -> Bool {
+        guard completionContinuation != nil, synthesizer.isSpeaking, !synthesizer.isPaused else { return false }
+        return synthesizer.pauseSpeaking(at: .word)
+    }
+
+    func resume() -> Bool {
+        guard completionContinuation != nil, synthesizer.isPaused else { return false }
+        return synthesizer.continueSpeaking()
+    }
+
+    func stop() {
+        let continuation = completionContinuation
+        completionContinuation = nil
+        if synthesizer.isSpeaking || synthesizer.isPaused {
+            synthesizer.stopSpeaking(at: .immediate)
+        }
+        continuation?.resume(returning: false)
+    }
+
+    func invalidatePreparedScenes(keeping cacheKeys: Set<String>) {
+        preparedPayloadsByKey = preparedPayloadsByKey.filter { cacheKeys.contains($0.key) }
+    }
+
+    private func buildPayload(for scene: PreparedNarrationScene) -> PreparedScenePayload {
+        PreparedScenePayload(
+            cleanText: scene.text.trimmingCharacters(in: .whitespacesAndNewlines),
+            voiceLanguage: Locale.preferredLanguages.first ?? "en-US"
+        )
+    }
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        let continuation = completionContinuation
+        completionContinuation = nil
+        continuation?.resume(returning: true)
+    }
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+        let continuation = completionContinuation
+        completionContinuation = nil
+        continuation?.resume(returning: false)
+    }
+}
+
+@MainActor
 final class PracticeSessionViewModel: ObservableObject {
     private enum SessionEvent {
         case startRequested
@@ -116,7 +232,7 @@ final class PracticeSessionViewModel: ObservableObject {
     private enum NarrationStartSource {
         case replayFromBoot
         case generationResolved
-        case revisionResolved(sceneIndex: Int)
+        case resumeAfterInterruption(decision: NarrationResumeDecision, intent: InterruptionIntent)
         case continueAfterScene(sceneIndex: Int)
 
         var eventName: String {
@@ -125,8 +241,15 @@ final class PracticeSessionViewModel: ObservableObject {
                 return "startNarrationFromReplayBoot"
             case .generationResolved:
                 return "startNarrationFromGenerationResolved"
-            case .revisionResolved:
-                return "startNarrationFromRevisionResolved"
+            case .resumeAfterInterruption(_, let intent):
+                switch intent {
+                case .answerOnly:
+                    return "startNarrationFromAnswerOnlyResume"
+                case .reviseFutureScenes:
+                    return "startNarrationFromRevisionResume"
+                case .repeatOrClarify:
+                    return "startNarrationFromRepeatOrClarifyResume"
+                }
             case .continueAfterScene:
                 return "startNarrationFromSceneCompletion"
             }
@@ -153,6 +276,24 @@ final class PracticeSessionViewModel: ObservableObject {
         case failure
     }
 
+    enum SessionCueTone: Equatable {
+        case neutral
+        case listening
+        case storytelling
+        case update
+        case paused
+        case success
+        case warning
+        case error
+    }
+
+    struct SessionCue: Equatable {
+        let title: String
+        let detail: String
+        let actionHint: String
+        let tone: SessionCueTone
+    }
+
     struct SessionTraceEvent: Equatable {
         let kind: SessionTraceKind
         let source: String
@@ -161,6 +302,21 @@ final class PracticeSessionViewModel: ObservableObject {
         let sessionId: String?
         let apiOperation: APIClientTraceOperation?
         let statusCode: Int?
+    }
+
+    struct RuntimeTelemetryEvent: Equatable {
+        let stage: RuntimeTelemetryStage
+        let source: String
+        let durationMs: Int
+        let costDriver: RuntimeTelemetryCostDriver
+        let requestId: String?
+        let sessionId: String?
+        let apiOperation: APIClientTraceOperation?
+        let statusCode: Int?
+
+        var stageGroup: RuntimeTelemetryStageGroup? {
+            stage.stageGroup
+        }
     }
 
     @Published var voices: [String] = []
@@ -179,6 +335,7 @@ final class PracticeSessionViewModel: ObservableObject {
     @Published var currentSceneIndex: Int = 0
     @Published var errorMessage: String = ""
     @Published var latestUserTranscript: String = ""
+    @Published private(set) var interruptionRouteDecision: InterruptionIntentRouteDecision?
     @Published private(set) var lastAppError: StoryTimeAppError?
 
     let launchPlan: StoryLaunchPlan
@@ -189,10 +346,13 @@ final class PracticeSessionViewModel: ObservableObject {
     private let continuityMemory: ContinuityMemoryStore
     private let api: APIClienting
     private let voiceCore: RealtimeVoiceControlling
+    private let narrationTransport: StoryNarrationTransporting
     private let usesMockVoiceCore: Bool
 
     private var discoverySlots = DiscoverySlotState()
     private var scenePlaybackTask: Task<Void, Never>?
+    private var narrationPreloadTask: Task<Void, Never>?
+    private var interruptionResponseTask: Task<Void, Never>?
     private var waveTimer: Timer?
     private var discoveryFallbackTask: Task<Void, Never>?
     private var completionSaveStrategy: CompletionSaveStrategy = .none
@@ -211,9 +371,11 @@ final class PracticeSessionViewModel: ObservableObject {
     internal private(set) var invalidTransitionMessages: [String] = []
     internal private(set) var lastStartupFailure: StartupFailure?
     internal private(set) var traceEvents: [SessionTraceEvent] = []
+    internal private(set) var runtimeTelemetryEvents: [RuntimeTelemetryEvent] = []
 
     private static let logger = Logger(subsystem: "com.tuesday.storytime", category: "VoiceSession")
     private static let maxQueuedRevisionUpdates = 1
+    private static let maxPreloadedNarrationScenes = 1
     private static let networkErrorCodes: Set<URLError.Code> = [
         .timedOut,
         .cannotFindHost,
@@ -238,6 +400,7 @@ final class PracticeSessionViewModel: ObservableObject {
         api: APIClienting = APIClient(),
         realtimeVoiceClient: RealtimeVoiceClient? = nil,
         voiceCore: RealtimeVoiceControlling? = nil,
+        narrationTransport: StoryNarrationTransporting? = nil,
         forceMockVoiceCore: Bool? = nil
     ) {
         self.launchPlan = plan
@@ -249,6 +412,9 @@ final class PracticeSessionViewModel: ObservableObject {
         let resolvedVoiceCore = voiceCore ?? resolvedRealtimeClient ?? RealtimeVoiceClient()
         self.realtimeVoiceClient = resolvedRealtimeClient ?? (resolvedVoiceCore as? RealtimeVoiceClient)
         self.voiceCore = resolvedVoiceCore
+        self.narrationTransport = narrationTransport
+            ?? (resolvedVoiceCore as? StoryNarrationTransporting)
+            ?? SystemSpeechNarrationTransport()
         self.usesMockVoiceCore = forceMockVoiceCore ?? (ProcessInfo.processInfo.environment["STORYTIME_UI_TEST_MODE"] == "1")
 
         bindAPITraceEvents()
@@ -258,6 +424,7 @@ final class PracticeSessionViewModel: ObservableObject {
 
     deinit {
         scenePlaybackTask?.cancel()
+        narrationPreloadTask?.cancel()
         discoveryFallbackTask?.cancel()
         waveTimer?.invalidate()
     }
@@ -276,13 +443,191 @@ final class PracticeSessionViewModel: ObservableObject {
 
     var privacySummary: String {
         if store.privacySettings.clearTranscriptsAfterSession {
-            return "Live conversation is on. Raw audio is not saved. Spoken prompts are sent for live processing, and the on-screen transcript clears when the session ends."
+            return "Live conversation is on. Raw audio is not saved. Your words are sent for live processing during this session, and the on-screen transcript clears when the session ends."
         }
-        return "Live conversation is on. Raw audio is not saved. Spoken prompts are sent for live processing."
+        return "Live conversation is on. Raw audio is not saved. Your words are sent for live processing during this session."
+    }
+
+    var sessionCue: SessionCue {
+        switch sessionState {
+        case .idle:
+            return SessionCue(
+                title: "Ready",
+                detail: "StoryTime is waiting to start the live session.",
+                actionHint: "Start when you're ready.",
+                tone: .neutral
+            )
+
+        case .booting:
+            return SessionCue(
+                title: "Getting ready",
+                detail: "StoryTime is getting the live storyteller ready.",
+                actionHint: "Wait a moment.",
+                tone: .neutral
+            )
+
+        case .ready(let readyState):
+            switch readyState.mode {
+            case .discovery(let stepNumber):
+                if activeSpeaker == .ai || activePromptUtteranceID != nil {
+                    return SessionCue(
+                        title: "Question time",
+                        detail: "StoryTime is asking live question \(min(3, stepNumber)) of 3 before narration starts.",
+                        actionHint: "Listen first, then answer out loud.",
+                        tone: .listening
+                    )
+                }
+
+                return SessionCue(
+                    title: "Listening",
+                    detail: "Answer live question \(min(3, stepNumber)) of 3 so StoryTime can build the story.",
+                    actionHint: "Speak your answer now.",
+                    tone: .listening
+                )
+            }
+
+        case .discovering:
+            return SessionCue(
+                title: "Thinking",
+                detail: "StoryTime is understanding what you just said.",
+                actionHint: "Hold on for the next question.",
+                tone: .neutral
+            )
+
+        case .generating:
+            return SessionCue(
+                title: "Building the story",
+                detail: "StoryTime is turning your answers into scenes.",
+                actionHint: "Hold on. Narration will start soon.",
+                tone: .neutral
+            )
+
+        case .narrating(let sceneIndex):
+            return SessionCue(
+                title: "Storytelling",
+                detail: "StoryTime is telling \(sceneProgressText(sceneIndex)).",
+                actionHint: "Speak anytime to ask a question or change what happens next.",
+                tone: .storytelling
+            )
+
+        case .paused(let sceneIndex):
+            return SessionCue(
+                title: "Paused",
+                detail: "The story is paused on \(sceneProgressText(sceneIndex)).",
+                actionHint: "Speak to ask for a change, or wait to keep going.",
+                tone: .paused
+            )
+
+        case .interrupting(let sceneIndex):
+            if statusMessage == "Answering your question" {
+                return SessionCue(
+                    title: "Answering",
+                    detail: "StoryTime is answering your question before it returns to \(sceneProgressText(sceneIndex)).",
+                    actionHint: "Listen now. The story will continue after the answer.",
+                    tone: .storytelling
+                )
+            }
+
+            if statusMessage == "Repeating this part" {
+                return SessionCue(
+                    title: "Repeating",
+                    detail: "StoryTime is replaying \(sceneProgressText(sceneIndex)) so you can hear it again.",
+                    actionHint: "Listen again, or interrupt if you want a change.",
+                    tone: .storytelling
+                )
+            }
+
+            if statusMessage == "No future scenes left to change" {
+                return SessionCue(
+                    title: "No more story to change",
+                    detail: "There are no later scenes left after \(sceneProgressText(sceneIndex)).",
+                    actionHint: "Ask a question, or start a new story when this one ends.",
+                    tone: .warning
+                )
+            }
+
+            return SessionCue(
+                title: "Listening for a change",
+                detail: "StoryTime paused \(sceneProgressText(sceneIndex)) so it can hear your update.",
+                actionHint: "Tell StoryTime what to change or ask a question.",
+                tone: .listening
+            )
+
+        case .revising(let sceneIndex, let queuedUpdates):
+            let queuedText: String
+            if queuedUpdates > 0 {
+                queuedText = " It is also holding \(queuedUpdates) more idea\(queuedUpdates == 1 ? "" : "s")."
+            } else {
+                queuedText = ""
+            }
+
+            return SessionCue(
+                title: "Updating what happens next",
+                detail: "StoryTime is changing only the scenes after \(sceneProgressText(sceneIndex)).\(queuedText)",
+                actionHint: "Hold on while the next part is rewritten.",
+                tone: .update
+            )
+
+        case .completed:
+            return SessionCue(
+                title: "Story finished",
+                detail: "This story session is complete.",
+                actionHint: "You can start another episode.",
+                tone: .success
+            )
+
+        case .failed:
+            return SessionCue(
+                title: "Need help",
+                detail: errorMessage.isEmpty ? "This story session stopped safely." : errorMessage,
+                actionHint: "Ask a grown-up to try again.",
+                tone: .error
+            )
+        }
     }
 
     func startSession() async {
         await process(.startRequested)
+    }
+
+    private func sceneProgressText(_ sceneIndex: Int) -> String {
+        let sceneNumber = sceneIndex + 1
+        let totalScenes = max(generatedStory?.scenes.count ?? sceneNumber, sceneNumber)
+        return "scene \(sceneNumber) of \(totalScenes)"
+    }
+
+    func pauseNarration() {
+        guard case .narrating(let sceneIndex) = sessionState else {
+            logInvalidTransition(event: "pauseNarration", state: sessionState)
+            return
+        }
+
+        guard narrationTransport.pause() else {
+            logInvalidTransition(event: "pauseNarrationTransport", state: sessionState)
+            return
+        }
+
+        setSessionState(.paused(sceneIndex: sceneIndex), reason: "narration paused")
+        activeSpeaker = .idle
+        statusMessage = "Narration paused"
+        aiPrompt = "Paused on scene \(sceneIndex + 1) of \(generatedStory?.scenes.count ?? (sceneIndex + 1))"
+    }
+
+    func resumeNarration() {
+        guard case .paused(let sceneIndex) = sessionState else {
+            logInvalidTransition(event: "resumeNarration", state: sessionState)
+            return
+        }
+
+        guard narrationTransport.resume() else {
+            logInvalidTransition(event: "resumeNarrationTransport", state: sessionState)
+            return
+        }
+
+        setSessionState(.narrating(sceneIndex: sceneIndex), reason: "narration resumed")
+        activeSpeaker = .ai
+        aiPrompt = "Narrating scene \(sceneIndex + 1) of \(generatedStory?.scenes.count ?? (sceneIndex + 1))"
+        statusMessage = "Narrating scene \(sceneIndex + 1) of \(generatedStory?.scenes.count ?? (sceneIndex + 1))"
     }
 
     func childDidSpeak() async {
@@ -295,6 +640,8 @@ final class PracticeSessionViewModel: ObservableObject {
                 await captureMockFollowUpAnswer()
             }
         case .narrating(let sceneIndex):
+            await beginNarrationInterruption(at: sceneIndex, immediateUserUpdate: scriptedUpdateRequest())
+        case .paused(let sceneIndex):
             await beginNarrationInterruption(at: sceneIndex, immediateUserUpdate: scriptedUpdateRequest())
         case .idle, .booting, .discovering, .generating, .interrupting, .revising, .completed, .failed:
             break
@@ -402,7 +749,7 @@ final class PracticeSessionViewModel: ObservableObject {
         case .ready, .interrupting, .revising:
             activeSpeaker = .child
             statusMessage = "Listening..."
-        case .narrating:
+        case .narrating, .paused:
             activeSpeaker = .child
             statusMessage = "Listening for a story update"
         case .idle, .booting, .discovering, .generating, .completed, .failed:
@@ -413,8 +760,6 @@ final class PracticeSessionViewModel: ObservableObject {
     private func handleTranscriptFinal(_ transcript: String) async {
         let clean = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
-
-        latestUserTranscript = clean
 
         if let deferredTranscriptPolicy {
             self.deferredTranscriptPolicy = nil
@@ -432,13 +777,19 @@ final class PracticeSessionViewModel: ObservableObject {
         case .ready(let readyState):
             switch readyState.mode {
             case .discovery:
+                latestUserTranscript = clean
                 startDiscoveryRequest(transcript: clean)
             }
         case .narrating(let sceneIndex):
+            latestUserTranscript = clean
+            await beginNarrationInterruption(at: sceneIndex, immediateUserUpdate: clean)
+        case .paused(let sceneIndex):
+            latestUserTranscript = clean
             await beginNarrationInterruption(at: sceneIndex, immediateUserUpdate: clean)
         case .interrupting(let sceneIndex):
-            startRevisionRequest(userUpdate: clean, sceneIndex: sceneIndex)
+            await handleInterruptingTranscript(clean, sceneIndex: sceneIndex)
         case .revising(let sceneIndex, _):
+            latestUserTranscript = clean
             queueRevisionUpdate(clean, sceneIndex: sceneIndex)
         case .idle, .booting, .discovering, .generating, .completed, .failed:
             logInvalidTransition(event: "transcriptFinal", state: sessionState)
@@ -457,8 +808,15 @@ final class PracticeSessionViewModel: ObservableObject {
         case .narrating(let sceneIndex):
             await beginNarrationInterruption(at: sceneIndex, immediateUserUpdate: nil)
 
+        case .paused(let sceneIndex):
+            await beginNarrationInterruption(at: sceneIndex, immediateUserUpdate: nil)
+
         case .interrupting:
+            interruptionResponseTask?.cancel()
+            interruptionResponseTask = nil
+            await voiceCore.cancelAssistantSpeech()
             activeSpeaker = .child
+            statusMessage = "Listening for a story update"
 
         case .revising:
             deferredTranscriptPolicy = .rejectIfSessionLeaves(.revising)
@@ -615,7 +973,7 @@ final class PracticeSessionViewModel: ObservableObject {
                 return
             }
 
-            let mergedScenes = Array(currentStory.scenes.prefix(sceneIndex)) + envelope.data.scenes
+            let mergedScenes = Array(currentStory.scenes.prefix(sceneIndex + 1)) + envelope.data.scenes
             let updated = StoryData(
                 storyId: currentStory.storyId,
                 title: currentStory.title,
@@ -637,15 +995,18 @@ final class PracticeSessionViewModel: ObservableObject {
                 }
             }
 
-            if envelope.data.revisedFromSceneIndex != sceneIndex {
-                logUnexpectedRevisionIndex(expected: sceneIndex, actual: envelope.data.revisedFromSceneIndex)
+            let expectedRevisionStartIndex = sceneIndex + 1
+            if envelope.data.revisedFromSceneIndex != expectedRevisionStartIndex {
+                logUnexpectedRevisionIndex(expected: expectedRevisionStartIndex, actual: envelope.data.revisedFromSceneIndex)
             }
 
             recordTrace(.revision, source: envelope.blocked ? "blocked" : "resolved", operation: .storyRevision)
             if !queuedRevisionUpdates.isEmpty {
                 let nextUpdate = queuedRevisionUpdates.removeFirst()
-                submitRevisionRequest(nextUpdate, sceneIndex: sceneIndex, story: updated)
-                return
+                if let revisionBoundary = updated.authoritativeSceneState(at: sceneIndex)?.revisionBoundary {
+                    submitRevisionRequest(nextUpdate, sceneIndex: sceneIndex, revisionBoundary: revisionBoundary)
+                    return
+                }
             }
 
             statusMessage = envelope.blocked
@@ -658,8 +1019,21 @@ final class PracticeSessionViewModel: ObservableObject {
                 )
             }
 
-            await startNarration(from: sceneIndex, source: .revisionResolved(sceneIndex: sceneIndex))
+            await resumeNarration(
+                using: .replayCurrentSceneWithRevisedFuture(
+                    sceneIndex: sceneIndex,
+                    revisedFutureStartIndex: expectedRevisionStartIndex
+                ),
+                intent: .reviseFutureScenes
+            )
         }
+    }
+
+    private func resumeNarration(using decision: NarrationResumeDecision, intent: InterruptionIntent) async {
+        await startNarration(
+            from: decision.sceneIndex,
+            source: .resumeAfterInterruption(decision: decision, intent: intent)
+        )
     }
 
     private func handleNarrationSceneFinished(utteranceID: String, sceneIndex: Int) async {
@@ -1032,12 +1406,29 @@ final class PracticeSessionViewModel: ObservableObject {
                 logInvalidTransition(event: source.eventName, state: sessionState)
                 return
             }
-        case .revisionResolved(let sceneIndex):
-            guard case .revising(let activeSceneIndex, _) = sessionState,
-                  activeSceneIndex == sceneIndex,
-                  startIndex == sceneIndex else {
-                logInvalidTransition(event: source.eventName, state: sessionState)
-                return
+        case .resumeAfterInterruption(let decision, let intent):
+            switch intent {
+            case .answerOnly, .repeatOrClarify:
+                guard case .interrupting(let activeSceneIndex) = sessionState,
+                      activeSceneIndex == decision.sceneIndex,
+                      startIndex == decision.sceneIndex,
+                      decision == .replayCurrentScene(sceneIndex: activeSceneIndex),
+                      interruptionRouteDecision?.intent == intent else {
+                    logInvalidTransition(event: source.eventName, state: sessionState)
+                    return
+                }
+            case .reviseFutureScenes:
+                guard case .revising(let activeSceneIndex, _) = sessionState,
+                      activeSceneIndex == decision.sceneIndex,
+                      startIndex == decision.sceneIndex,
+                      interruptionRouteDecision?.intent == .reviseFutureScenes,
+                      case .replayCurrentSceneWithRevisedFuture(
+                        sceneIndex: activeSceneIndex,
+                        revisedFutureStartIndex: activeSceneIndex + 1
+                      ) = decision else {
+                    logInvalidTransition(event: source.eventName, state: sessionState)
+                    return
+                }
             }
         case .continueAfterScene(let sceneIndex):
             guard case .narrating(let currentSceneIndex) = sessionState,
@@ -1068,6 +1459,7 @@ final class PracticeSessionViewModel: ObservableObject {
         }
 
         scenePlaybackTask?.cancel()
+        refreshNarrationPreload(for: story, currentSceneIndex: startIndex)
         setSessionState(.narrating(sceneIndex: startIndex), reason: "narrating scene \(startIndex)")
         currentSceneIndex = startIndex
         nowNarratingText = story.scenes[startIndex].text
@@ -1080,42 +1472,178 @@ final class PracticeSessionViewModel: ObservableObject {
 
         scenePlaybackTask = Task { [weak self] in
             guard let self else { return }
+            let scene = self.preparedNarrationScene(for: story.scenes[startIndex])
 
-            if self.usesMockVoiceCore {
-                let seconds = min(max(Double(story.scenes[startIndex].durationSec) / 14.0, 1.2), 4.0)
-                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-            } else {
-                _ = await self.speakAndAwaitCompletion(
-                    text: story.scenes[startIndex].text,
-                    utteranceID: utteranceID,
-                    timeoutSeconds: Double(story.scenes[startIndex].durationSec) + 4
-                )
-            }
+            let didComplete = await self.narrationTransport.playScene(scene, utteranceID: utteranceID)
 
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, didComplete else { return }
             await self.process(.narrationSceneFinished(utteranceID: utteranceID, sceneIndex: startIndex))
         }
     }
 
     private func beginNarrationInterruption(at sceneIndex: Int, immediateUserUpdate: String?) async {
-        guard case .narrating(let currentSceneIndex) = sessionState, currentSceneIndex == sceneIndex else {
+        switch sessionState {
+        case .narrating(let currentSceneIndex), .paused(let currentSceneIndex):
+            guard currentSceneIndex == sceneIndex else {
+                logInvalidTransition(event: "beginNarrationInterruption", state: sessionState)
+                return
+            }
+        default:
             logInvalidTransition(event: "beginNarrationInterruption", state: sessionState)
             return
         }
 
         scenePlaybackTask?.cancel()
+        scenePlaybackTask = nil
+        interruptionResponseTask?.cancel()
+        interruptionResponseTask = nil
         activeNarrationUtteranceID = nil
+        interruptionRouteDecision = nil
         setSessionState(.interrupting(sceneIndex: sceneIndex), reason: "narration interrupted")
         activeSpeaker = .child
         statusMessage = "Listening for a story update"
-
-        if !usesMockVoiceCore {
-            await voiceCore.cancelAssistantSpeech()
-        }
+        narrationTransport.stop()
+        await voiceCore.cancelAssistantSpeech()
 
         if let immediateUserUpdate {
-            startRevisionRequest(userUpdate: immediateUserUpdate, sceneIndex: sceneIndex)
+            await handleInterruptingTranscript(immediateUserUpdate, sceneIndex: sceneIndex)
         }
+    }
+
+    private func handleInterruptingTranscript(_ transcript: String, sceneIndex: Int) async {
+        let cleanTranscript = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanTranscript.isEmpty else { return }
+
+        guard case .interrupting(let interruptingSceneIndex) = sessionState, interruptingSceneIndex == sceneIndex else {
+            logInvalidTransition(event: "handleInterruptingTranscript", state: sessionState)
+            return
+        }
+
+        interruptionResponseTask?.cancel()
+        interruptionResponseTask = nil
+
+        guard
+            let currentStory = generatedStory,
+            let sceneState = currentStory.authoritativeSceneState(at: sceneIndex),
+            let decision = InterruptionIntentRouter.classify(
+                transcript: cleanTranscript,
+                sceneState: sceneState
+            )
+        else {
+            failSession(
+                message: "Missing story before interruption routing.",
+                status: "Session failed",
+                reason: "interruption routing without story state"
+            )
+            return
+        }
+
+        latestUserTranscript = decision.transcript
+        interruptionRouteDecision = decision
+
+        switch decision.intent {
+        case .reviseFutureScenes where decision.canApplyImmediately:
+            startRevisionRequest(userUpdate: decision.transcript, sceneIndex: sceneIndex)
+
+        case .answerOnly:
+            startAnswerOnlyResponse(decision, sceneIndex: sceneIndex)
+
+        case .repeatOrClarify:
+            activeSpeaker = .ai
+            statusMessage = "Repeating this part"
+            aiPrompt = "Repeating scene \(sceneIndex + 1)"
+            await resumeNarration(using: decision.answerContext.currentBoundary.replayDecision, intent: .repeatOrClarify)
+
+        case .reviseFutureScenes:
+            activeSpeaker = .idle
+            statusMessage = "No future scenes left to change"
+            aiPrompt = "Revision request captured with no future scenes available"
+        }
+    }
+
+    private func startAnswerOnlyResponse(_ decision: InterruptionIntentRouteDecision, sceneIndex: Int) {
+        let response = answerOnlyResponseText(for: decision.answerContext)
+        let utteranceID = nextUtteranceID(prefix: "answer-\(sceneIndex)")
+        activePromptUtteranceID = utteranceID
+        activeSpeaker = .ai
+        aiPrompt = response
+        statusMessage = "Answering your question"
+
+        interruptionResponseTask = Task { [weak self] in
+            guard let self else { return }
+            let startedAt = DispatchTime.now().uptimeNanoseconds
+
+            let didComplete = await self.speakAndAwaitCompletion(
+                text: response,
+                utteranceID: utteranceID,
+                timeoutSeconds: 6
+            )
+
+            guard !Task.isCancelled else { return }
+            self.recordRuntimeTelemetry(
+                stage: .answerOnlyInteraction,
+                source: "spokenResponse",
+                durationMs: Self.durationMs(since: startedAt),
+                costDriver: .realtimeInteraction
+            )
+            await self.finishAnswerOnlyResponse(
+                utteranceID: utteranceID,
+                sceneIndex: sceneIndex,
+                didComplete: didComplete
+            )
+        }
+    }
+
+    private func finishAnswerOnlyResponse(
+        utteranceID: String,
+        sceneIndex: Int,
+        didComplete: Bool
+    ) async {
+        guard activePromptUtteranceID == utteranceID else { return }
+
+        activePromptUtteranceID = nil
+        interruptionResponseTask = nil
+
+        guard didComplete else {
+            guard case .interrupting(let activeSceneIndex) = sessionState, activeSceneIndex == sceneIndex else { return }
+            activeSpeaker = .child
+            statusMessage = "Listening for a story update"
+            return
+        }
+
+        guard case .interrupting(let activeSceneIndex) = sessionState, activeSceneIndex == sceneIndex else { return }
+        guard interruptionRouteDecision?.intent == .answerOnly else { return }
+
+        await resumeNarration(using: .replayCurrentScene(sceneIndex: sceneIndex), intent: .answerOnly)
+    }
+
+    private func answerOnlyResponseText(for context: StoryAnswerContext) -> String {
+        let sceneSummary = summarizedSceneText(context.currentScene.text)
+        return "Right now in \(context.storyTitle), \(sceneSummary)"
+    }
+
+    private func summarizedSceneText(_ text: String) -> String {
+        let normalized = text
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !normalized.isEmpty else {
+            return "the story is still unfolding."
+        }
+
+        if let sentence = normalized.split(whereSeparator: { ".!?".contains($0) }).first {
+            let trimmedSentence = String(sentence).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedSentence.isEmpty {
+                return trimmedSentence.hasSuffix(".") ? trimmedSentence : trimmedSentence + "."
+            }
+        }
+
+        if normalized.count <= 140 {
+            return normalized.hasSuffix(".") ? normalized : normalized + "."
+        }
+
+        let truncated = String(normalized.prefix(137)).trimmingCharacters(in: .whitespacesAndNewlines)
+        return truncated + "..."
     }
 
     private func startRevisionRequest(userUpdate: String, sceneIndex: Int) {
@@ -1141,7 +1669,14 @@ final class PracticeSessionViewModel: ObservableObject {
             return
         }
 
-        submitRevisionRequest(cleanUpdate, sceneIndex: sceneIndex, story: currentStory)
+        guard let revisionBoundary = currentStory.authoritativeSceneState(at: sceneIndex)?.revisionBoundary else {
+            activeSpeaker = .idle
+            statusMessage = "No future scenes left to change"
+            aiPrompt = "Revision request captured with no future scenes available"
+            return
+        }
+
+        submitRevisionRequest(cleanUpdate, sceneIndex: sceneIndex, revisionBoundary: revisionBoundary)
     }
 
     private func queueRevisionUpdate(_ userUpdate: String, sceneIndex: Int) {
@@ -1159,23 +1694,20 @@ final class PracticeSessionViewModel: ObservableObject {
         statusMessage = "Finishing the current story update"
     }
 
-    private func submitRevisionRequest(_ userUpdate: String, sceneIndex: Int, story: StoryData) {
+    private func submitRevisionRequest(
+        _ userUpdate: String,
+        sceneIndex: Int,
+        revisionBoundary: StoryRevisionBoundary
+    ) {
         clearAppError()
         let requestID = nextOperationID()
         activeRevisionRequestID = requestID
         setSessionState(.revising(sceneIndex: sceneIndex, queuedUpdates: queuedRevisionUpdates.count), reason: "revision in flight")
         activeSpeaker = .child
-        statusMessage = "Updating story from current scene"
-        aiPrompt = "Got it. I'll update the rest of the story with your new idea."
+        statusMessage = "Updating what happens next"
+        aiPrompt = "Got it. I'll update what happens next with your new idea."
 
-        let request = ReviseStoryRequest(
-            storyId: story.storyId,
-            currentSceneIndex: sceneIndex,
-            storyTitle: story.title,
-            userUpdate: userUpdate,
-            completedScenes: Array(story.scenes.prefix(sceneIndex)),
-            remainingScenes: Array(story.scenes.dropFirst(sceneIndex))
-        )
+        let request = revisionBoundary.makeRequest(userUpdate: userUpdate)
 
         Task { [weak self] in
             guard let self else { return }
@@ -1605,6 +2137,7 @@ final class PracticeSessionViewModel: ObservableObject {
         completedUtteranceIDs.removeAll()
         invalidTransitionMessages.removeAll()
         traceEvents.removeAll()
+        runtimeTelemetryEvents.removeAll()
         latestAPITraceByOperation.removeAll()
         activeStartupAttempt = nil
         lastStartupFailure = nil
@@ -1621,6 +2154,7 @@ final class PracticeSessionViewModel: ObservableObject {
         nowNarratingText = ""
         errorMessage = ""
         latestUserTranscript = ""
+        interruptionRouteDecision = nil
         aiPrompt = "Starting story conversation..."
         statusMessage = ""
         activeSpeaker = .idle
@@ -1630,8 +2164,52 @@ final class PracticeSessionViewModel: ObservableObject {
     private func cancelTimedWork() {
         scenePlaybackTask?.cancel()
         scenePlaybackTask = nil
+        narrationPreloadTask?.cancel()
+        narrationPreloadTask = nil
+        interruptionResponseTask?.cancel()
+        interruptionResponseTask = nil
         discoveryFallbackTask?.cancel()
         discoveryFallbackTask = nil
+        narrationTransport.stop()
+        narrationTransport.invalidatePreparedScenes(keeping: [])
+    }
+
+    private func preparedNarrationScene(for scene: StoryScene) -> PreparedNarrationScene {
+        PreparedNarrationScene(
+            sceneId: scene.sceneId,
+            text: scene.text,
+            estimatedDurationSec: scene.durationSec
+        )
+    }
+
+    private func refreshNarrationPreload(for story: StoryData, currentSceneIndex: Int) {
+        narrationPreloadTask?.cancel()
+        narrationPreloadTask = nil
+
+        let upperBound = min(
+            story.scenes.count,
+            currentSceneIndex + 1 + Self.maxPreloadedNarrationScenes
+        )
+        let keptScenes = story.scenes[currentSceneIndex..<upperBound]
+        let keptCacheKeys = Set(keptScenes.map { preparedNarrationScene(for: $0).cacheKey })
+        narrationTransport.invalidatePreparedScenes(keeping: keptCacheKeys)
+
+        let preloadIndex = currentSceneIndex + 1
+        guard story.scenes.indices.contains(preloadIndex) else { return }
+
+        let sceneToPreload = preparedNarrationScene(for: story.scenes[preloadIndex])
+        narrationPreloadTask = Task { [weak self] in
+            guard let self else { return }
+            let startedAt = DispatchTime.now().uptimeNanoseconds
+            await self.narrationTransport.prepareScene(sceneToPreload)
+            guard !Task.isCancelled else { return }
+            self.recordRuntimeTelemetry(
+                stage: .ttsGeneration,
+                source: "preload",
+                durationMs: Self.durationMs(since: startedAt),
+                costDriver: .localSpeech
+            )
+        }
     }
 
     private func bindAPITraceEvents() {
@@ -1649,6 +2227,21 @@ final class PracticeSessionViewModel: ObservableObject {
         Self.logger.debug(
             "Voice session API trace: operation=\(event.operation.rawValue, privacy: .public) phase=\(event.phase.rawValue, privacy: .public) requestId=\(event.requestId, privacy: .public) sessionId=\(sessionId, privacy: .public) statusCode=\(statusCode, privacy: .public) route=\(event.route, privacy: .public)"
         )
+        if event.phase != .started,
+           let stage = event.runtimeStage,
+           let costDriver = event.costDriver,
+           let durationMs = event.durationMs {
+            recordRuntimeTelemetry(
+                stage: stage,
+                source: event.operation.rawValue,
+                durationMs: durationMs,
+                costDriver: costDriver,
+                requestId: event.requestId,
+                sessionId: event.sessionId ?? AppSession.currentSessionId,
+                apiOperation: event.operation,
+                statusCode: event.statusCode
+            )
+        }
     }
 
     private func recordTrace(
@@ -1676,6 +2269,36 @@ final class PracticeSessionViewModel: ObservableObject {
         )
     }
 
+    private func recordRuntimeTelemetry(
+        stage: RuntimeTelemetryStage,
+        source: String,
+        durationMs: Int,
+        costDriver: RuntimeTelemetryCostDriver,
+        requestId: String? = nil,
+        sessionId: String? = AppSession.currentSessionId,
+        apiOperation: APIClientTraceOperation? = nil,
+        statusCode: Int? = nil
+    ) {
+        let event = RuntimeTelemetryEvent(
+            stage: stage,
+            source: source,
+            durationMs: durationMs,
+            costDriver: costDriver,
+            requestId: requestId,
+            sessionId: sessionId,
+            apiOperation: apiOperation,
+            statusCode: statusCode
+        )
+        runtimeTelemetryEvents.append(event)
+        let operationName = apiOperation?.rawValue ?? "-"
+        let requestIdValue = requestId ?? "-"
+        let sessionIdValue = sessionId ?? "-"
+        let statusCodeValue = statusCode.map(String.init) ?? "-"
+        Self.logger.debug(
+            "Voice session runtime telemetry: stage=\(stage.rawValue, privacy: .public) source=\(source, privacy: .public) durationMs=\(durationMs, privacy: .public) costDriver=\(costDriver.rawValue, privacy: .public) operation=\(operationName, privacy: .public) requestId=\(requestIdValue, privacy: .public) sessionId=\(sessionIdValue, privacy: .public) statusCode=\(statusCodeValue, privacy: .public)"
+        )
+    }
+
     private func setSessionState(_ newState: VoiceSessionState, reason: String) {
         let previousState = sessionState
         sessionState = newState
@@ -1697,9 +2320,13 @@ final class PracticeSessionViewModel: ObservableObject {
         return "\(prefix)-\(utteranceCounter)"
     }
 
+    private static func durationMs(since startedAt: UInt64) -> Int {
+        Int((DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000)
+    }
+
     private func canCompleteSession(from state: VoiceSessionState) -> Bool {
         switch state {
-        case .booting, .generating, .narrating, .revising:
+        case .booting, .generating, .narrating, .paused, .revising:
             return true
         case .idle, .ready, .discovering, .interrupting, .completed, .failed:
             return false
@@ -1986,6 +2613,15 @@ final class PracticeSessionViewModel: ObservableObject {
         tone: String,
         episodeIntent: String?
     ) async -> [String] {
+        let startedAt = DispatchTime.now().uptimeNanoseconds
+        defer {
+            recordRuntimeTelemetry(
+                stage: .continuityRetrieval,
+                source: "combinedFacts",
+                durationMs: Self.durationMs(since: startedAt),
+                costDriver: .localData
+            )
+        }
         var facts = continuityFacts(from: series)
 
         guard let series else {

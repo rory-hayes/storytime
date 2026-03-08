@@ -581,7 +581,7 @@ export class StoryService {
       );
       attempts = usedAttempts;
 
-      this.recordUsage(context, "responses.story_generate", attempts, Date.now() - startedAt, true);
+      this.recordUsage(context, "responses.story_generate", "story_generation", attempts, Date.now() - startedAt, true);
       const jsonText = extractOutputText(result);
       if (!jsonText) {
         throw new AppError("Model returned empty response for story generation", 502, "model_empty_output");
@@ -589,7 +589,7 @@ export class StoryService {
 
       return normalizeStory(JSON.parse(jsonText));
     } catch (error) {
-      this.recordUsage(context, "responses.story_generate", attempts, Date.now() - startedAt, false);
+      this.recordUsage(context, "responses.story_generate", "story_generation", attempts, Date.now() - startedAt, false);
       throw error;
     }
   }
@@ -652,7 +652,7 @@ export class StoryService {
       );
       attempts = usedAttempts;
 
-      this.recordUsage(context, "responses.story_revise", attempts, Date.now() - startedAt, true);
+      this.recordUsage(context, "responses.story_revise", "revise_future_scenes", attempts, Date.now() - startedAt, true);
       const jsonText = extractOutputText(result);
       if (!jsonText) {
         throw new AppError("Model returned empty response for story revision", 502, "model_empty_output");
@@ -665,7 +665,7 @@ export class StoryService {
 
       return parsed.scenes;
     } catch (error) {
-      this.recordUsage(context, "responses.story_revise", attempts, Date.now() - startedAt, false);
+      this.recordUsage(context, "responses.story_revise", "revise_future_scenes", attempts, Date.now() - startedAt, false);
       throw error;
     }
   }
@@ -673,6 +673,7 @@ export class StoryService {
   private recordUsage(
     context: RequestContext | undefined,
     operation: string,
+    runtimeStage: string,
     attempts: number,
     durationMs: number,
     success: boolean
@@ -685,6 +686,7 @@ export class StoryService {
       requestId: context.requestId,
       route: context.route,
       operation,
+      runtimeStage,
       provider: "openai",
       model: this.env.OPENAI_RESPONSES_MODEL,
       region: context.region,

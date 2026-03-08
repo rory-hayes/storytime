@@ -20,6 +20,7 @@ struct VoiceSessionView: View {
 
             VStack(alignment: .leading, spacing: 14) {
                 headerCard
+                sessionCueCard
 
                 WaveformView(
                     speaker: viewModel.activeSpeaker,
@@ -52,6 +53,45 @@ struct VoiceSessionView: View {
         .task {
             await viewModel.startSession()
         }
+    }
+
+    private var sessionCueCard: some View {
+        let cue = viewModel.sessionCue
+        let accentColor = cueColor(for: cue.tone)
+
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Circle()
+                    .fill(accentColor)
+                    .frame(width: 12, height: 12)
+
+                Text(cue.title)
+                    .font(.system(size: 20, weight: .black, design: .rounded))
+                    .foregroundStyle(.primary)
+                    .accessibilityIdentifier("sessionStateTitleLabel")
+
+                Spacer()
+            }
+
+            Text(cue.detail)
+                .font(.system(size: 15, weight: .semibold, design: .rounded))
+                .foregroundStyle(.primary)
+                .accessibilityIdentifier("sessionStateDetailLabel")
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .fill(.white.opacity(0.88))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .strokeBorder(accentColor.opacity(0.35), lineWidth: 1)
+        )
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(cue.title)
+        .accessibilityValue("\(cue.detail)\n\(cue.actionHint)")
+        .accessibilityIdentifier("sessionCueCard")
     }
 
     private var headerCard: some View {
@@ -150,12 +190,19 @@ struct VoiceSessionView: View {
     private var listeningHintBar: some View {
         VStack(spacing: 0) {
             Divider()
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(Color.green)
-                    .frame(width: 8, height: 8)
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(cueColor(for: viewModel.sessionCue.tone))
+                        .frame(width: 8, height: 8)
 
-                Text("Speak anytime to answer or interrupt. Raw audio is not saved, and your words are sent for live processing.")
+                    Text(viewModel.sessionCue.actionHint)
+                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                        .foregroundStyle(.primary)
+                        .accessibilityIdentifier("voiceActionHintLabel")
+                }
+
+                Text("Speak anytime to answer or interrupt. Ask a grown-up to leave the live story if you need parent controls.")
                     .font(.system(size: 13, weight: .semibold, design: .rounded))
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("voiceProcessingHintLabel")
@@ -165,5 +212,26 @@ struct VoiceSessionView: View {
             .padding(.vertical, 12)
         }
         .background(.ultraThinMaterial)
+    }
+
+    private func cueColor(for tone: PracticeSessionViewModel.SessionCueTone) -> Color {
+        switch tone {
+        case .neutral:
+            return Color.blue.opacity(0.75)
+        case .listening:
+            return Color.green.opacity(0.80)
+        case .storytelling:
+            return Color.orange.opacity(0.85)
+        case .update:
+            return Color.mint.opacity(0.85)
+        case .paused:
+            return Color.yellow.opacity(0.85)
+        case .success:
+            return Color.green.opacity(0.90)
+        case .warning:
+            return Color.pink.opacity(0.75)
+        case .error:
+            return Color.red.opacity(0.80)
+        }
     }
 }

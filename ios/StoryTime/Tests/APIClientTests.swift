@@ -157,6 +157,13 @@ final class APIClientTests: XCTestCase {
         XCTAssertEqual(traceEvents[3].requestId, "req-voices-echo")
         XCTAssertEqual(traceEvents[3].sessionId, "session-trace-1")
         XCTAssertEqual(traceEvents[3].statusCode, 200)
+        XCTAssertEqual(traceEvents.map(\.runtimeStage), [nil, nil, nil, nil])
+        XCTAssertEqual(traceEvents.map(\.runtimeStageGroup), [nil, nil, nil, nil])
+        XCTAssertEqual(traceEvents.map(\.costDriver), [nil, nil, nil, nil])
+        XCTAssertNil(traceEvents[0].durationMs)
+        XCTAssertNotNil(traceEvents[1].durationMs)
+        XCTAssertNil(traceEvents[2].durationMs)
+        XCTAssertNotNil(traceEvents[3].durationMs)
     }
 
     func testStartupSequenceReusesBootstrappedSessionAcrossVoicesAndRealtimeSession() async throws {
@@ -689,6 +696,173 @@ final class APIClientTests: XCTestCase {
         XCTAssertTrue(generated.blocked)
         XCTAssertTrue(revised.blocked)
         XCTAssertEqual(embeddings.count, 2)
+    }
+
+    func testStoryEndpointTraceEventsCarryDetailedAndGroupedRuntimeStages() async throws {
+        let session = makeSession()
+        let baseURL = URL(string: "https://backend.example.com/")!
+        var traceEvents: [APIClientTraceEvent] = []
+
+        URLProtocolStub.handler = { request in
+            let url = try XCTUnwrap(request.url)
+            switch url.path {
+            case "/v1/session/identity":
+                return try Self.httpResponse(
+                    url: url,
+                    statusCode: 200,
+                    json: ["session_id": "session-stage-1"],
+                    headers: [
+                        "x-request-id": "req-bootstrap-stage",
+                        "x-storytime-session": "session-token-stage",
+                        "x-storytime-session-expires-at": String(Date().addingTimeInterval(300).timeIntervalSince1970)
+                    ]
+                )
+            case "/v1/story/discovery":
+                return try Self.httpResponse(
+                    url: url,
+                    statusCode: 200,
+                    json: [
+                        "blocked": false,
+                        "safe_message": NSNull(),
+                        "data": [
+                            "slot_state": [
+                                "theme": "lanterns",
+                                "characters": ["Bunny"],
+                                "setting": "park",
+                                "tone": "gentle",
+                                "episode_intent": "standalone"
+                            ],
+                            "question_count": 1,
+                            "ready_to_generate": true,
+                            "assistant_message": "Ready to go.",
+                            "transcript": "Tell a lantern story"
+                        ]
+                    ],
+                    headers: ["x-request-id": "req-discovery-stage"]
+                )
+            case "/v1/story/generate":
+                return try Self.httpResponse(
+                    url: url,
+                    statusCode: 200,
+                    json: [
+                        "blocked": false,
+                        "safe_message": NSNull(),
+                        "data": [
+                            "story_id": "story-1",
+                            "title": "Lantern Story",
+                            "estimated_duration_sec": 120,
+                            "scenes": [
+                                ["scene_id": "1", "text": "A happy lantern glowed.", "duration_sec": 40]
+                            ],
+                            "safety": [
+                                "input_moderation": "pass",
+                                "output_moderation": "pass"
+                            ],
+                            "engine": NSNull()
+                        ]
+                    ],
+                    headers: ["x-request-id": "req-generate-stage"]
+                )
+            case "/v1/story/revise":
+                return try Self.httpResponse(
+                    url: url,
+                    statusCode: 200,
+                    json: [
+                        "blocked": false,
+                        "safe_message": NSNull(),
+                        "data": [
+                            "story_id": "story-1",
+                            "revised_from_scene_index": 1,
+                            "scenes": [
+                                ["scene_id": "2", "text": "A softer ending arrived.", "duration_sec": 40]
+                            ],
+                            "safety": [
+                                "input_moderation": "pass",
+                                "output_moderation": "pass"
+                            ],
+                            "engine": NSNull()
+                        ]
+                    ],
+                    headers: ["x-request-id": "req-revise-stage"]
+                )
+            case "/v1/embeddings/create":
+                return try Self.httpResponse(
+                    url: url,
+                    statusCode: 200,
+                    json: ["embeddings": [[0.1, 0.2]]],
+                    headers: ["x-request-id": "req-embeddings-stage"]
+                )
+            default:
+                XCTFail("Unexpected staged trace request: \(url.absoluteString)")
+                return try Self.httpResponse(url: url, statusCode: 500, json: ["error": "unexpected"])
+            }
+        }
+
+        let client = APIClient(baseURLs: [baseURL], session: session, installId: "install-123")
+        client.traceHandler = { traceEvents.append($0) }
+
+        _ = try await client.discoverStoryTurn(
+            request: DiscoveryRequest(
+                childProfileId: "child-1",
+                transcript: "Tell a lantern story",
+                questionCount: 1,
+                slotState: DiscoverySlotState(),
+                mode: "new",
+                previousEpisodeRecap: nil
+            )
+        )
+        _ = try await client.generateStory(
+            request: GenerateStoryRequest(
+                childProfileId: "child-1",
+                ageBand: "3-8",
+                language: "en",
+                lengthMinutes: 4,
+                voice: "alloy",
+                questionCount: 1,
+                storyBrief: StoryBrief(
+                    theme: "gentle bedtime",
+                    characters: ["Bunny"],
+                    setting: "park",
+                    tone: "soft",
+                    episodeIntent: "standalone",
+                    lesson: nil
+                ),
+                continuityFacts: []
+            )
+        )
+        _ = try await client.reviseStory(
+            request: ReviseStoryRequest(
+                storyId: "story-1",
+                currentSceneIndex: 1,
+                storyTitle: "Lantern Story",
+                userUpdate: "Make it softer",
+                completedScenes: [],
+                remainingScenes: [StoryScene(sceneId: "2", text: "Old ending", durationSec: 40)]
+            )
+        )
+        _ = try await client.createEmbeddings(inputs: ["Bunny"])
+
+        let completedByOperation = Dictionary(
+            uniqueKeysWithValues: traceEvents
+                .filter { $0.phase == .completed }
+                .map { ($0.operation, $0) }
+        )
+
+        XCTAssertEqual(completedByOperation[.storyDiscovery]?.runtimeStage, .discovery)
+        XCTAssertEqual(completedByOperation[.storyDiscovery]?.runtimeStageGroup, .interaction)
+        XCTAssertEqual(completedByOperation[.storyDiscovery]?.costDriver, .remoteModel)
+
+        XCTAssertEqual(completedByOperation[.storyGeneration]?.runtimeStage, .storyGeneration)
+        XCTAssertEqual(completedByOperation[.storyGeneration]?.runtimeStageGroup, .generation)
+        XCTAssertEqual(completedByOperation[.storyGeneration]?.costDriver, .remoteModel)
+
+        XCTAssertEqual(completedByOperation[.storyRevision]?.runtimeStage, .reviseFutureScenes)
+        XCTAssertEqual(completedByOperation[.storyRevision]?.runtimeStageGroup, .revision)
+        XCTAssertEqual(completedByOperation[.storyRevision]?.costDriver, .remoteModel)
+
+        XCTAssertEqual(completedByOperation[.embeddings]?.runtimeStage, .continuityRetrieval)
+        XCTAssertNil(completedByOperation[.embeddings]?.runtimeStageGroup)
+        XCTAssertEqual(completedByOperation[.embeddings]?.costDriver, .remoteModel)
     }
 
     func testInvalidResponsesAndSessionTokenLifecycle() async throws {

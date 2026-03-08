@@ -1,6 +1,9 @@
 import { z } from "zod";
 
 export function looksLikeSdp(value: string): boolean {
+  // The realtime /v1/realtime/call contract expects an actual WebRTC SDP
+  // offer/answer body, not just any long string that starts with `v=0`.
+  // Require a media section plus a DTLS fingerprint, but preserve bytes as-is.
   return value.startsWith("v=0") && /\r?\nm=/.test(value) && value.includes("a=fingerprint:");
 }
 

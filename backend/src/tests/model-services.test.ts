@@ -1,4 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { analytics } from "../lib/analytics.js";
 import { EmbeddingsService } from "../services/embeddingsService.js";
 import { ModerationService } from "../services/moderationService.js";
 import { RealtimeService } from "../services/realtimeService.js";
@@ -69,6 +70,7 @@ describe("model-adjacent services", () => {
     const env = makeTestEnv({ OPENAI_MAX_RETRIES: 1, OPENAI_RETRY_BASE_MS: 0, OPENAI_TIMEOUT_MS: 50 });
     const service = new RealtimeService(env);
     const context = makeRequestContext();
+    const before = analytics.snapshot();
     const ticket = service.issueSessionTicket(
       {
         child_profile_id: "11111111-1111-1111-1111-111111111111",
@@ -95,6 +97,9 @@ describe("model-adjacent services", () => {
 
     expect(result.answer_sdp).toBe(validAnswerSdp);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    const after = analytics.snapshot();
+    expect((after["openai_stage:interaction:success"] ?? 0) - (before["openai_stage:interaction:success"] ?? 0)).toBe(1);
+    expect((after["openai_stage_group:interaction:success"] ?? 0) - (before["openai_stage_group:interaction:success"] ?? 0)).toBe(1);
   });
 
   it("forwards realtime calls to OpenAI with text multipart sdp and session fields", async () => {

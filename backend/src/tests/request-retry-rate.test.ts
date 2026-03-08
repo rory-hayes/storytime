@@ -88,6 +88,7 @@ describe("request context, retry, rate limiting, analytics", () => {
 
   it("records analytics counters and can create an OpenAI client", () => {
     const suffix = Date.now().toString();
+    const before = analytics.snapshot();
     analytics.recordRequest({
       requestId: `req-${suffix}`,
       route: `/voice/${suffix}`,
@@ -101,11 +102,36 @@ describe("request context, retry, rate limiting, analytics", () => {
       requestId: `req-openai-${suffix}`,
       route: "/v1/realtime/call",
       operation: `realtime.call.${suffix}`,
+      runtimeStage: "interaction",
       provider: "openai",
       model: "gpt-realtime",
       region: "US",
       attempts: 1,
       durationMs: 20,
+      success: true
+    });
+    analytics.recordOpenAI({
+      requestId: `req-generate-${suffix}`,
+      route: "/v1/story/generate",
+      operation: `responses.story_generate.${suffix}`,
+      runtimeStage: "story_generation",
+      provider: "openai",
+      model: "gpt-4.1-mini",
+      region: "US",
+      attempts: 1,
+      durationMs: 22,
+      success: true
+    });
+    analytics.recordOpenAI({
+      requestId: `req-support-${suffix}`,
+      route: "/v1/embeddings/create",
+      operation: `embeddings.create.${suffix}`,
+      runtimeStage: "continuity_retrieval",
+      provider: "openai",
+      model: "text-embedding-3-small",
+      region: "US",
+      attempts: 1,
+      durationMs: 10,
       success: true
     });
     analytics.recordSecurity({
@@ -118,6 +144,13 @@ describe("request context, retry, rate limiting, analytics", () => {
     const snapshot = analytics.snapshot();
     expect(snapshot[`http:/voice/${suffix}:2xx`]).toBe(1);
     expect(snapshot[`openai:realtime.call.${suffix}:success`]).toBe(1);
+    expect(snapshot[`openai:responses.story_generate.${suffix}:success`]).toBe(1);
+    expect((snapshot["openai_stage:interaction:success"] ?? 0) - (before["openai_stage:interaction:success"] ?? 0)).toBe(1);
+    expect((snapshot["openai_stage_group:interaction:success"] ?? 0) - (before["openai_stage_group:interaction:success"] ?? 0)).toBe(1);
+    expect((snapshot["openai_stage:story_generation:success"] ?? 0) - (before["openai_stage:story_generation:success"] ?? 0)).toBe(1);
+    expect((snapshot["openai_stage_group:generation:success"] ?? 0) - (before["openai_stage_group:generation:success"] ?? 0)).toBe(1);
+    expect((snapshot["openai_stage:continuity_retrieval:success"] ?? 0) - (before["openai_stage:continuity_retrieval:success"] ?? 0)).toBe(1);
+    expect(snapshot["openai_stage_group:narration:success"]).toBe(before["openai_stage_group:narration:success"]);
     expect(snapshot[`security:session_issued_${suffix}`]).toBe(1);
 
     const client = createOpenAI(makeTestEnv());

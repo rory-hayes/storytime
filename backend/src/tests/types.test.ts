@@ -10,6 +10,9 @@ import {
   StoryScriptSchema
 } from "../types.js";
 
+const validRealtimeSdp =
+  "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=StoryTime\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=fingerprint:sha-256 offer-test\r\n";
+
 describe("request and response schemas", () => {
   it("accepts valid generate, revise, discovery, realtime, and embeddings payloads", () => {
     expect(() =>
@@ -60,7 +63,7 @@ describe("request and response schemas", () => {
     expect(() =>
       RealtimeCallRequestSchema.parse({
         ticket: "x".repeat(24),
-        sdp: "v=0\r\n" + "a".repeat(32)
+        sdp: validRealtimeSdp
       })
     ).not.toThrow();
 
@@ -68,7 +71,7 @@ describe("request and response schemas", () => {
   });
 
   it("preserves realtime SDP exactly without trimming trailing line endings", () => {
-    const sdp = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=StoryTime\r\n";
+    const sdp = validRealtimeSdp;
     const parsed = RealtimeCallRequestSchema.parse({
       ticket: "x".repeat(24),
       sdp
@@ -76,6 +79,22 @@ describe("request and response schemas", () => {
 
     expect(parsed.sdp).toBe(sdp);
     expect(parsed.sdp.endsWith("\r\n")).toBe(true);
+  });
+
+  it("rejects realtime SDP payloads that do not include media and fingerprint lines", () => {
+    expect(() =>
+      RealtimeCallRequestSchema.parse({
+        ticket: "x".repeat(24),
+        sdp: "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=StoryTime\r\n"
+      })
+    ).toThrow(/Invalid SDP offer/);
+
+    expect(() =>
+      RealtimeCallRequestSchema.parse({
+        ticket: "x".repeat(24),
+        sdp: "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=StoryTime\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"
+      })
+    ).toThrow(/Invalid SDP offer/);
   });
 
   it("rejects invalid payloads and validates story engine shape", () => {

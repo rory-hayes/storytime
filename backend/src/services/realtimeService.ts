@@ -228,6 +228,7 @@ export class RealtimeService {
       requestId: context.requestId,
       route: context.route,
       operation: "realtime.call",
+      runtimeStage: "interaction",
       provider: "openai",
       model: this.env.OPENAI_REALTIME_MODEL,
       region: context.region,

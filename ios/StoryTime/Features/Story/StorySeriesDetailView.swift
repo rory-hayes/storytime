@@ -4,17 +4,16 @@ struct StorySeriesDetailView: View {
     let seriesId: UUID
     @ObservedObject var store: StoryLibraryStore
 
-    @State private var showDeleteConfirmation = false
-
     var body: some View {
         Group {
             if let series {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
                         header(series)
+                        continueStoryCard(series)
                         continuityCard(series)
-                        actionsRow(series)
                         episodeList(series)
+                        managementCard
                     }
                     .padding(20)
                 }
@@ -27,25 +26,6 @@ struct StorySeriesDetailView: View {
         }
         .navigationTitle("Story Series")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            if series != nil {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button(role: .destructive) {
-                        showDeleteConfirmation = true
-                    } label: {
-                        Image(systemName: "trash")
-                    }
-                }
-            }
-        }
-        .alert("Delete this series?", isPresented: $showDeleteConfirmation) {
-            Button("Delete", role: .destructive) {
-                store.deleteSeries(seriesId)
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This removes the saved episodes and local continuity memory for this series.")
-        }
     }
 
     private func header(_ series: StorySeries) -> some View {
@@ -67,10 +47,78 @@ struct StorySeriesDetailView: View {
         }
     }
 
+    private func continueStoryCard(_ series: StorySeries) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Continue this story")
+                .font(.system(size: 18, weight: .black, design: .rounded))
+                .accessibilityIdentifier("seriesDetailContinueTitle")
+
+            Text("Replay the latest adventure or start a new episode that keeps this world, these characters, and this child's saved continuity together.")
+                .font(.system(size: 14, weight: .medium, design: .rounded))
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("seriesDetailContinueSummary")
+
+            HStack(spacing: 10) {
+                NavigationLink {
+                    VoiceSessionView(
+                        plan: StoryLaunchPlan(
+                            mode: .repeatEpisode(seriesId: series.id),
+                            childProfileId: store.activeProfile?.id ?? series.childProfileId ?? UUID(),
+                            experienceMode: store.activeProfile?.preferredMode ?? .classic,
+                            usePastStory: true,
+                            selectedSeriesId: series.id,
+                            usePastCharacters: true,
+                            lengthMinutes: max(1, min(10, (series.latestEpisode?.estimatedDurationSec ?? 240) / 60))
+                        ),
+                        sourceSeries: series,
+                        store: store
+                    )
+                } label: {
+                    Label("Repeat", systemImage: "repeat")
+                }
+                .buttonStyle(.bordered)
+                .accessibilityIdentifier("repeatEpisodeButton")
+
+                NavigationLink {
+                    VoiceSessionView(
+                        plan: StoryLaunchPlan(
+                            mode: .extend(seriesId: series.id),
+                            childProfileId: store.activeProfile?.id ?? series.childProfileId ?? UUID(),
+                            experienceMode: store.activeProfile?.preferredMode ?? .classic,
+                            usePastStory: true,
+                            selectedSeriesId: series.id,
+                            usePastCharacters: true,
+                            lengthMinutes: 4
+                        ),
+                        sourceSeries: series,
+                        store: store
+                    )
+                } label: {
+                    Label("New Episode", systemImage: "plus.app")
+                }
+                .buttonStyle(.borderedProminent)
+                .accessibilityIdentifier("newEpisodeButton")
+            }
+
+            Text("New episodes stay linked to this saved series for the selected child.")
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("seriesDetailContinueScopeHint")
+        }
+        .padding(16)
+        .background(cardBackground)
+    }
+
     private func continuityCard(_ series: StorySeries) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Series memory")
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Story memory for the next episode")
                 .font(.system(size: 16, weight: .bold, design: .rounded))
+                .accessibilityIdentifier("seriesDetailContinuityTitle")
+
+            Text("StoryTime uses these saved details to keep future episodes familiar without changing earlier ones.")
+                .font(.system(size: 13, weight: .medium, design: .rounded))
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("seriesDetailContinuitySummary")
 
             if let arcSummary = series.arcSummary, !arcSummary.isEmpty {
                 Text(arcSummary)
@@ -78,72 +126,44 @@ struct StorySeriesDetailView: View {
             }
 
             if let places = series.favoritePlaces, !places.isEmpty {
-                Text("Places: \(places.prefix(3).joined(separator: ", "))")
+                Text("Places to revisit: \(places.prefix(3).joined(separator: ", "))")
                     .font(.system(size: 13, weight: .semibold, design: .rounded))
                     .foregroundStyle(.secondary)
             }
 
             if let relationships = series.relationshipFacts, !relationships.isEmpty {
-                Text("Relationships: \(relationships.prefix(2).joined(separator: " • "))")
+                Text("Important relationships: \(relationships.prefix(2).joined(separator: " • "))")
                     .font(.system(size: 13, weight: .semibold, design: .rounded))
                     .foregroundStyle(.secondary)
             }
 
             if let threads = series.unresolvedThreads, !threads.isEmpty {
-                Text("Open threads: \(threads.prefix(2).joined(separator: " • "))")
+                Text("Open story threads: \(threads.prefix(2).joined(separator: " • "))")
                     .font(.system(size: 13, weight: .semibold, design: .rounded))
                     .foregroundStyle(.secondary)
             }
         }
         .padding(16)
-        .background(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(.white.opacity(0.88))
-        )
+        .background(cardBackground)
     }
 
-    private func actionsRow(_ series: StorySeries) -> some View {
-        HStack(spacing: 10) {
-            NavigationLink {
-                VoiceSessionView(
-                    plan: StoryLaunchPlan(
-                        mode: .repeatEpisode(seriesId: series.id),
-                        childProfileId: store.activeProfile?.id ?? series.childProfileId ?? UUID(),
-                        experienceMode: store.activeProfile?.preferredMode ?? .classic,
-                        usePastStory: true,
-                        selectedSeriesId: series.id,
-                        usePastCharacters: true,
-                        lengthMinutes: max(1, min(10, (series.latestEpisode?.estimatedDurationSec ?? 240) / 60))
-                    ),
-                    sourceSeries: series,
-                    store: store
-                )
-            } label: {
-                Label("Repeat", systemImage: "repeat")
-            }
-            .buttonStyle(.bordered)
-            .accessibilityIdentifier("repeatEpisodeButton")
+    private var managementCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Saved-story management")
+                .font(.system(size: 14, weight: .bold, design: .rounded))
+                .accessibilityIdentifier("seriesDetailManagementTitle")
 
-            NavigationLink {
-                VoiceSessionView(
-                    plan: StoryLaunchPlan(
-                        mode: .extend(seriesId: series.id),
-                        childProfileId: store.activeProfile?.id ?? series.childProfileId ?? UUID(),
-                        experienceMode: store.activeProfile?.preferredMode ?? .classic,
-                        usePastStory: true,
-                        selectedSeriesId: series.id,
-                        usePastCharacters: true,
-                        lengthMinutes: 4
-                    ),
-                    sourceSeries: series,
-                    store: store
-                )
-            } label: {
-                Label("New Episode", systemImage: "plus.app")
-            }
-            .buttonStyle(.borderedProminent)
-            .accessibilityIdentifier("newEpisodeButton")
+            Text("Parents can remove saved stories or clear all saved story history from Parent Controls.")
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("seriesDetailParentControlsHint")
         }
+        .padding(.top, 4)
+    }
+
+    private var cardBackground: some View {
+        RoundedRectangle(cornerRadius: 20, style: .continuous)
+            .fill(.white.opacity(0.88))
     }
 
     private func episodeList(_ series: StorySeries) -> some View {

@@ -43,6 +43,72 @@ enum APIClientTraceOperation: String, Equatable, Hashable {
     case embeddings
 }
 
+enum RuntimeTelemetryStage: String, Equatable, Hashable {
+    case discovery
+    case storyGeneration = "story_generation"
+    case answerOnlyInteraction = "answer_only_interaction"
+    case reviseFutureScenes = "revise_future_scenes"
+    case ttsGeneration = "tts_generation"
+    case continuityRetrieval = "continuity_retrieval"
+}
+
+enum RuntimeTelemetryStageGroup: String, Equatable, Hashable {
+    case interaction
+    case generation
+    case narration
+    case revision
+}
+
+extension RuntimeTelemetryStage {
+    var stageGroup: RuntimeTelemetryStageGroup? {
+        switch self {
+        case .discovery, .answerOnlyInteraction:
+            return .interaction
+        case .storyGeneration:
+            return .generation
+        case .ttsGeneration:
+            return .narration
+        case .reviseFutureScenes:
+            return .revision
+        case .continuityRetrieval:
+            return nil
+        }
+    }
+}
+
+enum RuntimeTelemetryCostDriver: String, Equatable, Hashable {
+    case remoteModel = "remote_model"
+    case realtimeInteraction = "realtime_interaction"
+    case localSpeech = "local_speech"
+    case localData = "local_data"
+}
+
+extension APIClientTraceOperation {
+    var runtimeStage: RuntimeTelemetryStage? {
+        switch self {
+        case .storyDiscovery:
+            return .discovery
+        case .storyGeneration:
+            return .storyGeneration
+        case .storyRevision:
+            return .reviseFutureScenes
+        case .embeddings:
+            return .continuityRetrieval
+        case .healthCheck, .sessionBootstrap, .voices, .realtimeSession:
+            return nil
+        }
+    }
+
+    var runtimeCostDriver: RuntimeTelemetryCostDriver? {
+        switch self {
+        case .storyDiscovery, .storyGeneration, .storyRevision, .embeddings:
+            return .remoteModel
+        case .healthCheck, .sessionBootstrap, .voices, .realtimeSession:
+            return nil
+        }
+    }
+}
+
 enum APIClientTracePhase: String, Equatable {
     case started
     case completed
@@ -56,6 +122,35 @@ struct APIClientTraceEvent: Equatable {
     let requestId: String
     let sessionId: String?
     let statusCode: Int?
+    let runtimeStage: RuntimeTelemetryStage?
+    let costDriver: RuntimeTelemetryCostDriver?
+    let durationMs: Int?
+
+    var runtimeStageGroup: RuntimeTelemetryStageGroup? {
+        runtimeStage?.stageGroup
+    }
+
+    init(
+        operation: APIClientTraceOperation,
+        phase: APIClientTracePhase,
+        route: String,
+        requestId: String,
+        sessionId: String?,
+        statusCode: Int?,
+        runtimeStage: RuntimeTelemetryStage? = nil,
+        costDriver: RuntimeTelemetryCostDriver? = nil,
+        durationMs: Int? = nil
+    ) {
+        self.operation = operation
+        self.phase = phase
+        self.route = route
+        self.requestId = requestId
+        self.sessionId = sessionId
+        self.statusCode = statusCode
+        self.runtimeStage = runtimeStage
+        self.costDriver = costDriver
+        self.durationMs = durationMs
+    }
 }
 
 protocol APIClienting: AnyObject {
@@ -262,6 +357,7 @@ final class APIClient: APIClienting {
     private func perform(_ request: URLRequest, operation: APIClientTraceOperation) async throws -> (Data, HTTPURLResponse) {
         let route = request.url?.path ?? "/"
         let requestId = request.value(forHTTPHeaderField: "x-request-id") ?? nextRequestId()
+        let startedAt = DispatchTime.now().uptimeNanoseconds
         var didEmitTransportFailure = false
         emitTrace(
             APIClientTraceEvent(
@@ -270,7 +366,9 @@ final class APIClient: APIClienting {
                 route: route,
                 requestId: requestId,
                 sessionId: AppSession.currentSessionId,
-                statusCode: nil
+                statusCode: nil,
+                runtimeStage: operation.runtimeStage,
+                costDriver: operation.runtimeCostDriver
             )
         )
 
@@ -284,7 +382,10 @@ final class APIClient: APIClienting {
                         route: route,
                         requestId: requestId,
                         sessionId: AppSession.currentSessionId,
-                        statusCode: nil
+                        statusCode: nil,
+                        runtimeStage: operation.runtimeStage,
+                        costDriver: operation.runtimeCostDriver,
+                        durationMs: Self.durationMs(since: startedAt)
                     )
                 )
                 didEmitTransportFailure = true
@@ -299,7 +400,10 @@ final class APIClient: APIClienting {
                     route: route,
                     requestId: http.value(forHTTPHeaderField: "x-request-id") ?? requestId,
                     sessionId: AppSession.currentSessionId,
-                    statusCode: http.statusCode
+                    statusCode: http.statusCode,
+                    runtimeStage: operation.runtimeStage,
+                    costDriver: operation.runtimeCostDriver,
+                    durationMs: Self.durationMs(since: startedAt)
                 )
             )
             return (data, http)
@@ -312,7 +416,10 @@ final class APIClient: APIClienting {
                         route: route,
                         requestId: requestId,
                         sessionId: AppSession.currentSessionId,
-                        statusCode: nil
+                        statusCode: nil,
+                        runtimeStage: operation.runtimeStage,
+                        costDriver: operation.runtimeCostDriver,
+                        durationMs: Self.durationMs(since: startedAt)
                     )
                 )
             }
@@ -492,6 +599,10 @@ final class APIClient: APIClienting {
 
     private func nextRequestId() -> String {
         "ios-\(UUID().uuidString.lowercased())"
+    }
+
+    private static func durationMs(since startedAt: UInt64) -> Int {
+        Int((DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000)
     }
 
     private func emitTrace(_ event: APIClientTraceEvent) {

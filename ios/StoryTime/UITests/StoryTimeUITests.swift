@@ -35,6 +35,59 @@ final class StoryTimeUITests: XCTestCase {
         XCTAssertTrue(storyTitle.waitForExistence(timeout: 120))
     }
 
+    func testVoiceSessionShowsListeningCueBeforeNarrationStarts() {
+        let app = launchApp()
+
+        let newStoryButton = app.buttons["newStoryInlineButton"]
+        XCTAssertTrue(newStoryButton.waitForExistence(timeout: 10))
+        newStoryButton.tap()
+
+        let startVoiceButton = app.buttons["startVoiceSessionButton"]
+        if !startVoiceButton.waitForExistence(timeout: 3) {
+            for _ in 0..<3 where !startVoiceButton.exists {
+                app.swipeUp()
+            }
+        }
+        XCTAssertTrue(startVoiceButton.waitForExistence(timeout: 10))
+        startVoiceButton.tap()
+
+        let sessionCueCard = app.otherElements["sessionCueCard"]
+        XCTAssertTrue(sessionCueCard.waitForExistence(timeout: 20))
+        XCTAssertTrue(waitForLabel(of: sessionCueCard, toEqual: "Listening"))
+        XCTAssertEqual(
+            sessionCueCard.value as? String,
+            "Answer live question 1 of 3 so StoryTime can build the story.\nSpeak your answer now."
+        )
+    }
+
+    func testVoiceSessionShowsStorytellingCueAfterNarrationStarts() {
+        let app = launchApp()
+
+        let newStoryButton = app.buttons["newStoryInlineButton"]
+        XCTAssertTrue(newStoryButton.waitForExistence(timeout: 10))
+        newStoryButton.tap()
+
+        let startVoiceButton = app.buttons["startVoiceSessionButton"]
+        if !startVoiceButton.waitForExistence(timeout: 3) {
+            for _ in 0..<3 where !startVoiceButton.exists {
+                app.swipeUp()
+            }
+        }
+        XCTAssertTrue(startVoiceButton.waitForExistence(timeout: 10))
+        startVoiceButton.tap()
+
+        let storyTitle = app.staticTexts["storyTitleLabel"]
+        XCTAssertTrue(storyTitle.waitForExistence(timeout: 120))
+
+        let sessionCueCard = app.otherElements["sessionCueCard"]
+        XCTAssertTrue(sessionCueCard.waitForExistence(timeout: 10))
+        XCTAssertTrue(waitForLabel(of: sessionCueCard, toEqual: "Storytelling"))
+
+        let cueValue = sessionCueCard.value as? String ?? ""
+        XCTAssertTrue(cueValue.hasPrefix("StoryTime is telling scene "))
+        XCTAssertTrue(cueValue.contains("Speak anytime to ask a question or change what happens next."))
+    }
+
     func testParentControlsCanRenderAndAddAChildProfile() {
         let app = launchApp()
 
@@ -74,6 +127,14 @@ final class StoryTimeUITests: XCTestCase {
         let gateTitle = app.staticTexts["parentAccessGateTitle"]
         XCTAssertTrue(gateTitle.waitForExistence(timeout: 10))
         XCTAssertEqual(gateTitle.label, "Parents only")
+        XCTAssertEqual(
+            app.staticTexts["parentAccessGateMessage"].label,
+            "Type PARENT for a lightweight parent check before opening profile, privacy, and saved-story controls."
+        )
+        XCTAssertEqual(
+            app.staticTexts["parentAccessGateFootnote"].label,
+            "This keeps quick taps out on this device. It is not a password or purchase login."
+        )
         XCTAssertFalse(app.staticTexts["parentRawAudioStatusLabel"].exists)
 
         let unlockButton = app.buttons["unlockParentControlsButton"]
@@ -91,7 +152,63 @@ final class StoryTimeUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["parentRawAudioStatusLabel"].waitForExistence(timeout: 10))
     }
 
-    func testSeriesDetailShowsContinuityAndActionButtons() {
+    func testHomeViewFramesQuickStartLibraryAndParentControls() {
+        let app = launchApp()
+
+        let heroTitle = app.staticTexts["homeHeroTitle"]
+        XCTAssertTrue(heroTitle.waitForExistence(timeout: 10))
+        XCTAssertEqual(heroTitle.label, "Kids shape the story while it is happening.")
+
+        let heroSummary = app.staticTexts["homeHeroSummary"]
+        XCTAssertTrue(heroSummary.waitForExistence(timeout: 10))
+        XCTAssertEqual(
+            heroSummary.label,
+            "Start with a few live questions, then StoryTime narrates the adventure scene by scene."
+        )
+
+        let activeProfileSummary = app.staticTexts["homeActiveProfileSummary"]
+        XCTAssertTrue(activeProfileSummary.waitForExistence(timeout: 10))
+        XCTAssertEqual(
+            activeProfileSummary.label,
+            "Milo will answer a few live questions first, then StoryTime tells the story scene by scene."
+        )
+
+        let librarySummary = app.staticTexts["homeLibrarySummary"]
+        XCTAssertTrue(librarySummary.waitForExistence(timeout: 10))
+        XCTAssertEqual(
+            librarySummary.label,
+            "Replay favorites or start a new episode for Milo without losing the saved story world."
+        )
+
+        let parentEntryButton = app.buttons["homeParentControlsEntryButton"]
+        XCTAssertTrue(parentEntryButton.waitForExistence(timeout: 10))
+        XCTAssertEqual(
+            app.staticTexts["homeParentControlsFootnote"].label,
+            "PARENT is a lightweight check on this device. It is not account authentication."
+        )
+        parentEntryButton.tap()
+
+        let gateTitle = app.staticTexts["parentAccessGateTitle"]
+        XCTAssertTrue(gateTitle.waitForExistence(timeout: 10))
+        XCTAssertEqual(gateTitle.label, "Parents only")
+    }
+
+    func testSavedStoryCardShowsReplayAndContinueAffordanceOnHome() {
+        let app = launchApp()
+
+        let seededSeriesCard = app.buttons["seriesCard-55555555-5555-5555-5555-555555555555"]
+        XCTAssertTrue(seededSeriesCard.waitForExistence(timeout: 10))
+
+        let episodeSummary = app.staticTexts["seriesCardEpisodeSummary-55555555-5555-5555-5555-555555555555"]
+        XCTAssertTrue(episodeSummary.waitForExistence(timeout: 10))
+        XCTAssertEqual(episodeSummary.label, "2 episodes saved")
+
+        let actionHint = app.staticTexts["seriesCardActionHint-55555555-5555-5555-5555-555555555555"]
+        XCTAssertTrue(actionHint.waitForExistence(timeout: 10))
+        XCTAssertEqual(actionHint.label, "Repeat or continue")
+    }
+
+    func testSeriesDetailPrioritizesContinuationActionsOverContinuityDetails() {
         let app = launchApp()
 
         let seededSeriesCard = app.buttons["seriesCard-55555555-5555-5555-5555-555555555555"]
@@ -101,8 +218,34 @@ final class StoryTimeUITests: XCTestCase {
         let detailTitle = app.staticTexts["seriesDetailTitle"]
         XCTAssertTrue(detailTitle.waitForExistence(timeout: 10))
         XCTAssertEqual(detailTitle.label, "Bunny and the Lantern Trail")
+        XCTAssertTrue(app.staticTexts["seriesDetailContinueTitle"].exists)
+        XCTAssertEqual(
+            app.staticTexts["seriesDetailContinueSummary"].label,
+            "Replay the latest adventure or start a new episode that keeps this world, these characters, and this child's saved continuity together."
+        )
         XCTAssertTrue(app.buttons["repeatEpisodeButton"].exists)
         XCTAssertTrue(app.buttons["newEpisodeButton"].exists)
+        XCTAssertEqual(
+            app.staticTexts["seriesDetailContinueScopeHint"].label,
+            "New episodes stay linked to this saved series for the selected child."
+        )
+        XCTAssertEqual(
+            app.staticTexts["seriesDetailContinuityTitle"].label,
+            "Story memory for the next episode"
+        )
+        XCTAssertEqual(
+            app.staticTexts["seriesDetailContinuitySummary"].label,
+            "StoryTime uses these saved details to keep future episodes familiar without changing earlier ones."
+        )
+        XCTAssertEqual(
+            app.staticTexts["seriesDetailManagementTitle"].label,
+            "Saved-story management"
+        )
+        XCTAssertEqual(
+            app.staticTexts["seriesDetailParentControlsHint"].label,
+            "Parents can remove saved stories or clear all saved story history from Parent Controls."
+        )
+        XCTAssertFalse(app.buttons["deleteSeriesToolbarButton"].exists)
         XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "hidden garden")).firstMatch.exists)
     }
 
@@ -135,6 +278,199 @@ final class StoryTimeUITests: XCTestCase {
         XCTAssertFalse(app.buttons["pastStoryPicker"].exists)
     }
 
+    func testSavedStoriesAndPastStoryPickerReturnWhenSwitchingBackToSeededChild() {
+        let app = launchApp()
+
+        let seededSeriesCard = app.buttons["seriesCard-55555555-5555-5555-5555-555555555555"]
+        XCTAssertTrue(seededSeriesCard.waitForExistence(timeout: 10))
+
+        let noraChip = app.buttons["profileChip-Nora"]
+        XCTAssertTrue(noraChip.waitForExistence(timeout: 10))
+        noraChip.tap()
+
+        let emptyStateTitle = app.staticTexts["storiesEmptyStateTitle"]
+        XCTAssertTrue(emptyStateTitle.waitForExistence(timeout: 10))
+        XCTAssertEqual(emptyStateTitle.label, "No stories yet for Nora.")
+        XCTAssertFalse(seededSeriesCard.exists)
+
+        let miloChip = app.buttons["profileChip-Milo"]
+        XCTAssertTrue(miloChip.waitForExistence(timeout: 10))
+        miloChip.tap()
+
+        XCTAssertTrue(seededSeriesCard.waitForExistence(timeout: 10))
+
+        let newStoryButton = app.buttons["newStoryInlineButton"]
+        XCTAssertTrue(newStoryButton.waitForExistence(timeout: 10))
+        newStoryButton.tap()
+
+        let usePastStoryToggle = app.switches["usePastStoryToggle"]
+        XCTAssertTrue(usePastStoryToggle.waitForExistence(timeout: 10))
+        if usePastStoryToggle.value as? String != "1" {
+            usePastStoryToggle.tap()
+        }
+
+        let pastStoryPicker = app.buttons["pastStoryPicker"]
+        XCTAssertTrue(pastStoryPicker.waitForExistence(timeout: 10))
+        XCTAssertTrue(pastStoryPicker.label.contains("Bunny and the Lantern Trail"))
+    }
+
+    func testJourneyExplainsFreshStartAndLiveFollowUpBeforeSessionStarts() {
+        let app = launchApp()
+
+        let newStoryButton = app.buttons["newStoryInlineButton"]
+        XCTAssertTrue(newStoryButton.waitForExistence(timeout: 10))
+        newStoryButton.tap()
+
+        let liveFollowUpSummary = app.staticTexts["journeyLiveFollowUpSummary"]
+        XCTAssertTrue(liveFollowUpSummary.waitForExistence(timeout: 10))
+        XCTAssertEqual(
+            liveFollowUpSummary.label,
+            "Before narration, StoryTime asks up to 3 live questions and then builds the story scene by scene."
+        )
+
+        let pastStorySummary = app.staticTexts["pastStoryOptionSummary"]
+        XCTAssertTrue(pastStorySummary.waitForExistence(timeout: 10))
+        XCTAssertEqual(
+            pastStorySummary.label,
+            "Turn on Use past story to continue one saved series for this child. StoryTime will recap the latest episode during the live questions."
+        )
+
+        let useOldCharactersToggle = app.switches["useOldCharactersToggle"]
+        XCTAssertTrue(useOldCharactersToggle.waitForExistence(timeout: 10))
+        XCTAssertFalse(useOldCharactersToggle.isEnabled)
+
+        let pastCharactersSummary = app.staticTexts["pastCharactersOptionSummary"]
+        XCTAssertTrue(pastCharactersSummary.waitForExistence(timeout: 10))
+        XCTAssertEqual(
+            pastCharactersSummary.label,
+            "Turn on Use past story to reuse familiar characters from one saved series."
+        )
+
+        let continuitySummary = app.staticTexts["journeyContinuitySummary"]
+        XCTAssertTrue(scrollToElement(continuitySummary, in: app))
+        XCTAssertEqual(
+            continuitySummary.label,
+            "Story path: Start a brand-new story after the live questions."
+        )
+
+        let characterPlanSummary = app.staticTexts["journeyCharacterPlanSummary"]
+        XCTAssertTrue(scrollToElement(characterPlanSummary, in: app))
+        XCTAssertEqual(
+            characterPlanSummary.label,
+            "Character plan: The live questions will decide the characters for this new story."
+        )
+    }
+
+    func testJourneyFramesPreflightParentHandoffAndLengthGuidance() {
+        let app = launchApp()
+
+        let newStoryButton = app.buttons["newStoryInlineButton"]
+        XCTAssertTrue(newStoryButton.waitForExistence(timeout: 10))
+        newStoryButton.tap()
+
+        let preflightSummary = app.staticTexts["journeyPreflightSummary"]
+        XCTAssertTrue(preflightSummary.waitForExistence(timeout: 10))
+        XCTAssertEqual(
+            preflightSummary.label,
+            "Set up Milo's child profile, story path, and session length before the live questions begin."
+        )
+
+        let parentHandoffSummary = app.staticTexts["journeyParentHandoffSummary"]
+        XCTAssertTrue(parentHandoffSummary.waitForExistence(timeout: 10))
+        XCTAssertEqual(
+            parentHandoffSummary.label,
+            "This screen is the preflight step. It keeps setup and continuity choices clear before the child starts speaking."
+        )
+
+        let storyPathIntro = app.staticTexts["journeyStoryPathIntro"]
+        XCTAssertTrue(scrollToElement(storyPathIntro, in: app))
+        XCTAssertEqual(
+            storyPathIntro.label,
+            "Choose whether this starts fresh or continues one saved series for this child."
+        )
+
+        let lengthSummary = app.staticTexts["journeyLengthSummary"]
+        XCTAssertTrue(scrollToElement(lengthSummary, in: app))
+        XCTAssertEqual(
+            lengthSummary.label,
+            "Shorter stories move faster. Longer stories add more narrated scenes after the live questions."
+        )
+
+        let footerSummary = app.staticTexts["journeyStartFooterSummary"]
+        XCTAssertTrue(scrollToElement(footerSummary, in: app))
+        XCTAssertEqual(
+            footerSummary.label,
+            "Parents finish setup here, then hand the device to the child for the live questions. Parent controls stay outside the live story."
+        )
+    }
+
+    func testJourneyExplainsContinueModeAndCharacterReuseChoices() {
+        let app = launchApp()
+
+        let newStoryButton = app.buttons["newStoryInlineButton"]
+        XCTAssertTrue(newStoryButton.waitForExistence(timeout: 10))
+        newStoryButton.tap()
+
+        let usePastStoryToggle = app.switches["usePastStoryToggle"]
+        XCTAssertTrue(usePastStoryToggle.waitForExistence(timeout: 10))
+        usePastStoryToggle.tap()
+
+        let selectedPastStorySummary = app.staticTexts["selectedPastStorySummary"]
+        XCTAssertTrue(selectedPastStorySummary.waitForExistence(timeout: 10))
+        XCTAssertEqual(
+            selectedPastStorySummary.label,
+            "Selected series: Bunny and the Lantern Trail. StoryTime will recap the latest episode during the live questions before it creates the next episode."
+        )
+
+        let pastCharactersSummary = app.staticTexts["pastCharactersOptionSummary"]
+        XCTAssertTrue(pastCharactersSummary.waitForExistence(timeout: 10))
+        XCTAssertEqual(
+            pastCharactersSummary.label,
+            "If you turn on Use old characters, StoryTime will reuse Bunny and Fox from Bunny and the Lantern Trail."
+        )
+
+        let continuitySummary = app.staticTexts["journeyContinuitySummary"]
+        XCTAssertTrue(scrollToElement(continuitySummary, in: app))
+        XCTAssertEqual(
+            continuitySummary.label,
+            "Story path: Continue Bunny and the Lantern Trail as a new episode after the live questions."
+        )
+
+        let useOldCharactersToggle = app.switches["useOldCharactersToggle"]
+        XCTAssertTrue(scrollToElement(useOldCharactersToggle, in: app))
+        XCTAssertTrue(useOldCharactersToggle.isEnabled)
+
+        let characterPlanSummary = app.staticTexts["journeyCharacterPlanSummary"]
+        XCTAssertTrue(scrollToElement(characterPlanSummary, in: app))
+        XCTAssertEqual(
+            characterPlanSummary.label,
+            "Character plan: The live questions can keep familiar characters or add new ones for this next episode."
+        )
+    }
+
+    func testJourneyExplainsLiveNarrationAndInterruptionExpectations() {
+        let app = launchApp()
+
+        let newStoryButton = app.buttons["newStoryInlineButton"]
+        XCTAssertTrue(newStoryButton.waitForExistence(timeout: 10))
+        newStoryButton.tap()
+
+        XCTAssertTrue(scrollToElement(app.staticTexts["Live follow-up first"], in: app))
+        XCTAssertTrue(
+            app.staticTexts["StoryTime asks up to 3 live questions before it builds the story."].exists
+        )
+
+        XCTAssertTrue(scrollToElement(app.staticTexts["Scene-by-scene narration"], in: app))
+        XCTAssertTrue(
+            app.staticTexts["After the live questions, StoryTime narrates the adventure one scene at a time."].exists
+        )
+
+        XCTAssertTrue(scrollToElement(app.staticTexts["Interruptions stay live"], in: app))
+        XCTAssertTrue(
+            app.staticTexts["During narration, the child can still ask a question, ask for repetition, or change what happens next."].exists
+        )
+    }
+
     func testPrivacyCopyReflectsLiveProcessingAndLocalRetention() {
         let app = launchApp()
 
@@ -142,7 +478,7 @@ final class StoryTimeUITests: XCTestCase {
         XCTAssertTrue(homePrivacySummary.waitForExistence(timeout: 10))
         XCTAssertEqual(
             homePrivacySummary.label,
-            "Parents manage profiles, sensitivity, retention, and deletion. Raw audio is not saved. Story prompts and generated stories are sent for live processing, and saved history stays on this device after each session."
+            "Parent Controls cover child setup, safety defaults, retention, and deletion. Raw audio is not saved. Live questions and story generation are processed during each session. Saved history and continuity stay on this device afterward."
         )
 
         openParentControls(in: app)
@@ -155,7 +491,21 @@ final class StoryTimeUITests: XCTestCase {
         XCTAssertTrue(parentPrivacySummary.waitForExistence(timeout: 10))
         XCTAssertEqual(
             parentPrivacySummary.label,
-            "Saved stories and continuity stay on this device after the session ends. Raw audio is not saved. Live microphone audio, spoken prompts, story generation, and revisions are sent for live processing."
+            "Use Parent Controls for child setup, privacy, retention, and deletion on this device."
+        )
+
+        let parentPrivacyLocalSummary = app.staticTexts["parentPrivacyLocalSummary"]
+        XCTAssertTrue(parentPrivacyLocalSummary.waitForExistence(timeout: 10))
+        XCTAssertEqual(
+            parentPrivacyLocalSummary.label,
+            "What stays on this device: saved stories and continuity after the session ends."
+        )
+
+        let parentPrivacyLiveSummary = app.staticTexts["parentPrivacyLiveSummary"]
+        XCTAssertTrue(parentPrivacyLiveSummary.waitForExistence(timeout: 10))
+        XCTAssertEqual(
+            parentPrivacyLiveSummary.label,
+            "What goes live during a session: microphone audio, spoken prompts, story generation, and revisions. Raw audio is not saved."
         )
 
         app.buttons["Done"].tap()
@@ -168,7 +518,7 @@ final class StoryTimeUITests: XCTestCase {
         XCTAssertTrue(journeyPrivacySummary.waitForExistence(timeout: 10))
         XCTAssertEqual(
             journeyPrivacySummary.label,
-            "Raw audio is not saved. Story prompts and generated stories are sent for live processing. History retained for 30 days."
+            "Raw audio is not saved. Live questions, story prompts, and generated scenes are sent for live processing. History retained for 30 days on this device."
         )
 
         let startVoiceButton = app.buttons["startVoiceSessionButton"]
@@ -184,15 +534,76 @@ final class StoryTimeUITests: XCTestCase {
         XCTAssertTrue(voicePrivacySummary.waitForExistence(timeout: 20))
         XCTAssertEqual(
             voicePrivacySummary.label,
-            "Live conversation is on. Raw audio is not saved. Spoken prompts are sent for live processing, and the on-screen transcript clears when the session ends."
+            "Live conversation is on. Raw audio is not saved. Your words are sent for live processing during this session, and the on-screen transcript clears when the session ends."
         )
 
         let voiceProcessingHint = app.staticTexts["voiceProcessingHintLabel"]
         XCTAssertTrue(voiceProcessingHint.waitForExistence(timeout: 20))
         XCTAssertEqual(
             voiceProcessingHint.label,
-            "Speak anytime to answer or interrupt. Raw audio is not saved, and your words are sent for live processing."
+            "Speak anytime to answer or interrupt. Ask a grown-up to leave the live story if you need parent controls."
         )
+    }
+
+    func testDeleteAllSavedStoryHistoryClearsSeededSeriesFromHome() {
+        let app = launchApp()
+
+        let seededSeriesCard = app.buttons["seriesCard-55555555-5555-5555-5555-555555555555"]
+        XCTAssertTrue(seededSeriesCard.waitForExistence(timeout: 10))
+
+        openParentControls(in: app)
+
+        let storyHistoryScopeLabel = app.staticTexts["storyHistoryScopeLabel"]
+        XCTAssertTrue(scrollToElement(storyHistoryScopeLabel, in: app))
+        XCTAssertEqual(storyHistoryScopeLabel.label, "1 saved series across all children on this device")
+
+        let deleteHistoryHint = app.staticTexts["deleteAllStoryHistoryHint"]
+        XCTAssertTrue(scrollToElement(deleteHistoryHint, in: app))
+        XCTAssertEqual(
+            deleteHistoryHint.label,
+            "Deletes saved stories and local continuity for every child profile on this device."
+        )
+
+        let deleteHistoryButton = app.buttons["deleteAllStoryHistoryButton"]
+        XCTAssertTrue(scrollToElement(deleteHistoryButton, in: app))
+        deleteHistoryButton.tap()
+
+        let confirmDeleteButton = app.alerts.buttons["Delete"]
+        XCTAssertTrue(confirmDeleteButton.waitForExistence(timeout: 10))
+        confirmDeleteButton.tap()
+
+        app.buttons["Done"].tap()
+
+        let emptyStateTitle = app.staticTexts["storiesEmptyStateTitle"]
+        XCTAssertTrue(emptyStateTitle.waitForExistence(timeout: 10))
+        XCTAssertEqual(emptyStateTitle.label, "No stories yet for Milo.")
+        XCTAssertFalse(seededSeriesCard.exists)
+    }
+
+    func testParentControlsDeleteSingleSeriesAndRemoveItFromHome() {
+        let app = launchApp()
+
+        let seededSeriesCard = app.buttons["seriesCard-55555555-5555-5555-5555-555555555555"]
+        XCTAssertTrue(seededSeriesCard.waitForExistence(timeout: 10))
+
+        openParentControls(in: app)
+
+        let deleteSeriesButton = app.buttons["Delete Series"].firstMatch
+        XCTAssertTrue(scrollToElement(deleteSeriesButton, in: app))
+        deleteSeriesButton.tap()
+
+        let confirmDeleteButton = app.alerts.buttons["Delete"]
+        XCTAssertTrue(confirmDeleteButton.waitForExistence(timeout: 10))
+        confirmDeleteButton.tap()
+
+        XCTAssertFalse(deleteSeriesButton.exists)
+
+        app.buttons["Done"].tap()
+
+        let emptyStateTitle = app.staticTexts["storiesEmptyStateTitle"]
+        XCTAssertTrue(emptyStateTitle.waitForExistence(timeout: 10))
+        XCTAssertEqual(emptyStateTitle.label, "No stories yet for Milo.")
+        XCTAssertFalse(seededSeriesCard.exists)
     }
 
     private func launchApp() -> XCUIApplication {
@@ -220,5 +631,30 @@ final class StoryTimeUITests: XCTestCase {
         XCTAssertTrue(unlockButton.waitForExistence(timeout: 10))
         XCTAssertTrue(unlockButton.isEnabled)
         unlockButton.tap()
+    }
+
+    private func scrollToElement(_ element: XCUIElement, in app: XCUIApplication, maxSwipes: Int = 5) -> Bool {
+        if element.waitForExistence(timeout: 2) {
+            return true
+        }
+
+        for _ in 0..<maxSwipes {
+            app.swipeUp()
+            if element.waitForExistence(timeout: 1) {
+                return true
+            }
+        }
+
+        return element.exists
+    }
+
+    private func waitForLabel(
+        of element: XCUIElement,
+        toEqual expected: String,
+        timeout: TimeInterval = 10
+    ) -> Bool {
+        let predicate = NSPredicate(format: "label == %@", expected)
+        let expectation = XCTNSPredicateExpectation(predicate: predicate, object: element)
+        return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
     }
 }
