@@ -9,6 +9,12 @@ import { createOpenAI } from "./lib/openaiClient.js";
 import { analytics } from "./lib/analytics.js";
 import { SESSION_HEADER, resolveSessionIdentityWithOptions } from "./lib/auth.js";
 import {
+  evaluatePreflight,
+  issueBootstrapEntitlements,
+  issueSyncedEntitlements,
+  resolveEntitlementSnapshot
+} from "./lib/entitlements.js";
+import {
   attachRequestContext,
   getRequestContext,
   resolveRequestId,
@@ -19,7 +25,9 @@ import { SlidingWindowRateLimiter } from "./lib/rateLimiter.js";
 import { createSessionToken } from "./lib/security.js";
 import {
   DiscoveryRequestSchema,
+  EntitlementPreflightRequestSchema,
   EmbeddingsCreateRequestSchema,
+  EntitlementsSyncRequestSchema,
   GenerateStoryRequestSchema,
   ModerationCheckRequestSchema,
   RealtimeCallResponseSchema,
@@ -191,8 +199,32 @@ export function createApp(opts?: { env?: Env; services?: AppServices }) {
         session_token: issued.token,
         expires_at: issued.expires_at,
         region: context.region,
-        auth_level: context.authLevel
+        auth_level: context.authLevel,
+        entitlements: issueBootstrapEntitlements(req, context, env)
       });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/v1/entitlements/sync", (req, res, next) => {
+    try {
+      const body = EntitlementsSyncRequestSchema.parse(req.body);
+      const context = getRequestContext(req);
+      res.json({
+        entitlements: issueSyncedEntitlements(body, context, env)
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/v1/entitlements/preflight", (req, res, next) => {
+    try {
+      const body = EntitlementPreflightRequestSchema.parse(req.body);
+      const context = getRequestContext(req);
+      const snapshot = resolveEntitlementSnapshot(req, context, env);
+      res.json(evaluatePreflight(body, snapshot));
     } catch (error) {
       next(error);
     }

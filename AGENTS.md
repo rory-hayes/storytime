@@ -17,7 +17,7 @@ Active product loop:
 7. The runtime classifies interruptions before deciding whether to answer or revise, and any revision changes only future scenes unless a milestone explicitly widens scope.
 8. Story continuity is stored locally for future episodes.
 
-The hybrid runtime migration is materially stabilized, verified, and acceptance-hardened enough to support the next workstream. The current mission is to turn that runtime into a productized, monetization-aware experience with coherent parent/child journeys, truthful trust messaging, and economically sane upgrade decisions. Stability, correctness, low-latency interaction feel, deterministic session behavior, stage-level telemetry, and cost-aware routing remain gating requirements, but broad core-runtime rescue work is no longer the default next step unless a new defect is discovered.
+The hybrid runtime migration is materially stabilized, verified, and acceptance-hardened enough to support the next workstream. The productization groundwork is also complete enough to move into launch readiness. The current mission is to turn the verified runtime and M8 product direction into a launch-ready MVP with explicit onboarding, entitlement and billing foundations, parent-managed upgrade surfaces, enforceable usage limits, a coherent repeat-use loop, and evidence-backed launch acceptance criteria. Stability, correctness, low-latency interaction feel, deterministic session behavior, stage-level telemetry, and cost-aware routing remain gating requirements, but broad core-runtime rescue work is no longer the default next step unless a new defect is discovered.
 
 ## Active Code Areas
 
@@ -72,6 +72,15 @@ Primary test surfaces:
 
 ## Current Program Priorities
 
+- Launch readiness on top of the verified hybrid runtime and completed M8 productization groundwork
+- MVP scope lock and explicit launch acceptance criteria
+- Onboarding and first-run clarity
+- Billing and entitlement implementation grounded in the active product architecture
+- Parent-managed paywall and upgrade surfaces tied to real product moments
+- Usage limits and plan enforcement before cost-bearing runtime work begins
+- End-of-story repeat-use loop implementation and polish
+- Cost, usage, and latency telemetry for commercial confidence
+- Evidence-based launch-candidate QA
 - Stability
 - Correctness
 - Deterministic session behavior
@@ -95,6 +104,7 @@ Primary test surfaces:
 ## Non-Goals
 
 - Broad core-runtime refactors without a reproduced defect or explicit reprioritization
+- Speculative post-launch package expansion or growth experiments before MVP scope lock
 - Marketing-site or acquisition work outside the in-app product flow
 - New growth features
 - Cloud sync
@@ -181,17 +191,23 @@ Primary test surfaces:
 ## Verification And Measurement Rules
 
 - After hybrid stabilization, verification still matters, but productization and monetization-aware UX are now the default priority unless a new runtime defect is discovered.
+- After the M8 groundwork, launch readiness is the default next workstream. Do not reopen broad foundational runtime work unless a new defect is reproduced and recorded in `PLANS.md`.
 - Runtime verification reports must label each material behavior as `VERIFIED BY TEST`, `VERIFIED BY CODE INSPECTION`, `PARTIALLY VERIFIED`, or `UNVERIFIED`.
 - Verification reports must record the exact commands, test files, docs, and code paths inspected, plus the remaining gaps that still need direct evidence.
 - Telemetry milestones must keep runtime stages explicit where applicable. At minimum, preserve stage-based cost and latency attribution for `interaction`, `generation`, `narration`, and `revision`; document supporting stages separately instead of collapsing them into those four.
+- Launch-readiness verification must explicitly cover onboarding, entitlement sync, pre-session gating, repeat-use loop behavior, privacy and trust language, and the final launch-candidate QA pass with exact commands and evidence labels.
 - Do not default back into broad hybrid-runtime refactors once the baseline is stable; if a new defect is discovered, record it in `PLANS.md` and reprioritize explicitly in `SPRINT.md`.
 
-## Productization And Monetization Rules
+## Productization, Launch Readiness, And Monetization Rules
 
 - UX work must stay grounded in the current technical architecture: realtime for live interaction, TTS for long-form narration, and story/scene state as the authoritative control layer.
+- After the productization groundwork is complete, launch readiness is the default priority. Prefer shipping clarity, enforceable MVP boundaries, and explicit acceptance evidence over speculative expansion.
+- Treat onboarding, paywall, entitlements, usage limits, and telemetry as connected product systems. Do not treat them as isolated cosmetic screens or copy-only tasks.
 - Monetization work must use model-routing economics and runtime-stage cost telemetry instead of arbitrary package or cap guesses.
 - Onboarding, paywall, upgrade, and parent-trust work should be handled as end-to-end product flows across `HomeView`, `NewStoryJourneyView`, `VoiceSessionView`, `StorySeriesDetailView`, and the parent hub, not as isolated cosmetic screens.
 - Prefer parent-managed upgrade entry points and trust-sensitive surfaces unless a milestone explicitly defines a child-facing prompt and its protections.
+- Billing and provider choices must stay grounded in runtime-stage cost telemetry, pre-session enforcement needs, and truthful parent-managed trust surfaces.
+- Final QA and launch-acceptance milestones must define what MVP-launch-ready means in repo terms, including exact commands, evidence labels, remaining gaps, and any go/no-go blockers.
 - Verification remains required for productization work: planning milestones must cite repo evidence, and implementation milestones must update the directly affected UI/unit/backend tests as appropriate.
 
 ## Documentation And Status Update Rules

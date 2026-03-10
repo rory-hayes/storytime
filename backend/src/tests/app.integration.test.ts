@@ -2,6 +2,7 @@ import request from "supertest";
 import { describe, expect, it } from "vitest";
 import { createApp, type AppServices } from "../app.js";
 import { AppError } from "../lib/errors.js";
+import { createEntitlementToken } from "../lib/security.js";
 import { makeTestEnv } from "./testHelpers.js";
 
 const validRealtimeOfferSdp =
@@ -101,6 +102,191 @@ describe("v1 API", () => {
     expect(response.body.region).toBe("EU");
     expect(response.headers["x-storytime-region"]).toBe("EU");
     expect(response.headers["x-storytime-session"]).toBeTruthy();
+    expect(response.body.entitlements.snapshot.tier).toBe("starter");
+    expect(response.body.entitlements.snapshot.max_child_profiles).toBe(1);
+    expect(response.body.entitlements.snapshot.can_replay_saved_stories).toBe(true);
+    expect(response.body.entitlements.token).toBeTruthy();
+    expect(response.body.entitlements.expires_at).toBeGreaterThan(response.body.entitlements.snapshot.effective_at);
+  });
+
+  it("allows non-production entitlement debug seeding during bootstrap", async () => {
+    const app = createApp({ env: makeTestEnv(), services: mockServices() });
+    const response = await request(app)
+      .post("/v1/session/identity")
+      .set("x-storytime-install-id", "install-123")
+      .set("x-storytime-entitlement-seed", "plus")
+      .send({});
+
+    expect(response.status).toBe(200);
+    expect(response.body.entitlements.snapshot.tier).toBe("plus");
+    expect(response.body.entitlements.snapshot.source).toBe("debug_seed");
+    expect(response.body.entitlements.snapshot.max_child_profiles).toBe(3);
+  });
+
+  it("refreshes entitlements from normalized purchase state", async () => {
+    const app = createApp({ env: makeTestEnv(), services: mockServices() });
+    const bootstrap = await request(app)
+      .post("/v1/session/identity")
+      .set("x-storytime-install-id", "install-123")
+      .send({});
+
+    const response = await request(app)
+      .post("/v1/entitlements/sync")
+      .set("x-storytime-install-id", "install-123")
+      .set("x-storytime-session", bootstrap.headers["x-storytime-session"])
+      .send({
+        refresh_reason: "purchase",
+        active_product_ids: [],
+        transactions: [
+          {
+            product_id: "storytime.plus.monthly",
+            original_transaction_id: "original-1",
+            latest_transaction_id: "latest-1",
+            purchased_at: Math.floor(Date.now() / 1000) - 120,
+            expires_at: Math.floor(Date.now() / 1000) + 3_600,
+            revoked_at: null,
+            ownership_type: "purchased",
+            environment: "sandbox",
+            verification_state: "verified",
+            is_active: true
+          }
+        ]
+      });
+
+    expect(response.status).toBe(200);
+    expect(response.body.entitlements.snapshot.tier).toBe("plus");
+    expect(response.body.entitlements.snapshot.source).toBe("storekit_verified");
+    expect(response.body.entitlements.snapshot.max_child_profiles).toBe(3);
+    expect(response.body.entitlements.token).toBeTruthy();
+  });
+
+  it("rejects invalid entitlement sync payloads", async () => {
+    const app = createApp({ env: makeTestEnv(), services: mockServices() });
+    const bootstrap = await request(app)
+      .post("/v1/session/identity")
+      .set("x-storytime-install-id", "install-123")
+      .send({});
+
+    const response = await request(app)
+      .post("/v1/entitlements/sync")
+      .set("x-storytime-install-id", "install-123")
+      .set("x-storytime-session", bootstrap.headers["x-storytime-session"])
+      .send({
+        refresh_reason: "purchase",
+        transactions: [
+          {
+            product_id: "",
+            original_transaction_id: "original-1",
+            latest_transaction_id: "latest-1",
+            purchased_at: Math.floor(Date.now() / 1000),
+            verification_state: "verified",
+            is_active: true
+          }
+        ]
+      });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe("invalid_request");
+  });
+
+  it("returns an allowed entitlement preflight decision for starter launch intent", async () => {
+    const app = createApp({ env: makeTestEnv(), services: mockServices() });
+    const bootstrap = await request(app)
+      .post("/v1/session/identity")
+      .set("x-storytime-install-id", "install-123")
+      .send({});
+
+    const response = await request(app)
+      .post("/v1/entitlements/preflight")
+      .set("x-storytime-install-id", "install-123")
+      .set("x-storytime-session", bootstrap.headers["x-storytime-session"])
+      .set("x-storytime-entitlement", bootstrap.body.entitlements.token)
+      .send({
+        action: "new_story",
+        child_profile_id: "fbeafe23-42d5-4ea7-8035-5680419504e9",
+        child_profile_count: 1,
+        requested_length_minutes: 4
+      });
+
+    expect(response.status).toBe(200);
+    expect(response.body.action).toBe("new_story");
+    expect(response.body.allowed).toBe(true);
+    expect(response.body.block_reason).toBeNull();
+    expect(response.body.snapshot.tier).toBe("starter");
+  });
+
+  it("blocks entitlement preflight when child profile count exceeds the current entitlement", async () => {
+    const env = makeTestEnv();
+    const app = createApp({ env, services: mockServices() });
+    const bootstrap = await request(app)
+      .post("/v1/session/identity")
+      .set("x-storytime-install-id", "install-123")
+      .send({});
+    const entitlement = createEntitlementToken(
+      {
+        install_id: "install-123",
+        snapshot: {
+          tier: "starter",
+          source: "none",
+          max_child_profiles: 1,
+          max_story_starts_per_period: null,
+          max_continuations_per_period: null,
+          max_story_length_minutes: null,
+          can_replay_saved_stories: true,
+          can_start_new_stories: true,
+          can_continue_saved_series: true,
+          usage_window: {
+            kind: "rolling_period",
+            duration_seconds: null,
+            resets_at: null
+          },
+          remaining_story_starts: null,
+          remaining_continuations: null
+        }
+      },
+      env
+    );
+
+    const response = await request(app)
+      .post("/v1/entitlements/preflight")
+      .set("x-storytime-install-id", "install-123")
+      .set("x-storytime-session", bootstrap.headers["x-storytime-session"])
+      .set("x-storytime-entitlement", entitlement.token)
+      .send({
+        action: "new_story",
+        child_profile_id: "fbeafe23-42d5-4ea7-8035-5680419504e9",
+        child_profile_count: 2,
+        requested_length_minutes: 4
+      });
+
+    expect(response.status).toBe(200);
+    expect(response.body.allowed).toBe(false);
+    expect(response.body.block_reason).toBe("child_profile_limit");
+    expect(response.body.recommended_upgrade_surface).toBe("parent_trust_center");
+  });
+
+  it("rejects invalid entitlement preflight tokens", async () => {
+    const app = createApp({ env: makeTestEnv(), services: mockServices() });
+    const bootstrap = await request(app)
+      .post("/v1/session/identity")
+      .set("x-storytime-install-id", "install-123")
+      .send({});
+
+    const response = await request(app)
+      .post("/v1/entitlements/preflight")
+      .set("x-storytime-install-id", "install-123")
+      .set("x-storytime-session", bootstrap.headers["x-storytime-session"])
+      .set("x-storytime-entitlement", "invalid.entitlement")
+      .send({
+        action: "continue_story",
+        child_profile_id: "fbeafe23-42d5-4ea7-8035-5680419504e9",
+        child_profile_count: 1,
+        requested_length_minutes: 4,
+        selected_series_id: "4bf7e64e-6f55-4bc4-9ff4-20e2043614a4"
+      });
+
+    expect(response.status).toBe(401);
+    expect(response.body.error).toBe("invalid_entitlement_token");
   });
 
 

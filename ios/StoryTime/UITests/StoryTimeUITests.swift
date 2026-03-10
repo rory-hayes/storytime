@@ -314,6 +314,175 @@ final class StoryTimeUITests: XCTestCase {
         XCTAssertTrue(pastStoryPicker.label.contains("Bunny and the Lantern Trail"))
     }
 
+    func testFreshInstallShowsParentLedOnboardingFlow() {
+        let app = launchFreshApp()
+
+        let onboardingHeader = app.staticTexts["onboardingHeaderTitle"]
+        XCTAssertTrue(onboardingHeader.waitForExistence(timeout: 10))
+        XCTAssertEqual(onboardingHeader.label, "Welcome to StoryTime")
+        XCTAssertFalse(app.buttons["newStoryInlineButton"].exists)
+
+        let stepCounter = app.staticTexts["onboardingStepCounter"]
+        XCTAssertEqual(stepCounter.label, "Step 1 of 5")
+        XCTAssertEqual(
+            app.staticTexts["onboardingStepTitle"].label,
+            "Kids shape the story while it is happening."
+        )
+
+        let continueButton = app.buttons["onboardingContinueButton"]
+        XCTAssertTrue(continueButton.waitForExistence(timeout: 10))
+        continueButton.tap()
+
+        XCTAssertEqual(app.staticTexts["onboardingStepCounter"].label, "Step 2 of 5")
+        XCTAssertEqual(
+            app.staticTexts["onboardingStepTitle"].label,
+            "Start with trust and privacy"
+        )
+        XCTAssertTrue(app.buttons["onboardingReviewParentControlsButton"].exists)
+    }
+
+    func testOnboardingCanEditFallbackChildProfile() {
+        let app = launchFreshApp()
+
+        advanceOnboarding(in: app, toStep: 3)
+
+        let childName = app.staticTexts["Story Explorer"]
+        XCTAssertTrue(childName.waitForExistence(timeout: 10))
+        XCTAssertEqual(childName.label, "Story Explorer")
+
+        let childSummary = app.staticTexts[
+            "Story Explorer is the fallback child profile. You can keep it for now or edit it before the first story starts."
+        ]
+        XCTAssertTrue(childSummary.waitForExistence(timeout: 10))
+        XCTAssertEqual(
+            childSummary.label,
+            "Story Explorer is the fallback child profile. You can keep it for now or edit it before the first story starts."
+        )
+
+        let editButton = app.buttons["onboardingEditChildButton"]
+        XCTAssertTrue(editButton.waitForExistence(timeout: 10))
+        editButton.tap()
+
+        let nameField = app.textFields["childNameField"]
+        XCTAssertTrue(nameField.waitForExistence(timeout: 10))
+        clearAndTypeText("Maeve", into: nameField)
+
+        let saveProfileButton = app.buttons["saveChildProfileButton"]
+        XCTAssertTrue(saveProfileButton.waitForExistence(timeout: 10))
+        saveProfileButton.tap()
+
+        let updatedChildName = app.staticTexts["Maeve"]
+        XCTAssertTrue(updatedChildName.waitForExistence(timeout: 10))
+        XCTAssertEqual(updatedChildName.label, "Maeve")
+
+        let updatedSummary = app.staticTexts[
+            "Maeve is ready for the first story. You can still update name, age, sensitivity, or default mode before launch."
+        ]
+        XCTAssertTrue(updatedSummary.waitForExistence(timeout: 10))
+        XCTAssertEqual(
+            updatedSummary.label,
+            "Maeve is ready for the first story. You can still update name, age, sensitivity, or default mode before launch."
+        )
+    }
+
+    func testOnboardingHandsOffToFirstStorySetupAndStaysDismissedAfterRelaunch() {
+        let app = launchFreshApp()
+
+        advanceOnboarding(in: app, toStep: 5)
+
+        let startFirstStoryButton = app.buttons["onboardingStartFirstStoryButton"]
+        XCTAssertTrue(startFirstStoryButton.waitForExistence(timeout: 10))
+        startFirstStoryButton.tap()
+
+        let preflightSummary = app.staticTexts["journeyPreflightSummary"]
+        XCTAssertTrue(preflightSummary.waitForExistence(timeout: 10))
+
+        app.terminate()
+
+        let relaunched = launchFreshApp(reset: false)
+        XCTAssertFalse(relaunched.staticTexts["onboardingHeaderTitle"].waitForExistence(timeout: 2))
+        XCTAssertTrue(relaunched.buttons["newStoryInlineButton"].waitForExistence(timeout: 10))
+    }
+
+    func testJourneyBlocksNewStoryStartAndRoutesToParentManagedReview() {
+        let app = launchApp(extraEnvironment: [
+            "STORYTIME_UI_TEST_PREFLIGHT_OVERRIDE": "block_new_story"
+        ])
+
+        let newStoryButton = app.buttons["newStoryInlineButton"]
+        XCTAssertTrue(newStoryButton.waitForExistence(timeout: 10))
+        newStoryButton.tap()
+
+        let startVoiceButton = app.buttons["startVoiceSessionButton"]
+        if !startVoiceButton.waitForExistence(timeout: 3) {
+            for _ in 0..<3 where !startVoiceButton.exists {
+                app.swipeUp()
+            }
+        }
+        XCTAssertTrue(startVoiceButton.waitForExistence(timeout: 10))
+        startVoiceButton.tap()
+        XCTAssertTrue(waitForLabel(of: startVoiceButton, toEqual: "Ask a Parent to Review Plans"))
+        XCTAssertFalse(app.staticTexts["storyTitleLabel"].waitForExistence(timeout: 2))
+
+        startVoiceButton.tap()
+
+        let gateTitle = app.staticTexts["parentAccessGateTitle"]
+        XCTAssertTrue(gateTitle.waitForExistence(timeout: 10))
+
+        let gateField = app.textFields["parentAccessGateField"]
+        XCTAssertTrue(gateField.waitForExistence(timeout: 10))
+        gateField.tap()
+        gateField.typeText("PARENT")
+
+        let unlockButton = app.buttons["unlockParentControlsButton"]
+        XCTAssertTrue(unlockButton.waitForExistence(timeout: 10))
+        unlockButton.tap()
+
+        let reviewTitle = app.staticTexts["journeyUpgradeReviewTitle"]
+        XCTAssertTrue(reviewTitle.waitForExistence(timeout: 10))
+        XCTAssertEqual(reviewTitle.label, "Parent plan review")
+        XCTAssertEqual(
+            app.staticTexts["journeyUpgradeReviewBlockTitle"].label,
+            "This plan can't start another new story right now."
+        )
+        XCTAssertEqual(app.staticTexts["journeyUpgradeReviewPlanTitle"].label, "Starter")
+        XCTAssertEqual(
+            app.staticTexts["journeyUpgradeReviewFootnote"].label,
+            "Saved stories already on this device can still be replayed."
+        )
+        XCTAssertTrue(app.buttons["journeyUpgradeReviewParentControlsButton"].exists)
+    }
+
+    func testJourneyBlocksContinuationStartAndKeepsReplayCopyTruthful() {
+        let app = launchApp(extraEnvironment: [
+            "STORYTIME_UI_TEST_PREFLIGHT_OVERRIDE": "block_continue_story"
+        ])
+
+        let newStoryButton = app.buttons["newStoryInlineButton"]
+        XCTAssertTrue(newStoryButton.waitForExistence(timeout: 10))
+        newStoryButton.tap()
+
+        let usePastStoryToggle = app.switches["usePastStoryToggle"]
+        XCTAssertTrue(usePastStoryToggle.waitForExistence(timeout: 10))
+        usePastStoryToggle.tap()
+
+        let startVoiceButton = app.buttons["startVoiceSessionButton"]
+        if !startVoiceButton.waitForExistence(timeout: 3) {
+            for _ in 0..<3 where !startVoiceButton.exists {
+                app.swipeUp()
+            }
+        }
+        XCTAssertTrue(startVoiceButton.waitForExistence(timeout: 10))
+        startVoiceButton.tap()
+
+        let selectedPastStorySummary = app.staticTexts["selectedPastStorySummary"]
+        XCTAssertTrue(selectedPastStorySummary.waitForExistence(timeout: 10))
+        XCTAssertTrue(selectedPastStorySummary.label.contains("Bunny and the Lantern Trail"))
+
+        XCTAssertTrue(waitForLabel(of: startVoiceButton, toEqual: "Ask a Parent to Review Plans"))
+        XCTAssertFalse(app.staticTexts["storyTitleLabel"].waitForExistence(timeout: 2))
+    }
+
     func testJourneyExplainsFreshStartAndLiveFollowUpBeforeSessionStarts() {
         let app = launchApp()
 
@@ -606,10 +775,22 @@ final class StoryTimeUITests: XCTestCase {
         XCTAssertFalse(seededSeriesCard.exists)
     }
 
-    private func launchApp() -> XCUIApplication {
+    private func launchApp(extraEnvironment: [String: String] = [:]) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchEnvironment["STORYTIME_UI_TEST_MODE"] = "1"
         app.launchEnvironment["STORYTIME_UI_TEST_SEED"] = "1"
+        extraEnvironment.forEach { app.launchEnvironment[$0.key] = $0.value }
+        app.launch()
+        return app
+    }
+
+    private func launchFreshApp(reset: Bool = true, extraEnvironment: [String: String] = [:]) -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchEnvironment["STORYTIME_UI_TEST_MODE"] = "1"
+        if reset {
+            app.launchEnvironment["STORYTIME_UI_TEST_RESET"] = "1"
+        }
+        extraEnvironment.forEach { app.launchEnvironment[$0.key] = $0.value }
         app.launch()
         return app
     }
@@ -656,5 +837,27 @@ final class StoryTimeUITests: XCTestCase {
         let predicate = NSPredicate(format: "label == %@", expected)
         let expectation = XCTNSPredicateExpectation(predicate: predicate, object: element)
         return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
+    }
+
+    private func advanceOnboarding(in app: XCUIApplication, toStep targetStep: Int) {
+        let continueButton = app.buttons["onboardingContinueButton"]
+        let stepCounter = app.staticTexts["onboardingStepCounter"]
+
+        for expectedStep in 2...targetStep {
+            XCTAssertTrue(continueButton.waitForExistence(timeout: 10))
+            continueButton.tap()
+            XCTAssertTrue(waitForLabel(of: stepCounter, toEqual: "Step \(expectedStep) of 5"))
+        }
+    }
+
+    private func clearAndTypeText(_ text: String, into element: XCUIElement) {
+        element.tap()
+
+        if let currentValue = element.value as? String, currentValue.isEmpty == false, currentValue != "Name" {
+            let deleteString = String(repeating: XCUIKeyboardKey.delete.rawValue, count: currentValue.count)
+            element.typeText(deleteString)
+        }
+
+        element.typeText(text)
     }
 }

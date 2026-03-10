@@ -2,8 +2,14 @@ import SwiftUI
 
 struct HomeView: View {
     @ObservedObject var store: StoryLibraryStore
-    @State private var showingNewJourney = false
+    @State private var localShowingNewJourney = false
     @State private var parentSheet: ParentSheetDestination?
+    private let showingNewJourneyOverride: Binding<Bool>?
+
+    init(store: StoryLibraryStore, showingNewJourneyOverride: Binding<Bool>? = nil) {
+        self.store = store
+        self.showingNewJourneyOverride = showingNewJourneyOverride
+    }
 
     var body: some View {
         NavigationStack {
@@ -29,7 +35,7 @@ struct HomeView: View {
                 }
 
                 Button {
-                    showingNewJourney = true
+                    showingNewJourneyBinding.wrappedValue = true
                 } label: {
                     Image(systemName: "plus")
                         .font(.system(size: 28, weight: .bold))
@@ -44,7 +50,7 @@ struct HomeView: View {
                 .padding(24)
                 .accessibilityIdentifier("newStoryButton")
             }
-            .sheet(isPresented: $showingNewJourney) {
+            .sheet(isPresented: showingNewJourneyBinding) {
                 NavigationStack {
                     NewStoryJourneyView(store: store)
                 }
@@ -156,7 +162,7 @@ struct HomeView: View {
                 .accessibilityIdentifier("homeActiveProfileSummary")
 
             Button {
-                showingNewJourney = true
+                showingNewJourneyBinding.wrappedValue = true
             } label: {
                 Label("Start New Story", systemImage: "plus.circle.fill")
                     .font(.system(size: 16, weight: .bold, design: .rounded))
@@ -297,6 +303,10 @@ struct HomeView: View {
         .padding(.vertical, 10)
         .background(Capsule(style: .continuous).fill(.white))
     }
+
+    private var showingNewJourneyBinding: Binding<Bool> {
+        showingNewJourneyOverride ?? $localShowingNewJourney
+    }
 }
 
 private enum ParentSheetDestination: String, Identifiable {
@@ -306,7 +316,7 @@ private enum ParentSheetDestination: String, Identifiable {
     var id: String { rawValue }
 }
 
-private struct ParentAccessGateView: View {
+struct ParentAccessGateView: View {
     private static let confirmationCode = "PARENT"
 
     let onUnlock: () -> Void
@@ -450,7 +460,7 @@ private struct StorySeriesCard: View {
     }
 }
 
-private struct ParentTrustCenterView: View {
+struct ParentTrustCenterView: View {
     @Environment(\.dismiss) private var dismiss
 
     @ObservedObject var store: StoryLibraryStore
@@ -708,7 +718,7 @@ private struct ParentTrustCenterView: View {
     }
 }
 
-private struct ChildProfileEditorView: View {
+struct ChildProfileEditorView: View {
     @Environment(\.dismiss) private var dismiss
 
     @ObservedObject var store: StoryLibraryStore
@@ -776,5 +786,359 @@ private struct ChildProfileEditorView: View {
             store.addChildProfile(name: name, age: age, sensitivity: sensitivity, preferredMode: mode)
         }
         dismiss()
+    }
+}
+
+struct FirstRunOnboardingView: View {
+    @ObservedObject var store: StoryLibraryStore
+    let onFinish: (Bool) -> Void
+
+    @State private var stepIndex = 0
+    @State private var showingParentControls = false
+    @State private var showingChildEditor = false
+
+    private let steps = OnboardingStep.allCases
+
+    var body: some View {
+        ZStack {
+            LinearGradient(
+                colors: [Color(red: 0.99, green: 0.95, blue: 0.89), Color(red: 0.89, green: 0.95, blue: 1.00)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            .ignoresSafeArea()
+
+            VStack(spacing: 18) {
+                progressHeader
+                stepCard
+                actionBar
+            }
+            .padding(20)
+        }
+        .interactiveDismissDisabled()
+        .sheet(isPresented: $showingParentControls) {
+            NavigationStack {
+                ParentTrustCenterView(store: store)
+            }
+        }
+        .sheet(isPresented: $showingChildEditor) {
+            NavigationStack {
+                ChildProfileEditorView(store: store, profile: store.activeProfile)
+            }
+        }
+    }
+
+    private var progressHeader: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Welcome to StoryTime")
+                    .font(.system(size: 30, weight: .black, design: .rounded))
+                    .accessibilityIdentifier("onboardingHeaderTitle")
+                Spacer()
+                Text("Step \(stepIndex + 1) of \(steps.count)")
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("onboardingStepCounter")
+            }
+
+            HStack(spacing: 8) {
+                ForEach(Array(steps.enumerated()), id: \.offset) { index, _ in
+                    Capsule(style: .continuous)
+                        .fill(index == stepIndex ? Color(red: 0.14, green: 0.50, blue: 0.96) : Color.white.opacity(0.7))
+                        .frame(height: 8)
+                }
+            }
+            .accessibilityIdentifier("onboardingProgressBar")
+        }
+    }
+
+    @ViewBuilder
+    private var stepCard: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(currentStep.title)
+                .font(.system(size: 28, weight: .black, design: .rounded))
+                .accessibilityIdentifier("onboardingStepTitle")
+
+            Text(currentStep.summary)
+                .font(.system(size: 15, weight: .medium, design: .rounded))
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("onboardingStepSummary")
+
+            switch currentStep {
+            case .welcome:
+                welcomeStep
+            case .trust:
+                trustStep
+            case .childSetup:
+                childSetupStep
+            case .expectations:
+                expectationsStep
+            case .handoff:
+                handoffStep
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .padding(20)
+        .background(
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .fill(.white.opacity(0.92))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .strokeBorder(Color.black.opacity(0.07), lineWidth: 1)
+        )
+    }
+
+    private var actionBar: some View {
+        HStack(spacing: 12) {
+            if stepIndex > 0 {
+                Button("Back") {
+                    stepIndex = max(stepIndex - 1, 0)
+                }
+                .buttonStyle(.bordered)
+                .accessibilityIdentifier("onboardingBackButton")
+            }
+
+            Spacer()
+
+            if currentStep == .handoff {
+                Button("Finish Later") {
+                    onFinish(false)
+                }
+                .buttonStyle(.bordered)
+                .accessibilityIdentifier("onboardingFinishLaterButton")
+
+                Button("Start First Story") {
+                    onFinish(true)
+                }
+                .buttonStyle(.borderedProminent)
+                .accessibilityIdentifier("onboardingStartFirstStoryButton")
+            } else {
+                Button(stepIndex == 2 ? childStepContinueLabel : "Continue") {
+                    stepIndex = min(stepIndex + 1, steps.count - 1)
+                }
+                .buttonStyle(.borderedProminent)
+                .accessibilityIdentifier("onboardingContinueButton")
+            }
+        }
+        .padding(.horizontal, 4)
+    }
+
+    private var welcomeStep: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            onboardingHighlight(
+                title: "Kids shape the story live",
+                summary: "StoryTime starts with a few live questions so the child can steer what happens before narration begins.",
+                identifier: "onboardingWelcomeValueCard"
+            )
+
+            onboardingHighlight(
+                title: "Narration stays scene-based",
+                summary: "After the live questions, StoryTime tells the adventure one scene at a time and still listens for interruptions.",
+                identifier: "onboardingWelcomeNarrationCard"
+            )
+
+            onboardingHighlight(
+                title: "Parent setup comes first",
+                summary: "Before the first story starts, confirm privacy defaults and make sure the child profile is ready.",
+                identifier: "onboardingWelcomeParentCard"
+            )
+        }
+    }
+
+    private var trustStep: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            onboardingHighlight(
+                title: "Raw audio is not saved",
+                summary: "StoryTime listens live during the session, but it does not keep raw microphone recordings afterward.",
+                identifier: "onboardingTrustAudioCard"
+            )
+
+            onboardingHighlight(
+                title: "Some processing happens live",
+                summary: "Live questions, story prompts, and generated scenes are sent for live processing while the session is happening.",
+                identifier: "onboardingTrustLiveCard"
+            )
+
+            onboardingHighlight(
+                title: "Saved stories stay on this device",
+                summary: "When history is on, saved stories and continuity stay local after the session ends.",
+                identifier: "onboardingTrustLocalCard"
+            )
+
+            Button("Review Parent Controls") {
+                showingParentControls = true
+            }
+            .buttonStyle(.bordered)
+            .accessibilityIdentifier("onboardingReviewParentControlsButton")
+        }
+    }
+
+    private var childSetupStep: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            if let activeProfile = store.activeProfile {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(activeProfile.displayName)
+                        .font(.system(size: 24, weight: .black, design: .rounded))
+                        .accessibilityIdentifier("onboardingChildName")
+                    Text("Age \(activeProfile.age) • \(activeProfile.contentSensitivity.title) • \(activeProfile.preferredMode.title)")
+                        .font(.system(size: 14, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("onboardingChildDetails")
+                }
+                .accessibilityIdentifier("onboardingChildSummary")
+
+                Text(childSetupSummary(for: activeProfile))
+                    .font(.system(size: 14, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("onboardingChildSetupSummary")
+            }
+
+            Button("Edit Child Setup") {
+                showingChildEditor = true
+            }
+            .buttonStyle(.borderedProminent)
+            .accessibilityIdentifier("onboardingEditChildButton")
+        }
+    }
+
+    private var expectationsStep: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            onboardingExpectation(
+                title: "Live follow-up first",
+                summary: "StoryTime asks up to 3 live questions before it builds the story."
+            )
+            .accessibilityIdentifier("onboardingExpectationLive")
+
+            onboardingExpectation(
+                title: "Scene-by-scene narration",
+                summary: "After the live questions, StoryTime narrates the adventure one scene at a time."
+            )
+            .accessibilityIdentifier("onboardingExpectationNarration")
+
+            onboardingExpectation(
+                title: "Interruptions stay live",
+                summary: "During narration, the child can still ask a question, ask for repetition, or change what happens next."
+            )
+            .accessibilityIdentifier("onboardingExpectationInterruptions")
+        }
+    }
+
+    private var handoffStep: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            onboardingHighlight(
+                title: "Parent setup is done",
+                summary: handoffSummary,
+                identifier: "onboardingHandoffSummary"
+            )
+
+            onboardingHighlight(
+                title: "Next screen",
+                summary: "StoryTime will open the normal story setup flow so the parent can choose story path and length before handing the device to the child.",
+                identifier: "onboardingHandoffNextScreen"
+            )
+        }
+    }
+
+    private func onboardingHighlight(title: String, summary: String, identifier: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.system(size: 16, weight: .bold, design: .rounded))
+            Text(summary)
+                .font(.system(size: 14, weight: .medium, design: .rounded))
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color(red: 0.96, green: 0.97, blue: 1.00))
+        )
+        .accessibilityIdentifier(identifier)
+    }
+
+    private func onboardingExpectation(title: String, summary: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.system(size: 16, weight: .bold, design: .rounded))
+            Text(summary)
+                .font(.system(size: 14, weight: .medium, design: .rounded))
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.white)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(Color.black.opacity(0.06), lineWidth: 1)
+        )
+    }
+
+    private var currentStep: OnboardingStep {
+        steps[stepIndex]
+    }
+
+    private var childStepContinueLabel: String {
+        if let activeProfile = store.activeProfile, activeProfile.displayName == "Story Explorer" {
+            return "Use Story Explorer For Now"
+        }
+        return "Continue"
+    }
+
+    private func childSetupSummary(for profile: ChildProfile) -> String {
+        if profile.displayName == "Story Explorer" {
+            return "Story Explorer is the fallback child profile. You can keep it for now or edit it before the first story starts."
+        }
+
+        return "\(profile.displayName) is ready for the first story. You can still update name, age, sensitivity, or default mode before launch."
+    }
+
+    private var handoffSummary: String {
+        if let activeProfile = store.activeProfile {
+            return "StoryTime is ready to set up \(activeProfile.displayName)'s first story. Finish here, then hand the device to the child for the live questions."
+        }
+
+        return "StoryTime is ready for the first story. Finish here, then hand the device to the child for the live questions."
+    }
+}
+
+private enum OnboardingStep: CaseIterable {
+    case welcome
+    case trust
+    case childSetup
+    case expectations
+    case handoff
+
+    var title: String {
+        switch self {
+        case .welcome:
+            return "Kids shape the story while it is happening."
+        case .trust:
+            return "Start with trust and privacy"
+        case .childSetup:
+            return "Make sure the child profile is ready"
+        case .expectations:
+            return "Explain what the child will experience"
+        case .handoff:
+            return "Hand off into the first story"
+        }
+    }
+
+    var summary: String {
+        switch self {
+        case .welcome:
+            return "StoryTime is a live storytelling app, not a passive audiobook library. A few guided questions come first, then narration begins."
+        case .trust:
+            return "Before the first story starts, make the live-processing and on-device history rules clear."
+        case .childSetup:
+            return "Confirm who the story is for and make any changes to name, age, sensitivity, or default mode now."
+        case .expectations:
+            return "The first session should feel predictable before the child starts speaking."
+        case .handoff:
+            return "Finish setup here, then move into the normal story launch flow."
+        }
     }
 }

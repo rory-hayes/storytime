@@ -3,9 +3,11 @@ import { extractClientIp, extractInstallId, resolveSessionIdentityWithOptions, S
 import { loadEnv } from "../lib/env.js";
 import { AppError } from "../lib/errors.js";
 import {
+  createEntitlementToken,
   createRealtimeTicket,
   createSessionToken,
   hashIdentifier,
+  verifyEntitlementToken,
   verifyRealtimeTicket,
   verifySessionToken
 } from "../lib/security.js";
@@ -119,6 +121,41 @@ describe("auth and security", () => {
 
     expect(verifyRealtimeTicket(realtime.ticket, "install-123", env).voice).toBe("alloy");
     expect(verifySessionToken(session.token, "install-123", env).session_id).toBe("session-xyz");
+  });
+
+  it("creates and verifies entitlement snapshot tokens", () => {
+    const env = makeTestEnv();
+    const issued = createEntitlementToken(
+      {
+        install_id: "install-123",
+        snapshot: {
+          tier: "starter",
+          source: "none",
+          max_child_profiles: 1,
+          max_story_starts_per_period: null,
+          max_continuations_per_period: null,
+          max_story_length_minutes: null,
+          can_replay_saved_stories: true,
+          can_start_new_stories: true,
+          can_continue_saved_series: true,
+          usage_window: {
+            kind: "rolling_period",
+            duration_seconds: null,
+            resets_at: null
+          },
+          remaining_story_starts: null,
+          remaining_continuations: null
+        }
+      },
+      env
+    );
+
+    const verified = verifyEntitlementToken(issued.token, "install-123", env);
+
+    expect(verified.snapshot.tier).toBe("starter");
+    expect(verified.snapshot.max_child_profiles).toBe(1);
+    expect(verified.snapshot.can_replay_saved_stories).toBe(true);
+    expect(verified.snapshot.expires_at).toBe(issued.expires_at);
   });
 
   it("rejects tampered or expired tokens", () => {

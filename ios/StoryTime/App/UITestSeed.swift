@@ -3,7 +3,9 @@ import Foundation
 enum UITestSeed {
     static func prepareIfNeeded() {
         let environment = ProcessInfo.processInfo.environment
-        guard environment["STORYTIME_UI_TEST_SEED"] == "1" else { return }
+        let shouldSeed = environment["STORYTIME_UI_TEST_SEED"] == "1"
+        let shouldReset = shouldSeed || environment["STORYTIME_UI_TEST_RESET"] == "1"
+        guard shouldReset else { return }
 
         let defaults = UserDefaults.standard
         let keys = [
@@ -12,13 +14,17 @@ enum UITestSeed {
             "storytime.active.child.profile.v1",
             "storytime.parent.privacy.v1",
             "storytime.continuity.memory.v1",
+            FirstRunExperienceStore.onboardingCompletedKey,
             "com.storytime.install-id",
+            "com.storytime.entitlements.bootstrap.v1",
             "com.storytime.session-token",
             "com.storytime.session-expiry",
             "com.storytime.session-id"
         ]
         keys.forEach { defaults.removeObject(forKey: $0) }
         StoryLibraryV2Storage(storageURL: StoryLibraryV2Storage.defaultStorageURL()).clear()
+
+        guard shouldSeed else { return }
 
         let primaryProfile = ChildProfile(
             id: UUID(uuidString: "11111111-1111-1111-1111-111111111111") ?? UUID(),
@@ -86,5 +92,79 @@ enum UITestSeed {
         defaults.set(try? JSONEncoder().encode([primaryProfile, secondaryProfile]), forKey: "storytime.child.profiles.v1")
         defaults.set(primaryProfile.id.uuidString, forKey: "storytime.active.child.profile.v1")
         defaults.set(try? JSONEncoder().encode(privacy), forKey: "storytime.parent.privacy.v1")
+        defaults.set(true, forKey: FirstRunExperienceStore.onboardingCompletedKey)
+    }
+
+    static func entitlementPreflightOverride(for plan: StoryLaunchPlan, childProfileCount: Int) -> EntitlementPreflightResponse? {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["STORYTIME_UI_TEST_MODE"] == "1" else {
+            return nil
+        }
+
+        let override = environment["STORYTIME_UI_TEST_PREFLIGHT_OVERRIDE"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch override {
+        case "block_new_story":
+            guard case .new = plan.mode else { return nil }
+            return EntitlementPreflightResponse(
+                action: .newStory,
+                allowed: false,
+                blockReason: .storyStartsExhausted,
+                recommendedUpgradeSurface: .newStoryJourney,
+                snapshot: blockedStarterSnapshot(
+                    childProfileCount: childProfileCount,
+                    canStartNewStories: false,
+                    canContinueSavedSeries: true,
+                    remainingStoryStarts: 0,
+                    remainingContinuations: 1
+                )
+            )
+        case "block_continue_story":
+            guard case .extend = plan.mode else { return nil }
+            return EntitlementPreflightResponse(
+                action: .continueStory,
+                allowed: false,
+                blockReason: .continuationsExhausted,
+                recommendedUpgradeSurface: .newStoryJourney,
+                snapshot: blockedStarterSnapshot(
+                    childProfileCount: childProfileCount,
+                    canStartNewStories: true,
+                    canContinueSavedSeries: false,
+                    remainingStoryStarts: 1,
+                    remainingContinuations: 0
+                )
+            )
+        default:
+            return nil
+        }
+    }
+
+    private static func blockedStarterSnapshot(
+        childProfileCount: Int,
+        canStartNewStories: Bool,
+        canContinueSavedSeries: Bool,
+        remainingStoryStarts: Int?,
+        remainingContinuations: Int?
+    ) -> EntitlementSnapshot {
+        let now = Date()
+        return EntitlementSnapshot(
+            tier: .starter,
+            source: .debugSeed,
+            maxChildProfiles: max(1, childProfileCount),
+            maxStoryStartsPerPeriod: 1,
+            maxContinuationsPerPeriod: 1,
+            maxStoryLengthMinutes: 10,
+            canReplaySavedStories: true,
+            canStartNewStories: canStartNewStories,
+            canContinueSavedSeries: canContinueSavedSeries,
+            effectiveAt: now.timeIntervalSince1970,
+            expiresAt: now.addingTimeInterval(300).timeIntervalSince1970,
+            usageWindow: EntitlementUsageWindow(
+                kind: .rollingPeriod,
+                durationSeconds: 86_400,
+                resetsAt: now.addingTimeInterval(86_400).timeIntervalSince1970
+            ),
+            remainingStoryStarts: remainingStoryStarts,
+            remainingContinuations: remainingContinuations
+        )
     }
 }

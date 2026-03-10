@@ -22,6 +22,40 @@ type SessionTokenPayload = {
   nonce: string;
 };
 
+export type EntitlementTier = "starter" | "plus";
+export type EntitlementSource = "none" | "storekit_verified" | "debug_seed";
+export type EntitlementUsageWindow = {
+  kind: "rolling_period";
+  duration_seconds: number | null;
+  resets_at: number | null;
+};
+
+export type EntitlementSnapshot = {
+  tier: EntitlementTier;
+  source: EntitlementSource;
+  max_child_profiles: number;
+  max_story_starts_per_period: number | null;
+  max_continuations_per_period: number | null;
+  max_story_length_minutes: number | null;
+  can_replay_saved_stories: boolean;
+  can_start_new_stories: boolean;
+  can_continue_saved_series: boolean;
+  effective_at: number;
+  expires_at: number;
+  usage_window: EntitlementUsageWindow;
+  remaining_story_starts: number | null;
+  remaining_continuations: number | null;
+};
+
+type EntitlementTokenPayload = {
+  aud: "storytime.entitlement";
+  install_id: string;
+  snapshot: EntitlementSnapshot;
+  exp: number;
+  iat: number;
+  nonce: string;
+};
+
 function base64url(input: Buffer | string): string {
   return Buffer.from(input)
     .toString("base64")
@@ -137,5 +171,47 @@ export function verifySessionToken(token: string, installId: string, env: Env): 
     env.AUTH_TOKEN_SECRET,
     "storytime.session",
     "invalid_session_token"
+  );
+}
+
+export function createEntitlementToken(
+  payload: {
+    install_id: string;
+    snapshot: Omit<EntitlementSnapshot, "effective_at" | "expires_at">;
+  },
+  env: Env
+): { token: string; expires_at: number; snapshot: EntitlementSnapshot } {
+  const issuedAt = Math.floor(Date.now() / 1_000);
+  const expiresAt = issuedAt + Math.min(env.SESSION_TOKEN_TTL_SECONDS, 3600);
+  const snapshot: EntitlementSnapshot = {
+    ...payload.snapshot,
+    effective_at: issuedAt,
+    expires_at: expiresAt
+  };
+  const fullPayload: EntitlementTokenPayload = {
+    aud: "storytime.entitlement",
+    install_id: payload.install_id,
+    snapshot,
+    exp: expiresAt,
+    iat: issuedAt,
+    nonce: crypto.randomUUID()
+  };
+
+  const encodedPayload = base64url(JSON.stringify(fullPayload));
+  const signature = signValue(encodedPayload, env.AUTH_TOKEN_SECRET);
+  return {
+    token: `${encodedPayload}.${signature}`,
+    expires_at: expiresAt,
+    snapshot
+  };
+}
+
+export function verifyEntitlementToken(token: string, installId: string, env: Env): EntitlementTokenPayload {
+  return verifySignedToken<EntitlementTokenPayload>(
+    token,
+    installId,
+    env.AUTH_TOKEN_SECRET,
+    "storytime.entitlement",
+    "invalid_entitlement_token"
   );
 }

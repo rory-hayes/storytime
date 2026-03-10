@@ -12,7 +12,11 @@ struct NewStoryJourneyView: View {
     @State private var lengthMinutes = 4
     @State private var experienceMode: StoryExperienceMode = .classic
 
+    @State private var isStarting = false
     @State private var shouldStart = false
+    @State private var blockedPreflightResponse: EntitlementPreflightResponse?
+    @State private var launchErrorMessage: String?
+    @State private var parentUpgradeSheet: JourneyParentUpgradeSheet?
 
     var body: some View {
         ZStack {
@@ -33,6 +37,11 @@ struct NewStoryJourneyView: View {
                         .foregroundStyle(.secondary)
 
                     preflightCard
+                    if let launchBlockPresentation {
+                        launchBlockCard(launchBlockPresentation)
+                    } else if let launchErrorMessage {
+                        launchErrorCard(launchErrorMessage)
+                    }
                     childCard
                     modeCard
                     optionsCard
@@ -53,6 +62,25 @@ struct NewStoryJourneyView: View {
                 store: store
             )
         }
+        .sheet(item: $parentUpgradeSheet) { destination in
+            NavigationStack {
+                switch destination {
+                case .gate:
+                    ParentAccessGateView(
+                        onUnlock: { parentUpgradeSheet = .review },
+                        onCancel: { parentUpgradeSheet = nil }
+                    )
+                case .review:
+                    if let presentation = launchBlockPresentation {
+                        JourneyUpgradeReviewView(
+                            store: store,
+                            presentation: presentation,
+                            onDone: { parentUpgradeSheet = nil }
+                        )
+                    }
+                }
+            }
+        }
         .safeAreaInset(edge: .bottom) {
             bottomActionBar
         }
@@ -71,17 +99,26 @@ struct NewStoryJourneyView: View {
         }
         .onChange(of: selectedChildProfileId) { _, _ in
             syncSelectedSeriesSelection()
+            clearLaunchBlockState()
         }
         .onChange(of: usePastStory) { _, isEnabled in
             if !isEnabled {
                 usePastCharacters = false
             }
             syncSelectedSeriesSelection()
+            clearLaunchBlockState()
         }
         .onChange(of: selectedSeriesId) { _, _ in
             if !characterReuseAvailable {
                 usePastCharacters = false
             }
+            clearLaunchBlockState()
+        }
+        .onChange(of: usePastCharacters) { _, _ in
+            clearLaunchBlockState()
+        }
+        .onChange(of: lengthMinutes) { _, _ in
+            clearLaunchBlockState()
         }
     }
 
@@ -152,6 +189,67 @@ struct NewStoryJourneyView: View {
         }
         .padding(16)
         .background(cardBackground)
+    }
+
+    private func launchBlockCard(_ presentation: JourneyLaunchBlockPresentation) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("Needs a parent", systemImage: "lock.shield")
+                .font(.system(size: 13, weight: .bold, design: .rounded))
+                .foregroundStyle(Color(red: 0.14, green: 0.50, blue: 0.96))
+
+            Text(presentation.title)
+                .font(.system(size: 20, weight: .black, design: .rounded))
+                .accessibilityIdentifier("journeyLaunchBlockTitle")
+
+            Text(presentation.summary)
+                .font(.system(size: 14, weight: .medium, design: .rounded))
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("journeyLaunchBlockSummary")
+
+            Text(presentation.footnote)
+                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("journeyLaunchBlockFootnote")
+
+            Button("Ask a Parent to Review Plans") {
+                parentUpgradeSheet = .gate
+            }
+            .buttonStyle(.borderedProminent)
+            .accessibilityIdentifier("journeyAskParentButton")
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(Color.white.opacity(0.92))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .strokeBorder(Color(red: 0.97, green: 0.48, blue: 0.46).opacity(0.35), lineWidth: 1)
+        )
+        .accessibilityIdentifier("journeyLaunchBlockCard")
+    }
+
+    private func launchErrorCard(_ message: String) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Plan check unavailable")
+                .font(.system(size: 18, weight: .black, design: .rounded))
+                .accessibilityIdentifier("journeyLaunchErrorTitle")
+
+            Text(message)
+                .font(.system(size: 14, weight: .medium, design: .rounded))
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("journeyLaunchErrorSummary")
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(Color.white.opacity(0.92))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .strokeBorder(Color.black.opacity(0.07), lineWidth: 1)
+        )
+        .accessibilityIdentifier("journeyLaunchErrorCard")
     }
 
     private func childSummary(_ profile: ChildProfile) -> some View {
@@ -390,18 +488,37 @@ struct NewStoryJourneyView: View {
                 .padding(.top, 12)
                 .accessibilityIdentifier("journeyStartFooterSummary")
 
-            Button("Start Voice Session") {
-                if let profileId = selectedChildProfile?.id {
-                    store.selectActiveProfile(profileId)
+            Button(primaryActionTitle) {
+                if blockedPreflightResponse != nil {
+                    parentUpgradeSheet = .gate
+                    return
                 }
-                shouldStart = true
+
+                if let override = UITestSeed.entitlementPreflightOverride(
+                    for: launchPlan,
+                    childProfileCount: store.childProfiles.count
+                ) {
+                    handlePreflightDecision(override)
+                    return
+                }
+
+                Task {
+                    await startSessionIfAllowed()
+                }
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
             .frame(maxWidth: .infinity)
             .padding(.horizontal, 20)
             .padding(.vertical, 12)
+            .disabled(isStarting)
             .accessibilityIdentifier("startVoiceSessionButton")
+
+            if isStarting {
+                ProgressView()
+                    .padding(.bottom, 12)
+                    .accessibilityIdentifier("journeyPlanCheckProgress")
+            }
         }
         .background(.ultraThinMaterial)
     }
@@ -417,6 +534,27 @@ struct NewStoryJourneyView: View {
         parts.append(usePastCharacters ? "reuse earlier characters" : "create fresh characters")
         parts.append("\(lengthMinutes)-minute target")
         return parts.joined(separator: ", ")
+    }
+
+    private var primaryActionTitle: String {
+        if isStarting {
+            return "Checking Plan..."
+        }
+
+        if blockedPreflightResponse != nil {
+            return "Ask a Parent to Review Plans"
+        }
+
+        return "Start Voice Session"
+    }
+
+    private var launchBlockPresentation: JourneyLaunchBlockPresentation? {
+        guard let blockedPreflightResponse else { return nil }
+        return JourneyLaunchBlockPresentation(
+            response: blockedPreflightResponse,
+            childName: selectedChildProfile?.displayName,
+            seriesTitle: selectedSeries?.title
+        )
     }
 
     private var historyRetentionSummary: String {
@@ -537,6 +675,53 @@ struct NewStoryJourneyView: View {
         )
     }
 
+    @MainActor
+    private func startSessionIfAllowed() async {
+        launchErrorMessage = nil
+
+        guard let request = EntitlementPreflightRequest(plan: launchPlan, childProfileCount: store.childProfiles.count) else {
+            allowLaunch()
+            return
+        }
+
+        isStarting = true
+        defer { isStarting = false }
+
+        do {
+            let response = try await APIClient().preflightEntitlements(request: request)
+            handlePreflightDecision(response)
+        } catch {
+            blockedPreflightResponse = nil
+            launchErrorMessage = "I couldn't check the plan right now. Ask a grown-up to try again."
+        }
+    }
+
+    @MainActor
+    private func handlePreflightDecision(_ response: EntitlementPreflightResponse) {
+        launchErrorMessage = nil
+
+        if response.allowed {
+            blockedPreflightResponse = nil
+            allowLaunch()
+        } else {
+            blockedPreflightResponse = response
+        }
+    }
+
+    @MainActor
+    private func allowLaunch() {
+        blockedPreflightResponse = nil
+        if let profileId = selectedChildProfile?.id {
+            store.selectActiveProfile(profileId)
+        }
+        shouldStart = true
+    }
+
+    private func clearLaunchBlockState() {
+        blockedPreflightResponse = nil
+        launchErrorMessage = nil
+    }
+
     private func syncSelectedSeriesSelection() {
         guard let selectedSeriesId else {
             self.selectedSeriesId = scopedVisibleSeries.first?.id
@@ -565,6 +750,118 @@ struct NewStoryJourneyView: View {
             Text(summary)
                 .font(.system(size: 13, weight: .medium, design: .rounded))
                 .foregroundStyle(.secondary)
+        }
+    }
+}
+
+private enum JourneyParentUpgradeSheet: String, Identifiable {
+    case gate
+    case review
+
+    var id: String { rawValue }
+}
+
+private struct JourneyLaunchBlockPresentation {
+    let title: String
+    let summary: String
+    let footnote: String
+    let planTitle: String
+    let planSummary: String
+
+    init(
+        response: EntitlementPreflightResponse,
+        childName: String?,
+        seriesTitle: String?
+    ) {
+        let childName = childName ?? "this child"
+        let seriesTitle = seriesTitle ?? "this saved story"
+        self.planTitle = response.snapshot.tier == .plus ? "Plus" : "Starter"
+        self.planSummary = response.snapshot.tier == .plus
+            ? "Plus expands child profiles and remote story starts while keeping parent controls, privacy settings, and replay of saved stories on this device."
+            : "Starter keeps parent controls, privacy settings, and replay of saved stories already on this device."
+
+        switch response.blockReason ?? .newStoryNotAllowed {
+        case .childProfileLimit:
+            title = "This plan is set up for fewer child profiles right now."
+            summary = "Ask a parent to review plan options before starting another story for \(childName)."
+            footnote = "Parent controls and saved-story replay still stay available on this device."
+        case .storyLengthExceeded:
+            title = "This story is longer than this plan allows right now."
+            summary = "Try a shorter story length or ask a parent to review plan options before \(childName) starts."
+            footnote = "Live questions and narration do not begin until a parent finishes setup here."
+        case .newStoryNotAllowed, .storyStartsExhausted:
+            title = "This plan can't start another new story right now."
+            summary = "Ask a parent to review plan options before \(childName) starts a fresh live story."
+            footnote = "Saved stories already on this device can still be replayed."
+        case .continuationNotAllowed, .continuationsExhausted:
+            title = "This plan can't start a new episode right now."
+            summary = "Ask a parent to review plan options before continuing \(seriesTitle)."
+            footnote = "Replay of saved stories stays available on this device."
+        }
+    }
+}
+
+private struct JourneyUpgradeReviewView: View {
+    @Environment(\.dismiss) private var dismiss
+
+    @ObservedObject var store: StoryLibraryStore
+    let presentation: JourneyLaunchBlockPresentation
+    let onDone: () -> Void
+
+    var body: some View {
+        List {
+            Section {
+                Text("Parent plan review")
+                    .font(.system(size: 28, weight: .black, design: .rounded))
+                    .accessibilityIdentifier("journeyUpgradeReviewTitle")
+
+                Text(presentation.title)
+                    .font(.system(size: 18, weight: .bold, design: .rounded))
+                    .accessibilityIdentifier("journeyUpgradeReviewBlockTitle")
+
+                Text(presentation.summary)
+                    .font(.system(size: 14, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("journeyUpgradeReviewSummary")
+            }
+
+            Section("Current plan") {
+                Text(presentation.planTitle)
+                    .font(.system(size: 20, weight: .black, design: .rounded))
+                    .accessibilityIdentifier("journeyUpgradeReviewPlanTitle")
+
+                Text(presentation.planSummary)
+                    .font(.system(size: 14, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("journeyUpgradeReviewPlanSummary")
+
+                Text(presentation.footnote)
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("journeyUpgradeReviewFootnote")
+            }
+
+            Section("Next steps") {
+                NavigationLink("Open Parent Controls") {
+                    ParentTrustCenterView(store: store)
+                }
+                .accessibilityIdentifier("journeyUpgradeReviewParentControlsButton")
+
+                Text("Purchases and restore stay in parent-managed surfaces. The live child story does not show upgrade UI.")
+                    .font(.system(size: 13, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("journeyUpgradeReviewNextStepsSummary")
+            }
+        }
+        .navigationTitle("Plan Review")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("Done") {
+                    onDone()
+                    dismiss()
+                }
+            }
         }
     }
 }

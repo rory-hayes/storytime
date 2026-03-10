@@ -3998,6 +3998,8 @@ final class MockAPIClient: APIClienting {
     var resolvedRegion: StoryTimeRegion?
     var prepareConnectionCallCount = 0
     var bootstrapSessionIdentityCallCount = 0
+    var syncEntitlementsCallCount = 0
+    var preflightEntitlementsCallCount = 0
     var fetchVoicesCallCount = 0
     var createRealtimeSessionCallCount = 0
     var discoveryRequests: [DiscoveryRequest] = []
@@ -4022,6 +4024,48 @@ final class MockAPIClient: APIClienting {
     var bootstrapSessionId = "mock-session-123"
     var bootstrapSessionToken = "mock-session-token"
     var bootstrapSessionRegion: StoryTimeRegion = .us
+    var syncedEntitlementEnvelope = EntitlementBootstrapEnvelope(
+        snapshot: EntitlementSnapshot(
+            tier: .starter,
+            source: .none,
+            maxChildProfiles: 1,
+            maxStoryStartsPerPeriod: nil,
+            maxContinuationsPerPeriod: nil,
+            maxStoryLengthMinutes: nil,
+            canReplaySavedStories: true,
+            canStartNewStories: true,
+            canContinueSavedSeries: true,
+            effectiveAt: Date().timeIntervalSince1970,
+            expiresAt: Date().addingTimeInterval(300).timeIntervalSince1970,
+            usageWindow: EntitlementUsageWindow(kind: .rollingPeriod, durationSeconds: nil, resetsAt: nil),
+            remainingStoryStarts: nil,
+            remainingContinuations: nil
+        ),
+        token: "mock-entitlement-token",
+        expiresAt: Date().addingTimeInterval(300).timeIntervalSince1970
+    )
+    var preflightResponse = EntitlementPreflightResponse(
+        action: .newStory,
+        allowed: true,
+        blockReason: nil,
+        recommendedUpgradeSurface: nil,
+        snapshot: EntitlementSnapshot(
+            tier: .starter,
+            source: .none,
+            maxChildProfiles: 1,
+            maxStoryStartsPerPeriod: nil,
+            maxContinuationsPerPeriod: nil,
+            maxStoryLengthMinutes: nil,
+            canReplaySavedStories: true,
+            canStartNewStories: true,
+            canContinueSavedSeries: true,
+            effectiveAt: Date().timeIntervalSince1970,
+            expiresAt: Date().addingTimeInterval(300).timeIntervalSince1970,
+            usageWindow: EntitlementUsageWindow(kind: .rollingPeriod, durationSeconds: nil, resetsAt: nil),
+            remainingStoryStarts: nil,
+            remainingContinuations: nil
+        )
+    )
     var realtimeSessionResult = RealtimeSessionEnvelope(
         session: RealtimeSessionData(
             ticket: "ticket",
@@ -4092,6 +4136,21 @@ final class MockAPIClient: APIClienting {
         AppSession.store(sessionId: bootstrapSessionId)
         resolvedRegion = bootstrapSessionRegion
         emitCompletedTrace(for: .sessionBootstrap, requestId: requestId, statusCode: 200)
+    }
+
+    func syncEntitlements(request body: EntitlementSyncRequest) async throws -> EntitlementBootstrapEnvelope {
+        let requestId = emitStartedTrace(for: .entitlementSync)
+        syncEntitlementsCallCount += 1
+        AppEntitlements.store(envelope: syncedEntitlementEnvelope)
+        emitCompletedTrace(for: .entitlementSync, requestId: requestId, statusCode: 200)
+        return syncedEntitlementEnvelope
+    }
+
+    func preflightEntitlements(request body: EntitlementPreflightRequest) async throws -> EntitlementPreflightResponse {
+        let requestId = emitStartedTrace(for: .entitlementPreflight)
+        preflightEntitlementsCallCount += 1
+        emitCompletedTrace(for: .entitlementPreflight, requestId: requestId, statusCode: 200)
+        return preflightResponse
     }
 
     func fetchVoices() async throws -> [String] {
@@ -4272,6 +4331,10 @@ final class MockAPIClient: APIClienting {
             return "/health"
         case .sessionBootstrap:
             return "/v1/session/identity"
+        case .entitlementSync:
+            return "/v1/entitlements/sync"
+        case .entitlementPreflight:
+            return "/v1/entitlements/preflight"
         case .voices:
             return "/v1/voices"
         case .realtimeSession:

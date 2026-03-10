@@ -157,6 +157,65 @@ export const RealtimeCallResponseSchema = z.object({
   })
 });
 
+export const EntitlementRefreshReasonSchema = z.enum(["app_launch", "foreground", "purchase", "restore"]);
+
+export const EntitlementPurchaseEnvironmentSchema = z.enum(["xcode", "sandbox", "production", "unknown"]);
+
+export const EntitlementOwnershipTypeSchema = z.enum(["purchased", "family_shared"]);
+
+export const EntitlementVerificationStateSchema = z.enum(["verified", "unverified"]);
+
+export const EntitlementSyncTransactionSchema = z.object({
+  product_id: z.string().trim().min(1).max(128),
+  original_transaction_id: z.string().trim().min(1).max(128),
+  latest_transaction_id: z.string().trim().min(1).max(128),
+  purchased_at: z.number().int().min(0),
+  expires_at: z.number().int().min(0).nullable().default(null),
+  revoked_at: z.number().int().min(0).nullable().default(null),
+  ownership_type: EntitlementOwnershipTypeSchema.default("purchased"),
+  environment: EntitlementPurchaseEnvironmentSchema.default("unknown"),
+  verification_state: EntitlementVerificationStateSchema,
+  is_active: z.boolean().default(false)
+});
+
+export type EntitlementSyncTransaction = z.infer<typeof EntitlementSyncTransactionSchema>;
+
+export const EntitlementsSyncRequestSchema = z.object({
+  refresh_reason: EntitlementRefreshReasonSchema,
+  storefront: z.string().trim().min(2).max(16).optional(),
+  active_product_ids: z.array(z.string().trim().min(1).max(128)).max(16).default([]),
+  transactions: z.array(EntitlementSyncTransactionSchema).max(16).default([])
+});
+
+export type EntitlementsSyncRequest = z.infer<typeof EntitlementsSyncRequestSchema>;
+
+export const EntitlementPreflightActionSchema = z.enum(["new_story", "continue_story"]);
+
+export const EntitlementPreflightBlockReasonSchema = z.enum([
+  "child_profile_limit",
+  "new_story_not_allowed",
+  "continuation_not_allowed",
+  "story_length_exceeded",
+  "story_starts_exhausted",
+  "continuations_exhausted"
+]);
+
+export const EntitlementUpgradeSurfaceSchema = z.enum([
+  "new_story_journey",
+  "story_series_detail",
+  "parent_trust_center"
+]);
+
+export const EntitlementPreflightRequestSchema = z.object({
+  action: EntitlementPreflightActionSchema,
+  child_profile_id: z.string().uuid(),
+  child_profile_count: z.number().int().min(1).max(12),
+  requested_length_minutes: z.number().int().min(1).max(10),
+  selected_series_id: z.string().uuid().optional()
+});
+
+export type EntitlementPreflightRequest = z.infer<typeof EntitlementPreflightRequestSchema>;
+
 export const DiscoverySlotStateSchema = z.object({
   theme: z.string().trim().min(1).max(200).optional(),
   characters: z.array(z.string().trim().min(1).max(80)).max(6).optional(),

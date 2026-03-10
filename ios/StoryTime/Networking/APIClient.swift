@@ -1,4 +1,8 @@
+import Combine
 import Foundation
+#if canImport(StoreKit)
+import StoreKit
+#endif
 
 private struct BackendErrorEnvelope: Decodable {
     let error: String?
@@ -15,10 +19,12 @@ private struct BackendErrorEnvelope: Decodable {
 private struct SessionIdentityEnvelope: Decodable {
     let sessionId: String
     let region: StoryTimeRegion?
+    let entitlements: EntitlementBootstrapEnvelope?
 
     private enum CodingKeys: String, CodingKey {
         case sessionId = "session_id"
         case region
+        case entitlements
     }
 }
 
@@ -32,9 +38,331 @@ private struct BackendHealthEnvelope: Decodable {
     }
 }
 
+struct EntitlementBootstrapEnvelope: Codable, Equatable {
+    let snapshot: EntitlementSnapshot
+    let token: String
+    let expiresAt: TimeInterval
+
+    private enum CodingKeys: String, CodingKey {
+        case snapshot
+        case token
+        case expiresAt = "expires_at"
+    }
+}
+
+enum EntitlementTier: String, Codable, Equatable, CaseIterable {
+    case starter
+    case plus
+}
+
+enum EntitlementSource: String, Codable, Equatable {
+    case none
+    case storekitVerified = "storekit_verified"
+    case debugSeed = "debug_seed"
+}
+
+enum EntitlementUsageWindowKind: String, Codable, Equatable {
+    case rollingPeriod = "rolling_period"
+}
+
+struct EntitlementUsageWindow: Codable, Equatable {
+    let kind: EntitlementUsageWindowKind
+    let durationSeconds: Int?
+    let resetsAt: TimeInterval?
+
+    private enum CodingKeys: String, CodingKey {
+        case kind
+        case durationSeconds = "duration_seconds"
+        case resetsAt = "resets_at"
+    }
+}
+
+struct EntitlementSnapshot: Codable, Equatable {
+    let tier: EntitlementTier
+    let source: EntitlementSource
+    let maxChildProfiles: Int
+    let maxStoryStartsPerPeriod: Int?
+    let maxContinuationsPerPeriod: Int?
+    let maxStoryLengthMinutes: Int?
+    let canReplaySavedStories: Bool
+    let canStartNewStories: Bool
+    let canContinueSavedSeries: Bool
+    let effectiveAt: TimeInterval
+    let expiresAt: TimeInterval
+    let usageWindow: EntitlementUsageWindow
+    let remainingStoryStarts: Int?
+    let remainingContinuations: Int?
+
+    private enum CodingKeys: String, CodingKey {
+        case tier
+        case source
+        case maxChildProfiles = "max_child_profiles"
+        case maxStoryStartsPerPeriod = "max_story_starts_per_period"
+        case maxContinuationsPerPeriod = "max_continuations_per_period"
+        case maxStoryLengthMinutes = "max_story_length_minutes"
+        case canReplaySavedStories = "can_replay_saved_stories"
+        case canStartNewStories = "can_start_new_stories"
+        case canContinueSavedSeries = "can_continue_saved_series"
+        case effectiveAt = "effective_at"
+        case expiresAt = "expires_at"
+        case usageWindow = "usage_window"
+        case remainingStoryStarts = "remaining_story_starts"
+        case remainingContinuations = "remaining_continuations"
+    }
+}
+
+enum EntitlementRefreshReason: String, Codable, Equatable {
+    case appLaunch = "app_launch"
+    case foreground
+    case purchase
+    case restore
+}
+
+enum EntitlementPurchaseEnvironment: String, Codable, Equatable {
+    case xcode
+    case sandbox
+    case production
+    case unknown
+}
+
+enum EntitlementOwnershipType: String, Codable, Equatable {
+    case purchased
+    case familyShared = "family_shared"
+}
+
+enum EntitlementVerificationState: String, Codable, Equatable {
+    case verified
+    case unverified
+}
+
+struct EntitlementSyncTransaction: Codable, Equatable {
+    let productID: String
+    let originalTransactionID: String
+    let latestTransactionID: String
+    let purchasedAt: Int
+    let expiresAt: Int?
+    let revokedAt: Int?
+    let ownershipType: EntitlementOwnershipType
+    let environment: EntitlementPurchaseEnvironment
+    let verificationState: EntitlementVerificationState
+    let isActive: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case productID = "product_id"
+        case originalTransactionID = "original_transaction_id"
+        case latestTransactionID = "latest_transaction_id"
+        case purchasedAt = "purchased_at"
+        case expiresAt = "expires_at"
+        case revokedAt = "revoked_at"
+        case ownershipType = "ownership_type"
+        case environment
+        case verificationState = "verification_state"
+        case isActive = "is_active"
+    }
+}
+
+struct EntitlementSyncRequest: Codable, Equatable {
+    let refreshReason: EntitlementRefreshReason
+    let storefront: String?
+    let activeProductIDs: [String]
+    let transactions: [EntitlementSyncTransaction]
+
+    init(
+        refreshReason: EntitlementRefreshReason,
+        storefront: String? = nil,
+        transactions: [EntitlementSyncTransaction]
+    ) {
+        self.refreshReason = refreshReason
+        self.storefront = storefront?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.transactions = transactions
+        self.activeProductIDs = Array(
+            Set(
+                transactions.compactMap { transaction in
+                    guard transaction.verificationState == .verified, transaction.isActive else {
+                        return nil
+                    }
+                    return transaction.productID
+                }
+            )
+        ).sorted()
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case refreshReason = "refresh_reason"
+        case storefront
+        case activeProductIDs = "active_product_ids"
+        case transactions
+    }
+}
+
+enum EntitlementPreflightAction: String, Codable, Equatable {
+    case newStory = "new_story"
+    case continueStory = "continue_story"
+}
+
+enum EntitlementPreflightBlockReason: String, Codable, Equatable {
+    case childProfileLimit = "child_profile_limit"
+    case newStoryNotAllowed = "new_story_not_allowed"
+    case continuationNotAllowed = "continuation_not_allowed"
+    case storyLengthExceeded = "story_length_exceeded"
+    case storyStartsExhausted = "story_starts_exhausted"
+    case continuationsExhausted = "continuations_exhausted"
+}
+
+enum EntitlementUpgradeSurface: String, Codable, Equatable {
+    case newStoryJourney = "new_story_journey"
+    case storySeriesDetail = "story_series_detail"
+    case parentTrustCenter = "parent_trust_center"
+}
+
+struct EntitlementPreflightRequest: Codable, Equatable {
+    let action: EntitlementPreflightAction
+    let childProfileID: String
+    let childProfileCount: Int
+    let requestedLengthMinutes: Int
+    let selectedSeriesID: String?
+
+    init(
+        action: EntitlementPreflightAction,
+        childProfileID: String,
+        childProfileCount: Int,
+        requestedLengthMinutes: Int,
+        selectedSeriesID: String? = nil
+    ) {
+        self.action = action
+        self.childProfileID = childProfileID
+        self.childProfileCount = childProfileCount
+        self.requestedLengthMinutes = requestedLengthMinutes
+        self.selectedSeriesID = selectedSeriesID
+    }
+
+    init?(plan: StoryLaunchPlan, childProfileCount: Int) {
+        switch plan.mode {
+        case .new:
+            self.init(
+                action: .newStory,
+                childProfileID: plan.childProfileId.uuidString,
+                childProfileCount: childProfileCount,
+                requestedLengthMinutes: plan.lengthMinutes
+            )
+        case .extend(let seriesID):
+            self.init(
+                action: .continueStory,
+                childProfileID: plan.childProfileId.uuidString,
+                childProfileCount: childProfileCount,
+                requestedLengthMinutes: plan.lengthMinutes,
+                selectedSeriesID: seriesID.uuidString
+            )
+        case .repeatEpisode:
+            return nil
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case action
+        case childProfileID = "child_profile_id"
+        case childProfileCount = "child_profile_count"
+        case requestedLengthMinutes = "requested_length_minutes"
+        case selectedSeriesID = "selected_series_id"
+    }
+}
+
+struct EntitlementPreflightResponse: Codable, Equatable {
+    let action: EntitlementPreflightAction
+    let allowed: Bool
+    let blockReason: EntitlementPreflightBlockReason?
+    let recommendedUpgradeSurface: EntitlementUpgradeSurface?
+    let snapshot: EntitlementSnapshot
+
+    private enum CodingKeys: String, CodingKey {
+        case action
+        case allowed
+        case blockReason = "block_reason"
+        case recommendedUpgradeSurface = "recommended_upgrade_surface"
+        case snapshot
+    }
+}
+
+private struct EntitlementSyncEnvelope: Codable {
+    let entitlements: EntitlementBootstrapEnvelope
+}
+
+protocol EntitlementPurchaseStateProviding {
+    func currentSyncRequest(refreshReason: EntitlementRefreshReason) async throws -> EntitlementSyncRequest
+}
+
+#if canImport(StoreKit)
+@available(iOS 17.0, *)
+final class StoreKitEntitlementStateProvider: EntitlementPurchaseStateProviding {
+    func currentSyncRequest(refreshReason: EntitlementRefreshReason) async throws -> EntitlementSyncRequest {
+        var transactions: [EntitlementSyncTransaction] = []
+
+        for await result in Transaction.currentEntitlements {
+            switch result {
+            case .verified(let transaction):
+                transactions.append(Self.syncTransaction(from: transaction, verificationState: .verified))
+            case .unverified(let transaction, _):
+                transactions.append(Self.syncTransaction(from: transaction, verificationState: .unverified))
+            }
+        }
+
+        return EntitlementSyncRequest(refreshReason: refreshReason, transactions: transactions)
+    }
+
+    private static func syncTransaction(
+        from transaction: Transaction,
+        verificationState: EntitlementVerificationState
+    ) -> EntitlementSyncTransaction {
+        let expiresAt = transaction.expirationDate.map { Int($0.timeIntervalSince1970) }
+        let revokedAt = transaction.revocationDate.map { Int($0.timeIntervalSince1970) }
+        let now = Int(Date().timeIntervalSince1970)
+        let isActive = revokedAt == nil && (expiresAt.map { $0 > now } ?? true)
+
+        return EntitlementSyncTransaction(
+            productID: transaction.productID,
+            originalTransactionID: String(transaction.originalID),
+            latestTransactionID: String(transaction.id),
+            purchasedAt: Int(transaction.purchaseDate.timeIntervalSince1970),
+            expiresAt: expiresAt,
+            revokedAt: revokedAt,
+            ownershipType: entitlementOwnershipType(from: transaction.ownershipType),
+            environment: entitlementEnvironment(from: transaction.environment),
+            verificationState: verificationState,
+            isActive: isActive
+        )
+    }
+
+    private static func entitlementOwnershipType(from ownershipType: Transaction.OwnershipType) -> EntitlementOwnershipType {
+        if ownershipType == .familyShared {
+            return .familyShared
+        }
+
+        return .purchased
+    }
+
+    private static func entitlementEnvironment(from environment: AppStore.Environment) -> EntitlementPurchaseEnvironment {
+        if environment == .production {
+            return .production
+        }
+
+        if environment == .sandbox {
+            return .sandbox
+        }
+
+        if environment == .xcode {
+            return .xcode
+        }
+
+        return .unknown
+    }
+}
+#endif
+
 enum APIClientTraceOperation: String, Equatable, Hashable {
     case healthCheck
     case sessionBootstrap
+    case entitlementSync = "entitlement_sync"
+    case entitlementPreflight = "entitlement_preflight"
     case voices
     case realtimeSession
     case storyDiscovery
@@ -94,7 +422,7 @@ extension APIClientTraceOperation {
             return .reviseFutureScenes
         case .embeddings:
             return .continuityRetrieval
-        case .healthCheck, .sessionBootstrap, .voices, .realtimeSession:
+        case .healthCheck, .sessionBootstrap, .entitlementSync, .entitlementPreflight, .voices, .realtimeSession:
             return nil
         }
     }
@@ -103,7 +431,7 @@ extension APIClientTraceOperation {
         switch self {
         case .storyDiscovery, .storyGeneration, .storyRevision, .embeddings:
             return .remoteModel
-        case .healthCheck, .sessionBootstrap, .voices, .realtimeSession:
+        case .healthCheck, .sessionBootstrap, .entitlementSync, .entitlementPreflight, .voices, .realtimeSession:
             return nil
         }
     }
@@ -158,6 +486,8 @@ protocol APIClienting: AnyObject {
     var resolvedRegion: StoryTimeRegion? { get }
     func prepareConnection() async throws -> URL
     func bootstrapSessionIdentity(baseURL: URL) async throws
+    func syncEntitlements(request body: EntitlementSyncRequest) async throws -> EntitlementBootstrapEnvelope
+    func preflightEntitlements(request body: EntitlementPreflightRequest) async throws -> EntitlementPreflightResponse
     func fetchVoices() async throws -> [String]
     func createRealtimeSession(request body: RealtimeSessionRequest) async throws -> RealtimeSessionEnvelope
     func discoverStoryTurn(request body: DiscoveryRequest) async throws -> DiscoveryEnvelope
@@ -198,6 +528,45 @@ final class APIClient: APIClienting {
 
     func bootstrapSessionIdentity(baseURL: URL) async throws {
         try await ensureSessionIdentity(baseURL: baseURL)
+    }
+
+    func syncEntitlements(request body: EntitlementSyncRequest) async throws -> EntitlementBootstrapEnvelope {
+        try await withAvailableBaseURL { [self] baseURL in
+            try await withAuthenticatedSession(baseURL: baseURL) {
+                let endpoint = baseURL.appending(path: "v1").appending(path: "entitlements").appending(path: "sync")
+                var request = URLRequest(url: endpoint)
+                request.httpMethod = "POST"
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.httpBody = try JSONEncoder().encode(body)
+                request.timeoutInterval = 20
+                self.applyInstallHeaders(to: &request)
+
+                let (data, response) = try await self.perform(request, operation: .entitlementPreflight)
+                try self.validate(response: response, data: data)
+                let envelope = try JSONDecoder().decode(EntitlementSyncEnvelope.self, from: data).entitlements
+                AppEntitlements.store(envelope: envelope)
+                return envelope
+            }
+        }
+    }
+
+    func preflightEntitlements(request body: EntitlementPreflightRequest) async throws -> EntitlementPreflightResponse {
+        try await withAvailableBaseURL { [self] baseURL in
+            try await withAuthenticatedSession(baseURL: baseURL) {
+                let endpoint = baseURL.appending(path: "v1").appending(path: "entitlements").appending(path: "preflight")
+                var request = URLRequest(url: endpoint)
+                request.httpMethod = "POST"
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.httpBody = try JSONEncoder().encode(body)
+                request.timeoutInterval = 20
+                self.applyInstallHeaders(to: &request)
+                self.applyEntitlementHeader(to: &request)
+
+                let (data, response) = try await self.perform(request, operation: .entitlementSync)
+                try self.validate(response: response, data: data)
+                return try JSONDecoder().decode(EntitlementPreflightResponse.self, from: data)
+            }
+        }
     }
 
     func fetchVoices() async throws -> [String] {
@@ -446,6 +815,11 @@ final class APIClient: APIClienting {
                 if let region = envelope.region {
                     AppSession.store(region: region)
                 }
+                if let entitlements = envelope.entitlements {
+                    AppEntitlements.store(envelope: entitlements)
+                } else {
+                    AppEntitlements.clear()
+                }
             }
         } catch let error as APIError {
             switch error {
@@ -453,6 +827,7 @@ final class APIClient: APIClienting {
                 // Legacy backends may not expose session bootstrap yet. Continue without a session token
                 // when the route is absent so the app can still use provisional install-based auth.
                 AppSession.clear()
+                AppEntitlements.clear()
                 return
             default:
                 throw error
@@ -571,6 +946,12 @@ final class APIClient: APIClienting {
         }
         if let sessionToken = AppSession.currentToken {
             request.setValue(sessionToken, forHTTPHeaderField: "x-storytime-session")
+        }
+    }
+
+    private func applyEntitlementHeader(to request: inout URLRequest) {
+        if let entitlementToken = AppEntitlements.currentToken {
+            request.setValue(entitlementToken, forHTTPHeaderField: "x-storytime-entitlement")
         }
     }
 
@@ -754,5 +1135,79 @@ enum AppSession {
         defaults.removeObject(forKey: expiryKey)
         defaults.removeObject(forKey: sessionIdKey)
         defaults.removeObject(forKey: regionKey)
+    }
+}
+
+enum AppEntitlements {
+    private static let envelopeKey = "com.storytime.entitlements.bootstrap.v1"
+
+    static var currentEnvelope: EntitlementBootstrapEnvelope? {
+        let defaults = UserDefaults.standard
+        guard let data = defaults.data(forKey: envelopeKey) else {
+            return nil
+        }
+
+        guard let envelope = try? JSONDecoder().decode(EntitlementBootstrapEnvelope.self, from: data) else {
+            defaults.removeObject(forKey: envelopeKey)
+            return nil
+        }
+
+        if envelope.expiresAt < Date().timeIntervalSince1970 {
+            clear()
+            return nil
+        }
+
+        return envelope
+    }
+
+    static var currentSnapshot: EntitlementSnapshot? {
+        currentEnvelope?.snapshot
+    }
+
+    static var currentToken: String? {
+        currentEnvelope?.token
+    }
+
+    static func store(envelope: EntitlementBootstrapEnvelope) {
+        guard let data = try? JSONEncoder().encode(envelope) else { return }
+        UserDefaults.standard.set(data, forKey: envelopeKey)
+    }
+
+    static func clear() {
+        UserDefaults.standard.removeObject(forKey: envelopeKey)
+    }
+}
+
+@MainActor
+final class EntitlementManager: ObservableObject {
+    @Published private(set) var snapshot: EntitlementSnapshot?
+
+    init(snapshot: EntitlementSnapshot? = AppEntitlements.currentSnapshot) {
+        self.snapshot = snapshot
+    }
+
+    func reloadFromCache() {
+        snapshot = AppEntitlements.currentSnapshot
+    }
+
+    func refreshFromBootstrap(using client: APIClienting) async throws {
+        let baseURL = try await client.prepareConnection()
+        try await client.bootstrapSessionIdentity(baseURL: baseURL)
+        snapshot = AppEntitlements.currentSnapshot
+    }
+
+    func refreshFromPurchaseState(
+        using client: APIClienting,
+        purchaseStateProvider: EntitlementPurchaseStateProviding,
+        reason: EntitlementRefreshReason
+    ) async throws {
+        let request = try await purchaseStateProvider.currentSyncRequest(refreshReason: reason)
+        _ = try await client.syncEntitlements(request: request)
+        snapshot = AppEntitlements.currentSnapshot
+    }
+
+    func invalidate() {
+        AppEntitlements.clear()
+        snapshot = nil
     }
 }

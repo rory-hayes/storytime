@@ -18,20 +18,23 @@ Archived code in `tiny-backend/` is not part of the active product.
 
 ## Current Program Goal
 
-Turn the verified hybrid runtime into a productized, monetization-aware StoryTime experience without weakening the runtime gate.
+Turn the verified hybrid runtime and completed M8 productization groundwork into a launch-ready StoryTime MVP without weakening the runtime gate.
 
-The current goal is to use the accepted hybrid runtime as the baseline for the next productization phase:
+The current goal is to use the accepted hybrid runtime plus the finished M8 planning and surface-polish pass as the baseline for launch readiness:
 - keep realtime for low-latency live interaction
 - keep TTS for long-form scene narration
 - keep structured story state and scene state as the authoritative control layer
-- use runtime-stage cost and latency telemetry to inform pricing and package boundaries
-- define onboarding, upgrade, and parent-trust flows as product journeys rather than isolated screens
-- add entitlement and paywall architecture before revenue-facing UI implementation
-- polish core child and parent surfaces only on top of the verified runtime baseline
+- lock MVP scope and define an explicit launch acceptance checklist
+- implement first-run onboarding and the parent-to-child launch handoff
+- implement billing, entitlement sync, and pre-session enforcement before cost-bearing runtime work begins
+- implement parent-managed paywall and upgrade surfaces on the already-approved product surfaces
+- implement or polish the end-of-story repeat-use loop
+- finalize cost, usage, and latency telemetry needed for commercial confidence and launch decisions
+- define and run an evidence-based launch-candidate QA pass
 
 ## Current Phase
 
-Phase 7 - Productization, Monetization, And Polished UX
+Phase 8 - Launch Readiness, Monetization, And Acceptance
 
 ## Overall Status Snapshot
 
@@ -57,12 +60,16 @@ Phase 7 - Productization, Monetization, And Polished UX
 - `docs/onboarding-first-run-audit.md` now defines the first-run direction, including the current implicit setup flow, the role of the fallback `Story Explorer` profile, and the recommended parent-led onboarding sequence before the first story starts.
 - `docs/paywall-upgrade-entry-strategy.md` now defines where upgrade prompts belong, which ones stay parent-managed, which surfaces stay upgrade-free, and how hard gates should align to the entitlement preflight model.
 - `docs/end-of-story-repeat-use-loop.md` now defines the intended post-story product loop, including how completion should bridge into replay, new-episode continuation, and return-to-library behavior without interrupting the finished child session.
+- `docs/launch-mvp-scope-and-acceptance-checklist.md` now locks the MVP launch scope, explicit exclusions, narrowed monetization and launch decisions, and the acceptance checklist plus command set that later M9 implementation and QA work must satisfy.
 - `HomeView` now carries clearer product framing for the quick-start path, an actionable parent-controls entry inside the trust card, and saved-library summaries that make replay and continuation value explicit without introducing blocking upgrade UI.
 - `NewStoryJourneyView` now reads as a clearer preflight setup surface, with explicit parent handoff, story-path setup, length-and-pacing guidance, and live-session expectation framing before the child enters the voice session.
 - `VoiceSessionView` now presents a coordinator-derived session cue card and action hint so the live session exposes clearer listening, narration, answer, revision, pause, and failure cues without changing transport or coordinator behavior.
 - `StorySeriesDetailView` now leads with continuation actions, frames continuity as next-episode memory, and keeps parent-only history management separate from replay and new-episode intent.
 - Parent trust and privacy communication is now more cohesive across `HomeView`, the lightweight parent gate, `ParentTrustCenterView`, `NewStoryJourneyView`, and `VoiceSessionView`, with clearer distinctions between what stays on device, what goes live during a session, and what the `PARENT` check does not claim to be.
-- There is currently no StoreKit, subscription, entitlement, paywall, or dedicated first-run onboarding implementation in the active repo; the only monetization groundwork present today is runtime-stage telemetry and cost-driver tracing.
+- `ContentView` now routes fresh installs through a dedicated `FirstRunOnboardingView` before the normal `HomeView` surface appears, and the first-run flow now bridges directly into `NewStoryJourneyView` when the parent chooses to start the first story immediately.
+- The active repo now has a backend-issued entitlement bootstrap snapshot, a StoreKit-facing purchase normalization seam, a backend entitlement refresh route, and a shared entitlement preflight contract, and `NewStoryJourneyView` now consumes that contract before launch with a parent-managed blocked-launch review path. The repo still has no purchase flow, saved-series continuation gate, durable plan-management surface, or usage-limit accounting.
+- `StorySeriesDetailView` already exposes `Repeat` and `New Episode`, but there is still no plan state, blocked continuation handling, or upgrade routing in the saved-series detail flow.
+- The active launch acceptance pack in `docs/verification/hybrid-runtime-validation.md` is still runtime-focused; it does not yet cover onboarding, purchase and restore flows, plan enforcement, or a launch-candidate go/no-go checklist.
 
 ## Current Architectural Notes
 
@@ -161,9 +168,24 @@ Phase 7 - Productization, Monetization, And Polished UX
 - Parent controls now require a local confirmation gate, but this remains lightweight friction rather than full parent authentication.
 - The acceptance pack is now explicit and green, but it still intentionally excludes a live bridge/WebRTC harness, full playback wall-clock narration telemetry, and the broader revised-story persistence acceptance path while revision-index logging noise remains unresolved.
 - Saved-story deletion now lives behind the parent trust boundary and the global clear-history scope is explicit, but the parent gate remains lightweight friction rather than strong authentication.
-- The launch plan, live session, and saved-story detail now explain the hybrid loop more clearly, `M8.1` maps the current journeys, `M8.2` defines a repo-fit entitlement model, `M8.3` defines the intended first-run sequence, and `M8.4` now defines upgrade-entry rules, but there is still no onboarding, StoreKit, purchase-sync, or paywall implementation in the active repo.
+- The launch plan, live session, saved-story detail, and first-run onboarding now explain the hybrid loop more clearly, `M8.1` through `M8.4` define the launch-ready product direction, `M9.2` now turns the first-run guidance into active code, `M9.3.1` through `M9.3.3` establish a real entitlement snapshot, refresh path, and preflight contract, and `M9.4.1` now adds the first blocked-launch review path in `NewStoryJourneyView`. The main remaining launch-readiness risk is finishing the saved-series continuation gate plus durable parent plan-management surfaces without widening scope into live-session upgrade UI.
 - Runtime-stage telemetry exists and `M8.2` now turns it into package-boundary direction, but the repo still lacks pricing-confidence thresholds, exact cap numbers, and joined session-cost export.
-- The current `M8` queue is complete, but the repo still has no onboarding implementation, StoreKit layer, entitlement sync, or paywall UI, so the next run should be a planning pass instead of ad hoc implementation.
+- The repo now has a parent-led first-run flow plus a working entitlement bootstrap, refresh, and preflight foundation, but it still has no purchase UI, usage counters, paywall UI, or launch-candidate acceptance execution.
+- Launch readiness is now the default next workstream; broad hybrid-runtime refactoring is not the next step unless a new reproduced defect is recorded.
+
+## Open Launch Decisions
+
+- Exact numeric `Starter` and `Plus` launch defaults for new-story starts, continuation starts, and any length cap remain open, but they are now narrowed to configuration-backed values rather than open-ended product-shape questions.
+- Whether `HomeView` ships soft plan-state awareness in MVP remains optional if `M9.4.3` determines it is execution risk without launch-value.
+- Whether exact launch usage caps stay fully backend-configured or need a mirrored client summary for copy remains open until `M9.5`.
+
+## Next Recommended Milestone
+
+`M9.4.2 - Saved-series continuation gate and replay-safe routing`
+
+Reason:
+- `M9.4.1` now gives the repo one real parent-managed blocked-launch path from `NewStoryJourneyView`, so new-story starts and journey-based continuation starts can be stopped before `VoiceSessionView` and routed into review copy instead of runtime cost.
+- The next missing launch dependency is the saved-series continuation surface in `StorySeriesDetailView`, because replay-safe continuation gating is still absent there and the approved upgrade hierarchy is incomplete until that flow is covered.
 
 ## Milestone Status
 
@@ -217,6 +239,18 @@ Phase 7 - Productization, Monetization, And Polished UX
 | M8.6 New Story setup polish pass | DONE | `NewStoryJourneyView` now frames pre-session setup as a clearer productized preflight with explicit parent handoff, launch expectations, and length/continuity guidance while preserving truthful hybrid-runtime behavior. |
 | M8.7 End-of-story and repeat-use loop design pass | DONE | `docs/end-of-story-repeat-use-loop.md` now defines the completion acknowledgement surface, the approved replay/continue/home next-step order, and the role of later completion-loop upgrade treatment without widening into implementation. |
 | M8.8 Parent trust and privacy communication refinement | DONE | Home, the parent gate and hub, setup, and the live session now use tighter trust and privacy language that stays accurate about live processing, on-device retention, and the lightweight parent boundary. |
+| M9.1 Launch scope lock and MVP acceptance checklist | DONE | `docs/launch-mvp-scope-and-acceptance-checklist.md` now locks the MVP scope, explicit exclusions, narrowed launch decisions, and the launch-candidate checklist plus command set. |
+| M9.2 Onboarding and first-run flow implementation | DONE | Fresh installs now enter a parent-led first-run flow with trust framing, fallback-child setup, expectation setting, and optional handoff into `NewStoryJourneyView`, while returning users bypass onboarding. |
+| M9.3.1 Entitlement snapshot model and bootstrap foundation | DONE | `/v1/session/identity` now returns a normalized entitlement snapshot plus signed bootstrap token, and the iOS client caches and exposes that snapshot through `AppEntitlements` and `EntitlementManager`. |
+| M9.3.2 StoreKit sync seam and entitlement refresh flow | DONE | StoreKit-facing purchase state now normalizes into the shared entitlement model, and `/v1/entitlements/sync` refreshes the backend-issued snapshot. |
+| M9.3.3 Preflight contract foundation for launch gating | DONE | `/v1/entitlements/preflight` now evaluates shared new-story and continuation launch context against the signed entitlement snapshot and returns a repo-owned decision contract. |
+| M9.4.1 New story journey block surface and parent-managed route | DONE | `NewStoryJourneyView` now preflights before launch, blocks disallowed starts before `VoiceSessionView`, and routes parents through a lightweight review flow instead of live-session upgrade UI. |
+| M9.4.2 Saved-series continuation gate and replay-safe routing | TODO | Add the same parent-managed block behavior to `StorySeriesDetailView` while keeping replay available according to the locked MVP rules. |
+| M9.4.3 Durable parent plan management and optional home awareness | TODO | Add the durable parent plan surface, restore entry, and any low-risk soft plan awareness needed to complete the approved upgrade hierarchy. |
+| M9.5 Usage limits and plan enforcement | TODO | Enforce final Starter versus Plus boundaries before realtime boot, discovery, or continuation cost is incurred. |
+| M9.6 End-of-story and repeat-use loop implementation | TODO | Turn the documented completion-loop direction into real replay, continue, and return-to-library behavior. |
+| M9.7 Cost, usage, and latency telemetry for launch confidence | TODO | Fill telemetry gaps for commercial confidence, entitlement events, and launch-go/no-go review. |
+| M9.8 Launch candidate QA and acceptance pass | TODO | Run and document the full launch-candidate checklist, evidence, blockers, and go/no-go status. |
 
 ## Completed Work Log
 
@@ -717,10 +751,8 @@ Phase 7 - Productization, Monetization, And Polished UX
 - Which story/session caps are economically safe enough to expose before stronger pricing telemetry or cohort data exists?
 - What additional cost telemetry or exported pricing evidence is needed before package boundaries can be treated as commercially confident?
 - How should onboarding frame trust, safety, retention, and product value before the first story starts without over-claiming privacy or access control?
-- What exact StoreKit product catalog, billing cadence, and naming should the first `Starter` versus `Plus` package set use once pricing confidence is high enough?
+- The initial Plus catalog now assumes the explicit product IDs `storytime.plus.monthly` and `storytime.plus.yearly`, but final price points and billing presentation remain open until launch pricing confidence is high enough.
 - How short should the backend entitlement-snapshot TTL be, and should entitlement preflight reserve a launch slot before realtime startup begins?
-- Should first-run onboarding stay as an overlay on `HomeView`, or should it become a dedicated full-screen parent setup flow before the normal home surface is shown?
-- When onboarding asks for child setup, should the fallback `Story Explorer` profile be hidden until named, or shown as a recoverable default with clearer parent explanation?
 - How should the parent-managed upgrade sheet actually present blocked launch context: inline explanation on `NewStoryJourneyView`, a parent modal above it, or a route into parent controls with preserved launch intent?
 - Should `HomeView` stay limited to quick-start framing and trust entry until real entitlement state exists, or should a later milestone add an explicit plan-state summary once purchase and sync infrastructure lands?
 - Should `NewStoryJourneyView` eventually expose a direct parent-controls correction path for child setup and privacy changes, or stay as a focused preflight surface that asks parents to back out before changing trust settings?
@@ -810,12 +842,6 @@ Phase 7 - Productization, Monetization, And Polished UX
 - Risks/Notes:
   - The lifecycle trace regression and overlap acceptance still emit the known `Revision index mismatch. expected=2 actual=1` coordinator log while passing. This remains a logging mismatch, not a failing behavior in this milestone.
   - One full script rerun was externally terminated during `xcodebuild`, but the backend step and the identical iOS slice both passed cleanly when rerun directly.
-
-## Next Recommended Milestone
-
-No incomplete milestone remains in `SPRINT.md`.
-
-The next run should be a planning pass to define the next milestone group after the completed `M8` productization slice. It should use the now-verified runtime, the productization and monetization direction docs, and the completed trust/privacy refinements as the baseline instead of starting ad hoc implementation work.
 
 ## Update Rules
 
@@ -1153,3 +1179,110 @@ The next run should be a planning pass to define the next milestone group after 
   - Trust messaging is now more coherent, but there is still no onboarding implementation, StoreKit layer, entitlement sync, or paywall UI in the active repo.
   - The current sprint queue is now complete; the next run should be a planning pass for the next milestone group instead of more unqueued implementation work.
 - Next: No incomplete milestone remains in `SPRINT.md`
+
+### 2026-03-10 - Launch-readiness planning pass and M9 queue definition
+- Status: DONE
+- Summary: Re-audited the current repo state after the completed M8 sprint and shifted the control files into a launch-readiness phase. This pass confirmed that `ContentView` still opens directly into `HomeView`, `HomeView` / `NewStoryJourneyView` / `VoiceSessionView` / `StorySeriesDetailView` now reflect the M8 productization direction, the onboarding/monetization/paywall/end-of-story docs define the intended behavior, runtime-stage telemetry exists, and the active acceptance pack is still runtime-focused rather than launch-candidate-focused. `AGENTS.md`, `PLANS.md`, and `SPRINT.md` now define M9 as the next milestone group.
+- Files: `AGENTS.md`, `PLANS.md`, `SPRINT.md`
+- Tests: No new tests were run. This was a planning-only pass grounded in repo inspection of the active SwiftUI surfaces, current verification docs, and the existing onboarding, monetization, paywall, telemetry, and repeat-use design artifacts.
+- Decisions:
+  - Move the default workstream from completed productization groundwork into launch readiness.
+  - Make `M9.1 - Launch scope lock and MVP acceptance checklist` the next recommended milestone before implementation starts on onboarding, billing, paywall, limits, telemetry, or launch QA.
+  - Treat onboarding, entitlements, upgrade surfaces, usage limits, and telemetry as connected product systems rather than isolated UI tasks.
+- Risks/Notes:
+  - The repo still has no onboarding implementation, StoreKit layer, entitlement sync, usage counters, paywall UI, or launch-candidate acceptance checklist.
+  - Final Starter versus Plus boundaries, cap numbers, billing verification scope, entitlement storage rules, and the exact launch-ready definition are still open launch decisions.
+- Next: M9.1 - Launch scope lock and MVP acceptance checklist
+
+### 2026-03-10 - M9.1 Launch scope lock and MVP acceptance checklist
+- Status: DONE
+- Summary: Added `docs/launch-mvp-scope-and-acceptance-checklist.md` to lock the launch-ready MVP shape after the completed M8 groundwork. The new artifact records the current repo baseline, what is explicitly in scope for the MVP launch candidate, what remains out of scope, the narrowed monetization and launch decisions that later milestones should treat as fixed, the definition of MVP-launch-ready, and the exact command groups and evidence labels that the `M9.8` launch-candidate pass must report.
+- Files: `docs/launch-mvp-scope-and-acceptance-checklist.md`, `PLANS.md`, `SPRINT.md`
+- Tests: No new tests were added or run. `M9.1` is a planning milestone, so its required verification method was repo inspection of the active launch surfaces, current test inventory, and the existing onboarding, monetization, paywall, repeat-use, and verification artifacts.
+- Decisions:
+  - Lock MVP launch to a two-tier `Starter` / `Plus` model, with StoreKit 2 as purchase truth and backend preflight plus entitlement snapshot as runtime enforcement truth.
+  - Lock the parent-managed upgrade hierarchy to `NewStoryJourneyView`, `StorySeriesDetailView`, `ParentTrustCenterView`, and optional soft `HomeView` awareness, while keeping `VoiceSessionView` and active narration free of hard-blocking upgrade UI.
+  - Lock replay, privacy controls, deletion controls, and the single-device local-history model into MVP, and keep accounts, sync, narration-minute pricing, and stronger parent authentication out of scope.
+- Risks/Notes:
+  - Exact numeric launch defaults for new-story, continuation, and any length caps remain open, but are now narrowed to configuration-backed implementation values instead of open-ended product-shape questions.
+  - Whether entitlement summary piggybacks on `/v1/session/identity` or a sibling bootstrap route remains an implementation detail for `M9.3`, not a scope blocker.
+- Next: M9.2 - Onboarding and first-run flow implementation
+
+### 2026-03-10 - M9.2 Onboarding and first-run flow implementation
+- Status: DONE
+- Summary: Implemented the parent-led first-run onboarding flow as an actual app entry path instead of a planning artifact. Fresh installs now open into a dedicated onboarding sequence that covers the product promise, trust and privacy framing, fallback-child confirmation or editing, live-session expectations, and parent handoff into the first story setup flow, while returning users bypass onboarding and land on the normal home surface.
+- Files: `ios/StoryTime/App/ContentView.swift`, `ios/StoryTime/App/UITestSeed.swift`, `ios/StoryTime/Features/Story/HomeView.swift`, `ios/StoryTime/Tests/SmokeTests.swift`, `ios/StoryTime/UITests/StoryTimeUITests.swift`, `PLANS.md`, `SPRINT.md`
+- Tests:
+  - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' -only-testing:StoryTimeUITests/StoryTimeUITests/testFreshInstallShowsParentLedOnboardingFlow -only-testing:StoryTimeUITests/StoryTimeUITests/testOnboardingCanEditFallbackChildProfile -only-testing:StoryTimeUITests/StoryTimeUITests/testOnboardingHandsOffToFirstStorySetupAndStaysDismissedAfterRelaunch -only-testing:StoryTimeTests/SmokeTests/testFirstRunExperienceStoreDefaultsToIncompleteAndPersistsCompletion`, which passed `4` tests.
+  - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' -only-testing:StoryTimeUITests/StoryTimeUITests/testVoiceFirstStoryJourney`, which passed during the earlier targeted onboarding regression run for this milestone.
+- Decisions:
+  - Make onboarding the actual first-run root in `ContentView` instead of a late-presented cover on top of `HomeView`, so fresh installs do not expose the returning-user home surface behind onboarding.
+  - Reuse the existing parent trust and child-profile editing surfaces from `HomeView` instead of introducing a second profile model or duplicate parent-controls content for onboarding.
+  - Keep first-run completion state local and minimal through a dedicated `FirstRunExperienceStore`, and keep seeded returning-user UI tests pinned to bypass onboarding explicitly.
+- Risks/Notes:
+  - The first-run flow is now implemented, but monetization, entitlement bootstrap, paywall routing, and usage enforcement are still missing and now become the primary launch-readiness dependency chain.
+  - The onboarding persistence key is local-device state only; any later account or multi-device model would need an explicit migration path, which remains out of scope for MVP.
+- Next: M9.3 - Billing and entitlement foundation implementation
+
+### 2026-03-10 - M9.3.1 Entitlement snapshot model and bootstrap foundation
+- Status: DONE
+- Summary: Split the oversized `M9.3` launch-readiness milestone into three execution slices, then completed the first slice by adding one repo-owned entitlement snapshot model across backend and iOS. `/v1/session/identity` now returns a signed entitlement bootstrap envelope, the backend can issue and verify entitlement tokens for install-scoped snapshots, and the client now caches and exposes the latest entitlement state without widening into StoreKit, paywall UI, or usage enforcement.
+- Files: `backend/src/app.ts`, `backend/src/lib/entitlements.ts`, `backend/src/lib/security.ts`, `backend/src/tests/app.integration.test.ts`, `backend/src/tests/auth-security.test.ts`, `ios/StoryTime/Networking/APIClient.swift`, `ios/StoryTime/Tests/APIClientTests.swift`, `ios/StoryTime/Tests/SmokeTests.swift`, `PLANS.md`, `SPRINT.md`
+- Tests:
+  - `npm test -- --run /Users/rory/Documents/StoryTime/backend/src/tests/app.integration.test.ts /Users/rory/Documents/StoryTime/backend/src/tests/auth-security.test.ts`, which passed `32` tests across `2` files.
+  - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,id=EC4B5552-9701-4B63-8EC1-B9E34CEE50A9' -only-testing:StoryTimeTests/APIClientTests/testBootstrapSessionIdentityStoresSessionToken -only-testing:StoryTimeTests/APIClientTests/testBootstrapSessionIdentityStoresEntitlementSnapshot -only-testing:StoryTimeTests/APIClientTests/testAppEntitlementsClearsExpiredSnapshot -only-testing:StoryTimeTests/APIClientTests/testStartupSequenceReusesBootstrappedSessionAcrossVoicesAndRealtimeSession -only-testing:StoryTimeTests/SmokeTests/testEntitlementManagerLoadsBootstrapSnapshotFromCache`, which passed `5` tests.
+- Decisions:
+  - Resolve the bootstrap-route question by attaching the entitlement envelope to the existing `/v1/session/identity` response instead of creating a parallel bootstrap route.
+  - Keep the first foundation slice architecture-first: allow bootstrap and debug-seeded snapshots, add a signed install-scoped entitlement token, and leave StoreKit sync plus usage enforcement for `M9.3.2` and `M9.5`.
+  - Lock only the entitlement shape that is already required for launch implementation now: tier, source, capability flags, child-profile cap, nullable remaining counters, and effective/expiry metadata.
+- Risks/Notes:
+  - Exact numeric launch defaults for story and continuation caps remain open, so the snapshot currently leaves those counters nullable instead of inventing enforcement numbers early.
+  - The bootstrap snapshot is now real, but it is still bootstrap-only state until `M9.3.2` adds the StoreKit-facing refresh path and backend sync contract.
+- Next: M9.3.2 - StoreKit sync seam and entitlement refresh flow
+
+### 2026-03-10 - M9.3.2 StoreKit sync seam and entitlement refresh flow
+- Status: DONE
+- Summary: Completed the second entitlement-foundation slice by adding a normalized StoreKit-facing purchase-state seam on iOS and a backend refresh route that returns the same repo-owned entitlement envelope shape used at bootstrap. The backend now accepts normalized transaction input on `/v1/entitlements/sync`, verified active Plus products refresh the signed entitlement snapshot, and the client can refresh or invalidate cached entitlement state through `EntitlementManager` without widening into paywall UI or usage enforcement.
+- Files: `backend/src/app.ts`, `backend/src/lib/entitlements.ts`, `backend/src/tests/app.integration.test.ts`, `backend/src/tests/entitlements.test.ts`, `backend/src/types.ts`, `ios/StoryTime/Networking/APIClient.swift`, `ios/StoryTime/Tests/APIClientTests.swift`, `ios/StoryTime/Tests/PracticeSessionViewModelTests.swift`, `ios/StoryTime/Tests/SmokeTests.swift`, `PLANS.md`, `SPRINT.md`
+- Tests:
+  - `npm test -- --run /Users/rory/Documents/StoryTime/backend/src/tests/app.integration.test.ts /Users/rory/Documents/StoryTime/backend/src/tests/auth-security.test.ts /Users/rory/Documents/StoryTime/backend/src/tests/entitlements.test.ts`, which passed `36` tests across `3` files.
+  - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,id=EC4B5552-9701-4B63-8EC1-B9E34CEE50A9' -only-testing:StoryTimeTests/APIClientTests/testSyncEntitlementsPostsNormalizedPurchaseStateAndStoresRefreshedSnapshot -only-testing:StoryTimeTests/APIClientTests/testBootstrapSessionIdentityStoresEntitlementSnapshot -only-testing:StoryTimeTests/APIClientTests/testAppEntitlementsClearsExpiredSnapshot -only-testing:StoryTimeTests/APIClientTests/testStartupSequenceReusesBootstrappedSessionAcrossVoicesAndRealtimeSession -only-testing:StoryTimeTests/SmokeTests/testEntitlementSyncRequestDerivesActiveProductsFromVerifiedActiveTransactions -only-testing:StoryTimeTests/SmokeTests/testEntitlementManagerRefreshesFromPurchaseState -only-testing:StoryTimeTests/SmokeTests/testEntitlementManagerLoadsBootstrapSnapshotFromCache`, which passed `7` tests.
+- Decisions:
+  - Keep purchase truth StoreKit-facing but normalize it immediately into the repo-owned sync contract so later purchase, restore, and paywall surfaces do not depend on StoreKit-only enums or hidden state.
+  - Treat `storytime.plus.monthly` and `storytime.plus.yearly` as the initial verified Plus product IDs for MVP sync and refresh behavior.
+  - Keep this slice foundation-only: allow entitlement refresh and invalidation now, but leave preflight gating, usage accounting, and upgrade UI to later milestones.
+- Risks/Notes:
+  - Purchase and restore UI still do not exist, so the new sync route is only a foundation seam until `M9.4` wires visible upgrade flows.
+  - Preflight gating still does not exist, so refreshed entitlements are not yet used to block new-story or continuation cost before runtime boot.
+- Next: M9.3.3 - Preflight contract foundation for launch gating
+
+### 2026-03-10 - M9.3.3 Preflight contract foundation for launch gating
+- Status: DONE
+- Summary: Completed the third entitlement-foundation slice by adding one shared preflight contract across backend and iOS for cost-bearing launch intent before runtime boot. The backend now exposes `/v1/entitlements/preflight`, validates the signed install-scoped entitlement snapshot when present, evaluates new-story versus continuation launch context against child-profile, length, and remaining-capability rules, and returns a repo-owned allow-or-block decision that later paywall and limit-enforcement milestones can consume without reworking the contract.
+- Files: `backend/src/app.ts`, `backend/src/lib/entitlements.ts`, `backend/src/tests/app.integration.test.ts`, `backend/src/tests/entitlements.test.ts`, `backend/src/types.ts`, `ios/StoryTime/Networking/APIClient.swift`, `ios/StoryTime/Tests/APIClientTests.swift`, `ios/StoryTime/Tests/PracticeSessionViewModelTests.swift`, `ios/StoryTime/Tests/SmokeTests.swift`, `PLANS.md`, `SPRINT.md`
+- Tests:
+  - `npm test -- --run /Users/rory/Documents/StoryTime/backend/src/tests/app.integration.test.ts /Users/rory/Documents/StoryTime/backend/src/tests/auth-security.test.ts /Users/rory/Documents/StoryTime/backend/src/tests/entitlements.test.ts`, which passed `42` tests across `3` files.
+  - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,id=EC4B5552-9701-4B63-8EC1-B9E34CEE50A9' -only-testing:StoryTimeTests/APIClientTests/testPreflightEntitlementsPostsLaunchContextAndDecodesBlockedDecision -only-testing:StoryTimeTests/APIClientTests/testSyncEntitlementsPostsNormalizedPurchaseStateAndStoresRefreshedSnapshot -only-testing:StoryTimeTests/APIClientTests/testBootstrapSessionIdentityStoresEntitlementSnapshot -only-testing:StoryTimeTests/APIClientTests/testAppEntitlementsClearsExpiredSnapshot -only-testing:StoryTimeTests/APIClientTests/testStartupSequenceReusesBootstrappedSessionAcrossVoicesAndRealtimeSession -only-testing:StoryTimeTests/SmokeTests/testEntitlementPreflightRequestBuildsNewStoryContextFromLaunchPlan -only-testing:StoryTimeTests/SmokeTests/testEntitlementPreflightRequestBuildsContinuationContextFromLaunchPlan -only-testing:StoryTimeTests/SmokeTests/testEntitlementPreflightRequestSkipsRepeatOnlyLaunchPlan -only-testing:StoryTimeTests/SmokeTests/testEntitlementManagerPreflightsAgainstBackendContract -only-testing:StoryTimeTests/SmokeTests/testEntitlementSyncRequestDerivesActiveProductsFromVerifiedActiveTransactions -only-testing:StoryTimeTests/SmokeTests/testEntitlementManagerRefreshesFromPurchaseState -only-testing:StoryTimeTests/SmokeTests/testEntitlementManagerLoadsBootstrapSnapshotFromCache`, which passed `12` tests.
+- Decisions:
+  - Keep preflight evaluation tied to the signed install-scoped entitlement snapshot through `x-storytime-entitlement` instead of inventing hidden backend state or account assumptions.
+  - Keep the first contract focused on action type, child-profile count, requested length, and optional series context, and leave final usage accounting plus upgrade copy to later milestones.
+  - Treat repeat-only replay as outside the preflight contract so later gating remains aligned with the locked MVP rule that replay stays available after paid exhaustion.
+- Risks/Notes:
+  - The contract exists, but no launch surface consumes it yet, so `NewStoryJourneyView` and `StorySeriesDetailView` still do not block or route into upgrade UI.
+  - Exact numeric Starter and Plus caps remain open, so the preflight evaluator only enforces snapshot-backed capability flags and counters that already exist in the entitlement model.
+- Next: M9.4.1 - New story journey block surface and parent-managed route
+
+### 2026-03-10 - M9.4 split and M9.4.1 New story journey block surface and parent-managed route
+- Status: DONE
+- Summary: Split the oversized `M9.4` paywall milestone into three execution slices, then completed the first slice by wiring `NewStoryJourneyView` into the entitlement preflight contract before session start. Journey-based new-story and continuation attempts now stop before `VoiceSessionView` when preflight blocks them, show a truthful blocked-launch explanation on the journey surface, and route into a parent-managed review flow that preserves child and story context without adding purchase UI to the live child path.
+- Files: `ios/StoryTime/App/UITestSeed.swift`, `ios/StoryTime/Features/Story/HomeView.swift`, `ios/StoryTime/Features/Story/NewStoryJourneyView.swift`, `ios/StoryTime/UITests/StoryTimeUITests.swift`, `PLANS.md`, `SPRINT.md`
+- Tests:
+  - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,id=EC4B5552-9701-4B63-8EC1-B9E34CEE50A9' -only-testing:StoryTimeUITests/StoryTimeUITests/testJourneyBlocksNewStoryStartAndRoutesToParentManagedReview -only-testing:StoryTimeUITests/StoryTimeUITests/testJourneyBlocksContinuationStartAndKeepsReplayCopyTruthful -only-testing:StoryTimeUITests/StoryTimeUITests/testJourneyExplainsContinueModeAndCharacterReuseChoices`, which passed `3` tests.
+- Decisions:
+  - Split `M9.4` into `M9.4.1`, `M9.4.2`, and `M9.4.3` so launch-readiness upgrade work can stay one safe Codex-sized slice at a time.
+  - Keep the first upgrade surface in `NewStoryJourneyView` only, because it already owns launch-plan context and can block cost-bearing starts before `VoiceSessionView` without widening into saved-series detail or durable purchase management.
+  - Route blocked starts through the existing lightweight parent gate and a journey-owned review sheet instead of introducing purchase controls or transactional UI into the child-facing flow.
+- Risks/Notes:
+  - `StorySeriesDetailView` still does not preflight or block `New Episode`, so the saved-series continuation surface can still bypass the approved parent-managed upgrade review path.
+  - The repo still has no durable plan-management surface, restore-purchase affordance, or purchase flow; this slice only adds the first launch gate and review route.
+- Next: M9.4.2 - Saved-series continuation gate and replay-safe routing

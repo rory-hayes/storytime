@@ -10,6 +10,7 @@ final class APIClientTests: XCTestCase {
         defaults.removeObject(forKey: "com.storytime.session-expiry")
         defaults.removeObject(forKey: "com.storytime.session-id")
         defaults.removeObject(forKey: "com.storytime.session-region")
+        defaults.removeObject(forKey: "com.storytime.entitlements.bootstrap.v1")
     }
 
     override func tearDown() {
@@ -19,6 +20,7 @@ final class APIClientTests: XCTestCase {
         defaults.removeObject(forKey: "com.storytime.session-expiry")
         defaults.removeObject(forKey: "com.storytime.session-id")
         defaults.removeObject(forKey: "com.storytime.session-region")
+        defaults.removeObject(forKey: "com.storytime.entitlements.bootstrap.v1")
         super.tearDown()
     }
 
@@ -96,6 +98,335 @@ final class APIClientTests: XCTestCase {
         XCTAssertEqual(AppSession.currentToken, "signed-session-token")
         XCTAssertEqual(AppSession.currentSessionId, "session-1")
         XCTAssertEqual(AppSession.currentRegion, .eu)
+    }
+
+    func testBootstrapSessionIdentityStoresEntitlementSnapshot() async throws {
+        let session = makeSession()
+        let baseURL = URL(string: "https://backend.example.com/")!
+        let effectiveAt = Date().addingTimeInterval(-60).timeIntervalSince1970
+        let expiresAt = Date().addingTimeInterval(3_600).timeIntervalSince1970
+
+        URLProtocolStub.handler = { request in
+            let url = try XCTUnwrap(request.url)
+            XCTAssertEqual(url.path, "/v1/session/identity")
+            return try Self.httpResponse(
+                url: url,
+                statusCode: 200,
+                json: [
+                    "session_id": "session-entitlements-1",
+                    "region": "US",
+                    "entitlements": [
+                        "snapshot": [
+                            "tier": "starter",
+                            "source": "none",
+                            "max_child_profiles": 1,
+                            "max_story_starts_per_period": NSNull(),
+                            "max_continuations_per_period": NSNull(),
+                            "max_story_length_minutes": NSNull(),
+                            "can_replay_saved_stories": true,
+                            "can_start_new_stories": true,
+                            "can_continue_saved_series": true,
+                            "effective_at": effectiveAt,
+                            "expires_at": expiresAt,
+                            "usage_window": [
+                                "kind": "rolling_period",
+                                "duration_seconds": NSNull(),
+                                "resets_at": NSNull()
+                            ],
+                            "remaining_story_starts": NSNull(),
+                            "remaining_continuations": NSNull()
+                        ],
+                        "token": "signed-entitlement-token",
+                        "expires_at": expiresAt
+                    ]
+                ],
+                headers: [
+                    "x-storytime-session": "signed-session-token",
+                    "x-storytime-session-expires-at": String(Date().addingTimeInterval(300).timeIntervalSince1970)
+                ]
+            )
+        }
+
+        let client = APIClient(baseURLs: [baseURL], session: session, installId: "install-123")
+        try await client.bootstrapSessionIdentity(baseURL: baseURL)
+
+        let snapshot = try XCTUnwrap(AppEntitlements.currentSnapshot)
+        XCTAssertEqual(snapshot.tier, .starter)
+        XCTAssertEqual(snapshot.source, .none)
+        XCTAssertEqual(snapshot.maxChildProfiles, 1)
+        XCTAssertTrue(snapshot.canReplaySavedStories)
+        XCTAssertEqual(snapshot.usageWindow.kind, .rollingPeriod)
+        XCTAssertEqual(AppEntitlements.currentToken, "signed-entitlement-token")
+    }
+
+    func testAppEntitlementsClearsExpiredSnapshot() {
+        AppEntitlements.store(
+            envelope: EntitlementBootstrapEnvelope(
+                snapshot: EntitlementSnapshot(
+                    tier: .starter,
+                    source: .none,
+                    maxChildProfiles: 1,
+                    maxStoryStartsPerPeriod: nil,
+                    maxContinuationsPerPeriod: nil,
+                    maxStoryLengthMinutes: nil,
+                    canReplaySavedStories: true,
+                    canStartNewStories: true,
+                    canContinueSavedSeries: true,
+                    effectiveAt: Date().addingTimeInterval(-60).timeIntervalSince1970,
+                    expiresAt: Date().addingTimeInterval(-1).timeIntervalSince1970,
+                    usageWindow: EntitlementUsageWindow(kind: .rollingPeriod, durationSeconds: nil, resetsAt: nil),
+                    remainingStoryStarts: nil,
+                    remainingContinuations: nil
+                ),
+                token: "expired-entitlement-token",
+                expiresAt: Date().addingTimeInterval(-1).timeIntervalSince1970
+            )
+        )
+
+        XCTAssertNil(AppEntitlements.currentSnapshot)
+        XCTAssertNil(AppEntitlements.currentToken)
+    }
+
+    func testSyncEntitlementsPostsNormalizedPurchaseStateAndStoresRefreshedSnapshot() async throws {
+        let session = makeSession()
+        let baseURL = URL(string: "https://backend.example.com/")!
+        let effectiveAt = Date().addingTimeInterval(-60).timeIntervalSince1970
+        let expiresAt = Date().addingTimeInterval(3_600).timeIntervalSince1970
+        var sawSyncRequest = false
+
+        URLProtocolStub.handler = { request in
+            let url = try XCTUnwrap(request.url)
+
+            switch url.path {
+            case "/v1/session/identity":
+                return try Self.httpResponse(
+                    url: url,
+                    statusCode: 200,
+                    json: ["session_id": "session-sync-1", "region": "US"],
+                    headers: [
+                        "x-storytime-session": "signed-session-token",
+                        "x-storytime-session-expires-at": String(Date().addingTimeInterval(300).timeIntervalSince1970)
+                    ]
+                )
+            case "/v1/entitlements/sync":
+                sawSyncRequest = true
+                let body = try Self.requestBody(from: request)
+                let decoded = try JSONDecoder().decode(EntitlementSyncRequest.self, from: body)
+                XCTAssertEqual(decoded.refreshReason, .restore)
+                XCTAssertEqual(decoded.activeProductIDs, ["storytime.plus.monthly"])
+                XCTAssertEqual(decoded.transactions.count, 2)
+                XCTAssertEqual(request.value(forHTTPHeaderField: "x-storytime-session"), "signed-session-token")
+
+                return try Self.httpResponse(
+                    url: url,
+                    statusCode: 200,
+                    json: [
+                        "entitlements": [
+                            "snapshot": [
+                                "tier": "plus",
+                                "source": "storekit_verified",
+                                "max_child_profiles": 3,
+                                "max_story_starts_per_period": NSNull(),
+                                "max_continuations_per_period": NSNull(),
+                                "max_story_length_minutes": NSNull(),
+                                "can_replay_saved_stories": true,
+                                "can_start_new_stories": true,
+                                "can_continue_saved_series": true,
+                                "effective_at": effectiveAt,
+                                "expires_at": expiresAt,
+                                "usage_window": [
+                                    "kind": "rolling_period",
+                                    "duration_seconds": NSNull(),
+                                    "resets_at": NSNull()
+                                ],
+                                "remaining_story_starts": NSNull(),
+                                "remaining_continuations": NSNull()
+                            ],
+                            "token": "refreshed-entitlement-token",
+                            "expires_at": expiresAt
+                        ]
+                    ]
+                )
+            default:
+                XCTFail("Unexpected sync request: \(url.absoluteString)")
+                return Self.rawResponse(url: url, statusCode: 404, body: "")
+            }
+        }
+
+        let client = APIClient(baseURLs: [baseURL], session: session, installId: "install-123")
+        let envelope = try await client.syncEntitlements(
+            request: EntitlementSyncRequest(
+                refreshReason: .restore,
+                transactions: [
+                    EntitlementSyncTransaction(
+                        productID: "storytime.plus.monthly",
+                        originalTransactionID: "original-1",
+                        latestTransactionID: "latest-1",
+                        purchasedAt: Int(Date().addingTimeInterval(-600).timeIntervalSince1970),
+                        expiresAt: Int(Date().addingTimeInterval(3_600).timeIntervalSince1970),
+                        revokedAt: nil,
+                        ownershipType: .purchased,
+                        environment: .sandbox,
+                        verificationState: .verified,
+                        isActive: true
+                    ),
+                    EntitlementSyncTransaction(
+                        productID: "storytime.plus.monthly",
+                        originalTransactionID: "original-2",
+                        latestTransactionID: "latest-2",
+                        purchasedAt: Int(Date().addingTimeInterval(-600).timeIntervalSince1970),
+                        expiresAt: Int(Date().addingTimeInterval(3_600).timeIntervalSince1970),
+                        revokedAt: nil,
+                        ownershipType: .purchased,
+                        environment: .sandbox,
+                        verificationState: .unverified,
+                        isActive: true
+                    )
+                ]
+            )
+        )
+
+        XCTAssertTrue(sawSyncRequest)
+        XCTAssertEqual(envelope.snapshot.tier, .plus)
+        XCTAssertEqual(envelope.snapshot.source, .storekitVerified)
+        XCTAssertEqual(AppEntitlements.currentSnapshot?.tier, .plus)
+        XCTAssertEqual(AppEntitlements.currentToken, "refreshed-entitlement-token")
+    }
+
+    func testPreflightEntitlementsPostsLaunchContextAndDecodesBlockedDecision() async throws {
+        let session = makeSession()
+        let baseURL = URL(string: "https://backend.example.com/")!
+        let effectiveAt = Date().addingTimeInterval(-60).timeIntervalSince1970
+        let expiresAt = Date().addingTimeInterval(3_600).timeIntervalSince1970
+        var sawPreflightRequest = false
+
+        AppEntitlements.store(
+            envelope: EntitlementBootstrapEnvelope(
+                snapshot: EntitlementSnapshot(
+                    tier: .starter,
+                    source: .none,
+                    maxChildProfiles: 1,
+                    maxStoryStartsPerPeriod: 3,
+                    maxContinuationsPerPeriod: 3,
+                    maxStoryLengthMinutes: nil,
+                    canReplaySavedStories: true,
+                    canStartNewStories: true,
+                    canContinueSavedSeries: true,
+                    effectiveAt: effectiveAt,
+                    expiresAt: expiresAt,
+                    usageWindow: EntitlementUsageWindow(kind: .rollingPeriod, durationSeconds: nil, resetsAt: nil),
+                    remainingStoryStarts: 2,
+                    remainingContinuations: 0
+                ),
+                token: "current-entitlement-token",
+                expiresAt: expiresAt
+            )
+        )
+
+        URLProtocolStub.handler = { request in
+            let url = try XCTUnwrap(request.url)
+
+            switch url.path {
+            case "/v1/session/identity":
+                return try Self.httpResponse(
+                    url: url,
+                    statusCode: 200,
+                    json: [
+                        "session_id": "session-preflight-1",
+                        "region": "US",
+                        "entitlements": [
+                            "snapshot": [
+                                "tier": "starter",
+                                "source": "none",
+                                "max_child_profiles": 1,
+                                "max_story_starts_per_period": 3,
+                                "max_continuations_per_period": 3,
+                                "max_story_length_minutes": NSNull(),
+                                "can_replay_saved_stories": true,
+                                "can_start_new_stories": true,
+                                "can_continue_saved_series": true,
+                                "effective_at": effectiveAt,
+                                "expires_at": expiresAt,
+                                "usage_window": [
+                                    "kind": "rolling_period",
+                                    "duration_seconds": NSNull(),
+                                    "resets_at": NSNull()
+                                ],
+                                "remaining_story_starts": 2,
+                                "remaining_continuations": 0
+                            ],
+                            "token": "current-entitlement-token",
+                            "expires_at": expiresAt
+                        ]
+                    ],
+                    headers: [
+                        "x-storytime-session": "signed-session-token",
+                        "x-storytime-session-expires-at": String(Date().addingTimeInterval(300).timeIntervalSince1970)
+                    ]
+                )
+            case "/v1/entitlements/preflight":
+                sawPreflightRequest = true
+                let body = try Self.requestBody(from: request)
+                let decoded = try JSONDecoder().decode(EntitlementPreflightRequest.self, from: body)
+                XCTAssertEqual(decoded.action, .continueStory)
+                XCTAssertEqual(decoded.childProfileCount, 1)
+                XCTAssertEqual(decoded.requestedLengthMinutes, 4)
+                XCTAssertEqual(decoded.selectedSeriesID, "22222222-2222-2222-2222-222222222222")
+                XCTAssertEqual(request.value(forHTTPHeaderField: "x-storytime-session"), "signed-session-token")
+                XCTAssertEqual(request.value(forHTTPHeaderField: "x-storytime-entitlement"), "current-entitlement-token")
+
+                return try Self.httpResponse(
+                    url: url,
+                    statusCode: 200,
+                    json: [
+                        "action": "continue_story",
+                        "allowed": false,
+                        "block_reason": "continuations_exhausted",
+                        "recommended_upgrade_surface": "story_series_detail",
+                        "snapshot": [
+                            "tier": "starter",
+                            "source": "none",
+                            "max_child_profiles": 1,
+                            "max_story_starts_per_period": 3,
+                            "max_continuations_per_period": 3,
+                            "max_story_length_minutes": NSNull(),
+                            "can_replay_saved_stories": true,
+                            "can_start_new_stories": true,
+                            "can_continue_saved_series": true,
+                            "effective_at": effectiveAt,
+                            "expires_at": expiresAt,
+                            "usage_window": [
+                                "kind": "rolling_period",
+                                "duration_seconds": NSNull(),
+                                "resets_at": NSNull()
+                            ],
+                            "remaining_story_starts": 2,
+                            "remaining_continuations": 0
+                        ]
+                    ]
+                )
+            default:
+                XCTFail("Unexpected preflight request: \(url.absoluteString)")
+                return Self.rawResponse(url: url, statusCode: 404, body: "")
+            }
+        }
+
+        let client = APIClient(baseURLs: [baseURL], session: session, installId: "install-123")
+        let response = try await client.preflightEntitlements(
+            request: EntitlementPreflightRequest(
+                action: .continueStory,
+                childProfileID: "11111111-1111-1111-1111-111111111111",
+                childProfileCount: 1,
+                requestedLengthMinutes: 4,
+                selectedSeriesID: "22222222-2222-2222-2222-222222222222"
+            )
+        )
+
+        XCTAssertTrue(sawPreflightRequest)
+        XCTAssertFalse(response.allowed)
+        XCTAssertEqual(response.blockReason, .continuationsExhausted)
+        XCTAssertEqual(response.recommendedUpgradeSurface, .storySeriesDetail)
+        XCTAssertEqual(response.snapshot.remainingContinuations, 0)
     }
 
     func testTraceEventsCarryGeneratedRequestIDsAndSessionCorrelation() async throws {
