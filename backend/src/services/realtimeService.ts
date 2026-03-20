@@ -233,6 +233,7 @@ export class RealtimeService {
       model: this.env.OPENAI_REALTIME_MODEL,
       region: context.region,
       installHash: context.installHash,
+      sessionId: context.sessionId,
       attempts,
       durationMs,
       success

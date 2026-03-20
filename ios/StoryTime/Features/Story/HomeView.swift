@@ -1,4 +1,9 @@
 import SwiftUI
+#if canImport(StoreKit)
+import StoreKit
+#endif
+
+private let parentControlsDefaultMaxChildProfiles = 3
 
 struct HomeView: View {
     @ObservedObject var store: StoryLibraryStore
@@ -464,15 +469,115 @@ struct ParentTrustCenterView: View {
     @Environment(\.dismiss) private var dismiss
 
     @ObservedObject var store: StoryLibraryStore
+    @StateObject private var entitlementManager = EntitlementManager()
 
     @State private var editingProfile: ChildProfile?
     @State private var showProfileEditor = false
     @State private var pendingProfileDeletion: ChildProfile?
     @State private var pendingSeriesDeletion: StorySeries?
     @State private var showDeleteHistoryConfirmation = false
+    @State private var isRefreshingPlan = false
+    @State private var isRestoringPurchases = false
+    @State private var planActionMessage: String?
+    @State private var planErrorMessage: String?
 
     var body: some View {
         Form {
+            Section("Plan") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(currentPlanTitle)
+                        .font(.system(size: 24, weight: .black, design: .rounded))
+                        .accessibilityIdentifier("parentPlanTitle")
+
+                    Text(currentPlanSummary)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("parentPlanSummary")
+                }
+
+                if let snapshot = entitlementManager.snapshot {
+                    Text("Child profiles saved on this device: \(store.childProfiles.count) of \(snapshot.maxChildProfiles) allowed")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("parentPlanProfilesSummary")
+
+                    Text(storyStartsSummary(for: snapshot))
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("parentPlanStartsSummary")
+
+                    Text(continuationsSummary(for: snapshot))
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("parentPlanContinuationsSummary")
+
+                    if let storyLengthSummary = storyLengthSummary(for: snapshot) {
+                        Text(storyLengthSummary)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .accessibilityIdentifier("parentPlanLengthSummary")
+                    }
+                } else {
+                    Text("Plan status is not loaded yet for this device. Refresh here if a parent needs the latest plan details before starting another story.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("parentPlanUnavailableSummary")
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Starter")
+                        .font(.subheadline.bold())
+                    Text("Keeps the smaller launch allowance on this device while replay, privacy controls, and saved stories stay parent-managed.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("parentStarterPlanSummary")
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Plus")
+                        .font(.subheadline.bold())
+                    Text("Expands child-profile room and launch allowance while replay, trust settings, and saved-story control stay in parent-managed surfaces.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("parentPlusPlanSummary")
+                }
+
+                if let planActionMessage {
+                    Text(planActionMessage)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("parentPlanActionStatus")
+                }
+
+                if let planErrorMessage {
+                    Text(planErrorMessage)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("parentPlanActionError")
+                }
+
+                Button(refreshPlanButtonTitle) {
+                    Task {
+                        await refreshPlanStatus()
+                    }
+                }
+                .disabled(isRefreshingPlan || isRestoringPurchases)
+                .accessibilityIdentifier("parentRefreshPlanButton")
+
+                Button(restorePurchasesButtonTitle) {
+                    Task {
+                        await restorePurchases()
+                    }
+                }
+                .disabled(isRefreshingPlan || isRestoringPurchases)
+                .accessibilityIdentifier("parentRestorePurchasesButton")
+
+                Text("Current plan review, restore, and future upgrades stay here in Parent Controls. Live child sessions stay free of purchase UI.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("parentPlanFootnote")
+            }
+
             Section("Privacy") {
                 Label("Raw audio is not saved", systemImage: "waveform.slash")
                     .foregroundStyle(.primary)
@@ -558,7 +663,7 @@ struct ParentTrustCenterView: View {
                     .padding(.vertical, 4)
                 }
 
-                if store.canAddMoreProfiles {
+                if canAddProfilesUnderCurrentPlan {
                     Button {
                         editingProfile = nil
                         showProfileEditor = true
@@ -567,9 +672,10 @@ struct ParentTrustCenterView: View {
                     }
                     .accessibilityIdentifier("addChildProfileButton")
                 } else {
-                    Text("V1 supports up to 3 child profiles.")
+                    Text(childProfileLimitMessage)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("parentChildProfileLimitMessage")
                 }
             }
 
@@ -639,9 +745,13 @@ struct ParentTrustCenterView: View {
                 Button("Done") { dismiss() }
             }
         }
+        .onAppear {
+            entitlementManager.reloadFromCache()
+            ClientLaunchTelemetry.recordParentPlanPresented(snapshot: entitlementManager.snapshot)
+        }
         .sheet(isPresented: $showProfileEditor) {
             NavigationStack {
-                ChildProfileEditorView(store: store, profile: editingProfile)
+                ChildProfileEditorView(store: store, profile: editingProfile, maxProfiles: effectiveChildProfileLimit)
             }
         }
         .alert("Delete saved story history?", isPresented: $showDeleteHistoryConfirmation) {
@@ -684,6 +794,143 @@ struct ParentTrustCenterView: View {
         return "\(profileName) • \(series.episodeCount) episode\(series.episodeCount == 1 ? "" : "s")"
     }
 
+    private var currentPlanTitle: String {
+        if let snapshot = entitlementManager.snapshot {
+            return snapshot.tier == .plus ? "Plus" : "Starter"
+        }
+
+        return "Plan status unavailable"
+    }
+
+    private var currentPlanSummary: String {
+        guard let snapshot = entitlementManager.snapshot else {
+            return "Use Refresh Plan Status or Restore Purchases here when a parent needs the latest plan details on this device."
+        }
+
+        return planAllowanceSummary(for: snapshot)
+    }
+
+    private var refreshPlanButtonTitle: String {
+        isRefreshingPlan ? "Refreshing Plan..." : "Refresh Plan Status"
+    }
+
+    private var restorePurchasesButtonTitle: String {
+        isRestoringPurchases ? "Restoring Purchases..." : "Restore Purchases"
+    }
+
+    private func storyStartsSummary(for snapshot: EntitlementSnapshot) -> String {
+        if let remaining = snapshot.remainingStoryStarts {
+            return "New story starts remaining in the current window: \(remaining)"
+        }
+
+        return snapshot.canStartNewStories
+            ? "New story starts are available under the current plan snapshot."
+            : "New story starts are currently blocked under this plan snapshot."
+    }
+
+    private func continuationsSummary(for snapshot: EntitlementSnapshot) -> String {
+        if let remaining = snapshot.remainingContinuations {
+            return "Saved-series continuations remaining in the current window: \(remaining)"
+        }
+
+        return snapshot.canContinueSavedSeries
+            ? "Saved-series continuations are available under the current plan snapshot."
+            : "Saved-series continuations are currently blocked under this plan snapshot."
+    }
+
+    private func storyLengthSummary(for snapshot: EntitlementSnapshot) -> String? {
+        guard let maxStoryLengthMinutes = snapshot.maxStoryLengthMinutes else { return nil }
+        return "Story length preflight currently checks up to \(maxStoryLengthMinutes) minutes."
+    }
+
+    private var effectiveChildProfileLimit: Int {
+        entitlementManager.snapshot?.maxChildProfiles ?? parentControlsDefaultMaxChildProfiles
+    }
+
+    private var canAddProfilesUnderCurrentPlan: Bool {
+        store.canAddMoreProfiles(maxProfiles: effectiveChildProfileLimit)
+    }
+
+    private var childProfileLimitMessage: String {
+        let profileLabel = effectiveChildProfileLimit == 1 ? "child profile" : "child profiles"
+        if store.childProfiles.count > effectiveChildProfileLimit {
+            return "This device already has \(store.childProfiles.count) child profiles saved. The current plan allows \(effectiveChildProfileLimit) \(profileLabel), so another story can stay blocked until a parent reviews profiles or plan options."
+        }
+
+        return "This device already uses all \(effectiveChildProfileLimit) \(profileLabel) allowed on this plan."
+    }
+
+    private func planAllowanceSummary(for snapshot: EntitlementSnapshot) -> String {
+        let planName = snapshot.tier == .plus ? "Plus" : "Starter"
+        let profileLabel = snapshot.maxChildProfiles == 1 ? "child profile" : "child profiles"
+        return "\(planName) currently allows up to \(snapshot.maxChildProfiles) \(profileLabel), \(allowanceSummary(for: snapshot.remainingStoryStarts, singular: "new story start", plural: "new story starts", available: snapshot.canStartNewStories)), and \(allowanceSummary(for: snapshot.remainingContinuations, singular: "saved-series continuation", plural: "saved-series continuations", available: snapshot.canContinueSavedSeries)). Replay and parent controls stay available on this device."
+    }
+
+    private func allowanceSummary(
+        for remaining: Int?,
+        singular: String,
+        plural: String,
+        available: Bool
+    ) -> String {
+        if let remaining {
+            let label = remaining == 1 ? singular : plural
+            return "\(remaining) \(label)"
+        }
+
+        return available ? plural : "no \(plural)"
+    }
+
+    @MainActor
+    private func refreshPlanStatus() async {
+        planActionMessage = nil
+        planErrorMessage = nil
+        ClientLaunchTelemetry.recordParentPlanRefresh(outcome: .started, snapshot: entitlementManager.snapshot)
+        isRefreshingPlan = true
+        defer { isRefreshingPlan = false }
+
+        do {
+            try await entitlementManager.refreshFromBootstrap(using: APIClient())
+            planActionMessage = "Plan status refreshed for this device."
+            ClientLaunchTelemetry.recordParentPlanRefresh(outcome: .completed, snapshot: entitlementManager.snapshot)
+        } catch {
+            planErrorMessage = "I couldn't refresh this device's plan right now. Ask a grown-up to try again."
+            ClientLaunchTelemetry.recordParentPlanRefresh(outcome: .failed, snapshot: entitlementManager.snapshot)
+        }
+    }
+
+    @MainActor
+    private func restorePurchases() async {
+        planActionMessage = nil
+        planErrorMessage = nil
+        ClientLaunchTelemetry.recordRestorePurchases(outcome: .started, snapshot: entitlementManager.snapshot)
+        isRestoringPurchases = true
+        defer { isRestoringPurchases = false }
+
+#if canImport(StoreKit)
+        if #available(iOS 17.0, *) {
+            do {
+                try await AppStore.sync()
+                try await entitlementManager.refreshFromPurchaseState(
+                    using: APIClient(),
+                    purchaseStateProvider: StoreKitEntitlementStateProvider(),
+                    reason: .restore
+                )
+                planActionMessage = "Restore check finished. StoryTime refreshed the plan for this device."
+                ClientLaunchTelemetry.recordRestorePurchases(outcome: .completed, snapshot: entitlementManager.snapshot)
+            } catch {
+                planErrorMessage = "I couldn't restore purchases right now. Ask a grown-up to try again."
+                ClientLaunchTelemetry.recordRestorePurchases(outcome: .failed, snapshot: entitlementManager.snapshot)
+            }
+        } else {
+            planErrorMessage = "Restore purchases is not available on this device right now."
+            ClientLaunchTelemetry.recordRestorePurchases(outcome: .failed, snapshot: entitlementManager.snapshot)
+        }
+#else
+        planErrorMessage = "Restore purchases is not available on this device right now."
+        ClientLaunchTelemetry.recordRestorePurchases(outcome: .failed, snapshot: entitlementManager.snapshot)
+#endif
+    }
+
     private var activeAgeBinding: Binding<Int> {
         Binding(
             get: { store.activeProfile?.age ?? 5 },
@@ -723,15 +970,17 @@ struct ChildProfileEditorView: View {
 
     @ObservedObject var store: StoryLibraryStore
     let profile: ChildProfile?
+    let maxProfiles: Int
 
     @State private var name: String
     @State private var age: Int
     @State private var sensitivity: ContentSensitivity
     @State private var mode: StoryExperienceMode
 
-    init(store: StoryLibraryStore, profile: ChildProfile?) {
+    init(store: StoryLibraryStore, profile: ChildProfile?, maxProfiles: Int = parentControlsDefaultMaxChildProfiles) {
         self.store = store
         self.profile = profile
+        self.maxProfiles = maxProfiles
         _name = State(initialValue: profile?.displayName ?? "")
         _age = State(initialValue: profile?.age ?? 5)
         _sensitivity = State(initialValue: profile?.contentSensitivity ?? .extraGentle)
@@ -769,7 +1018,7 @@ struct ChildProfileEditorView: View {
                 Button("Save") {
                     saveProfile()
                 }
-                .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || cannotSaveNewProfile)
                 .accessibilityIdentifier("saveChildProfileButton")
             }
         }
@@ -783,9 +1032,13 @@ struct ChildProfileEditorView: View {
             profile.preferredMode = mode
             store.updateChildProfile(profile)
         } else {
-            store.addChildProfile(name: name, age: age, sensitivity: sensitivity, preferredMode: mode)
+            store.addChildProfile(name: name, age: age, sensitivity: sensitivity, preferredMode: mode, maxProfiles: maxProfiles)
         }
         dismiss()
+    }
+
+    private var cannotSaveNewProfile: Bool {
+        profile == nil && !store.canAddMoreProfiles(maxProfiles: maxProfiles)
     }
 }
 

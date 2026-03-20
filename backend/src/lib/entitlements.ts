@@ -35,12 +35,20 @@ export type EntitlementPreflightDecision = {
   block_reason: EntitlementPreflightBlockReason | null;
   recommended_upgrade_surface: EntitlementUpgradeSurface | null;
   snapshot: EntitlementSnapshot;
+  entitlements: EntitlementBootstrapEnvelope;
 };
+
+type UsageLedgerState = {
+  new_story: number[];
+  continue_story: number[];
+};
+
+const entitlementUsageLedger = new Map<string, UsageLedgerState>();
 
 export function issueBootstrapEntitlements(req: Request, context: RequestContext, env: Env): EntitlementBootstrapEnvelope {
   const tier = resolveTierSeed(req, env);
   const source: EntitlementSource = tier === "plus" ? "debug_seed" : "none";
-  return issueEntitlementEnvelope(baseSnapshotForTier(tier, source), context, env);
+  return issueCurrentEntitlements(baseSnapshotForTier(env, tier, source), context, env);
 }
 
 export function issueSyncedEntitlements(
@@ -51,7 +59,7 @@ export function issueSyncedEntitlements(
   const activeProductIDs = resolveActiveProductIDs(request);
   const tier: EntitlementTier = hasPlusProduct(activeProductIDs) ? "plus" : "starter";
   const source: EntitlementSource = activeProductIDs.size > 0 ? "storekit_verified" : "none";
-  return issueEntitlementEnvelope(baseSnapshotForTier(tier, source), context, env);
+  return issueCurrentEntitlements(baseSnapshotForTier(env, tier, source), context, env);
 }
 
 export function resolveEntitlementSnapshot(req: Request, context: RequestContext, env: Env): EntitlementSnapshot {
@@ -60,7 +68,42 @@ export function resolveEntitlementSnapshot(req: Request, context: RequestContext
     return issueBootstrapEntitlements(req, context, env).snapshot;
   }
 
-  return verifyEntitlementToken(suppliedToken, context.installId, env).snapshot;
+  return applyUsageLedger(verifyEntitlementToken(suppliedToken, context.installId, env).snapshot, context.installId);
+}
+
+export function evaluatePreflightForRequest(
+  req: Request,
+  request: EntitlementPreflightRequest,
+  context: RequestContext,
+  env: Env
+): EntitlementPreflightDecision {
+  const currentSnapshot = resolveEntitlementSnapshot(req, context, env);
+  const initialDecision = evaluatePreflight(request, currentSnapshot);
+
+  if (!initialDecision.allowed) {
+    const entitlements = issueCurrentEntitlements(stripSnapshotLifetime(currentSnapshot), context, env);
+    return {
+      ...initialDecision,
+      snapshot: entitlements.snapshot,
+      entitlements
+    };
+  }
+
+  recordUsage(context.installId, request.action);
+  const entitlements = issueCurrentEntitlements(stripSnapshotLifetime(currentSnapshot), context, env);
+
+  return {
+    action: request.action,
+    allowed: true,
+    block_reason: null,
+    recommended_upgrade_surface: null,
+    snapshot: entitlements.snapshot,
+    entitlements
+  };
+}
+
+export function resetEntitlementUsageLedger(): void {
+  entitlementUsageLedger.clear();
 }
 
 export function evaluatePreflight(
@@ -164,6 +207,14 @@ function blockedDecision(
   };
 }
 
+function issueCurrentEntitlements(
+  snapshot: Omit<EntitlementSnapshot, "effective_at" | "expires_at">,
+  context: RequestContext,
+  env: Env
+): EntitlementBootstrapEnvelope {
+  return issueEntitlementEnvelope(applyUsageLedger(snapshot, context.installId), context, env);
+}
+
 function recommendedUpgradeSurface(action: EntitlementPreflightRequest["action"]): EntitlementUpgradeSurface {
   return action === "continue_story" ? "story_series_detail" : "new_story_journey";
 }
@@ -201,7 +252,74 @@ function resolveTierSeed(req: Request, env: Env): EntitlementTier {
   return "starter";
 }
 
+function applyUsageLedger(
+  snapshot: Omit<EntitlementSnapshot, "effective_at" | "expires_at"> | EntitlementSnapshot,
+  installId: string
+): Omit<EntitlementSnapshot, "effective_at" | "expires_at"> {
+  const state = pruneUsageState(installId, snapshot.usage_window.duration_seconds);
+  return {
+    ...stripSnapshotLifetime(snapshot),
+    remaining_story_starts: remainingCount(snapshot.max_story_starts_per_period, state.new_story.length),
+    remaining_continuations: remainingCount(snapshot.max_continuations_per_period, state.continue_story.length)
+  };
+}
+
+function stripSnapshotLifetime(
+  snapshot: Omit<EntitlementSnapshot, "effective_at" | "expires_at"> | EntitlementSnapshot
+): Omit<EntitlementSnapshot, "effective_at" | "expires_at"> {
+  const { effective_at: _effectiveAt, expires_at: _expiresAt, ...rest } =
+    snapshot as EntitlementSnapshot;
+  return rest;
+}
+
+function recordUsage(installId: string, action: EntitlementPreflightRequest["action"]): void {
+  const state = pruneUsageState(installId, null);
+  state[action].push(Math.floor(Date.now() / 1_000));
+  entitlementUsageLedger.set(installId, state);
+}
+
+function pruneUsageState(installId: string, durationSeconds: number | null): UsageLedgerState {
+  const existing = entitlementUsageLedger.get(installId) ?? {
+    new_story: [],
+    continue_story: []
+  };
+
+  if (durationSeconds === null) {
+    return {
+      new_story: [...existing.new_story],
+      continue_story: [...existing.continue_story]
+    };
+  }
+
+  const now = Math.floor(Date.now() / 1_000);
+  const cutoff = now - durationSeconds;
+  const pruned: UsageLedgerState = {
+    new_story: existing.new_story.filter((timestamp) => timestamp >= cutoff),
+    continue_story: existing.continue_story.filter((timestamp) => timestamp >= cutoff)
+  };
+
+  if (pruned.new_story.length === 0 && pruned.continue_story.length === 0) {
+    entitlementUsageLedger.delete(installId);
+  } else {
+    entitlementUsageLedger.set(installId, pruned);
+  }
+
+  return {
+    new_story: [...pruned.new_story],
+    continue_story: [...pruned.continue_story]
+  };
+}
+
+function remainingCount(limit: number | null, used: number): number | null {
+  if (limit === null) {
+    return null;
+  }
+
+  return Math.max(0, limit - used);
+}
+
 function baseSnapshotForTier(
+  env: Env,
   tier: EntitlementTier,
   source: EntitlementSource
 ): Omit<EntitlementSnapshot, "effective_at" | "expires_at"> {
@@ -209,39 +327,39 @@ function baseSnapshotForTier(
     return {
       tier,
       source,
-      max_child_profiles: 3,
-      max_story_starts_per_period: null,
-      max_continuations_per_period: null,
-      max_story_length_minutes: null,
+      max_child_profiles: env.PLUS_MAX_CHILD_PROFILES,
+      max_story_starts_per_period: env.PLUS_MAX_STORY_STARTS_PER_PERIOD,
+      max_continuations_per_period: env.PLUS_MAX_CONTINUATIONS_PER_PERIOD,
+      max_story_length_minutes: env.PLUS_MAX_STORY_LENGTH_MINUTES,
       can_replay_saved_stories: true,
       can_start_new_stories: true,
       can_continue_saved_series: true,
       usage_window: {
         kind: "rolling_period",
-        duration_seconds: null,
+        duration_seconds: env.PLUS_USAGE_WINDOW_DURATION_SECONDS,
         resets_at: null
       },
-      remaining_story_starts: null,
-      remaining_continuations: null
+      remaining_story_starts: env.PLUS_MAX_STORY_STARTS_PER_PERIOD,
+      remaining_continuations: env.PLUS_MAX_CONTINUATIONS_PER_PERIOD
     };
   }
 
   return {
     tier,
     source,
-    max_child_profiles: 1,
-    max_story_starts_per_period: null,
-    max_continuations_per_period: null,
-    max_story_length_minutes: null,
+    max_child_profiles: env.STARTER_MAX_CHILD_PROFILES,
+    max_story_starts_per_period: env.STARTER_MAX_STORY_STARTS_PER_PERIOD,
+    max_continuations_per_period: env.STARTER_MAX_CONTINUATIONS_PER_PERIOD,
+    max_story_length_minutes: env.STARTER_MAX_STORY_LENGTH_MINUTES,
     can_replay_saved_stories: true,
     can_start_new_stories: true,
     can_continue_saved_series: true,
     usage_window: {
       kind: "rolling_period",
-      duration_seconds: null,
+      duration_seconds: env.STARTER_USAGE_WINDOW_DURATION_SECONDS,
       resets_at: null
     },
-    remaining_story_starts: null,
-    remaining_continuations: null
+    remaining_story_starts: env.STARTER_MAX_STORY_STARTS_PER_PERIOD,
+    remaining_continuations: env.STARTER_MAX_CONTINUATIONS_PER_PERIOD
   };
 }

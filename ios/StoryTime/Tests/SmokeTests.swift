@@ -364,4 +364,13 @@ private final class StubEntitlementSyncClient: APIClienting {
     func createEmbeddings(inputs: [String]) async throws -> [[Double]] {
         fatalError("Not used in entitlement tests")
     }
+
+    func fetchLaunchTelemetryReport() async throws -> LaunchTelemetryJoinedReport {
+        LaunchTelemetryJoinedReport(
+            defaultRegion: resolvedRegion ?? .us,
+            allowedRegions: StoryTimeRegion.allCases,
+            backend: nil,
+            client: ClientLaunchTelemetry.report()
+        )
+    }
 }

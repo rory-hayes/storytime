@@ -430,6 +430,10 @@ enum InterruptionIntentRouter {
             phrases: [
                 "change what happens next",
                 "change the ending",
+                "add a ",
+                "add an ",
+                "also add",
+                "and add",
                 "make the ending",
                 "instead",
                 "please add",

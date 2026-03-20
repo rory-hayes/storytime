@@ -3,6 +3,11 @@ import SwiftUI
 struct StorySeriesDetailView: View {
     let seriesId: UUID
     @ObservedObject var store: StoryLibraryStore
+    @State private var shouldStartNewEpisode = false
+    @State private var isCheckingPlan = false
+    @State private var blockedPreflightResponse: EntitlementPreflightResponse?
+    @State private var launchErrorMessage: String?
+    @State private var parentUpgradeSheet: SeriesDetailParentUpgradeSheet?
 
     var body: some View {
         Group {
@@ -22,6 +27,34 @@ struct StorySeriesDetailView: View {
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .accessibilityIdentifier("seriesNotFoundLabel")
+            }
+        }
+        .navigationDestination(isPresented: $shouldStartNewEpisode) {
+            if let series {
+                VoiceSessionView(
+                    plan: newEpisodeLaunchPlan(for: series),
+                    sourceSeries: series,
+                    store: store
+                )
+            }
+        }
+        .sheet(item: $parentUpgradeSheet) { destination in
+            NavigationStack {
+                switch destination {
+                case .gate:
+                    ParentAccessGateView(
+                        onUnlock: { parentUpgradeSheet = .review },
+                        onCancel: { parentUpgradeSheet = nil }
+                    )
+                case .review:
+                    if let presentation = detailLaunchBlockPresentation {
+                        SeriesDetailUpgradeReviewView(
+                            store: store,
+                            presentation: presentation,
+                            onDone: { parentUpgradeSheet = nil }
+                        )
+                    }
+                }
             }
         }
         .navigationTitle("Story Series")
@@ -58,18 +91,16 @@ struct StorySeriesDetailView: View {
                 .foregroundStyle(.secondary)
                 .accessibilityIdentifier("seriesDetailContinueSummary")
 
+            if let presentation = detailLaunchBlockPresentation {
+                detailLaunchBlockCard(presentation)
+            } else if let launchErrorMessage {
+                detailLaunchErrorCard(launchErrorMessage)
+            }
+
             HStack(spacing: 10) {
                 NavigationLink {
                     VoiceSessionView(
-                        plan: StoryLaunchPlan(
-                            mode: .repeatEpisode(seriesId: series.id),
-                            childProfileId: store.activeProfile?.id ?? series.childProfileId ?? UUID(),
-                            experienceMode: store.activeProfile?.preferredMode ?? .classic,
-                            usePastStory: true,
-                            selectedSeriesId: series.id,
-                            usePastCharacters: true,
-                            lengthMinutes: max(1, min(10, (series.latestEpisode?.estimatedDurationSec ?? 240) / 60))
-                        ),
+                        plan: repeatEpisodeLaunchPlan(for: series),
                         sourceSeries: series,
                         store: store
                     )
@@ -79,24 +110,28 @@ struct StorySeriesDetailView: View {
                 .buttonStyle(.bordered)
                 .accessibilityIdentifier("repeatEpisodeButton")
 
-                NavigationLink {
-                    VoiceSessionView(
-                        plan: StoryLaunchPlan(
-                            mode: .extend(seriesId: series.id),
-                            childProfileId: store.activeProfile?.id ?? series.childProfileId ?? UUID(),
-                            experienceMode: store.activeProfile?.preferredMode ?? .classic,
-                            usePastStory: true,
-                            selectedSeriesId: series.id,
-                            usePastCharacters: true,
-                            lengthMinutes: 4
-                        ),
-                        sourceSeries: series,
-                        store: store
-                    )
+                Button {
+                    if blockedPreflightResponse != nil {
+                        parentUpgradeSheet = .gate
+                        return
+                    }
+
+                    if let override = UITestSeed.entitlementPreflightOverride(
+                        for: newEpisodeLaunchPlan(for: series),
+                        childProfileCount: store.childProfiles.count
+                    ) {
+                        handlePreflightDecision(override)
+                        return
+                    }
+
+                    Task {
+                        await startNewEpisodeIfAllowed(for: series)
+                    }
                 } label: {
-                    Label("New Episode", systemImage: "plus.app")
+                    Label(newEpisodeButtonTitle, systemImage: newEpisodeButtonSystemImage)
                 }
                 .buttonStyle(.borderedProminent)
+                .disabled(isCheckingPlan)
                 .accessibilityIdentifier("newEpisodeButton")
             }
 
@@ -104,6 +139,11 @@ struct StorySeriesDetailView: View {
                 .font(.system(size: 12, weight: .semibold, design: .rounded))
                 .foregroundStyle(.secondary)
                 .accessibilityIdentifier("seriesDetailContinueScopeHint")
+
+            if isCheckingPlan {
+                ProgressView()
+                    .accessibilityIdentifier("seriesDetailPlanCheckProgress")
+            }
         }
         .padding(16)
         .background(cardBackground)
@@ -191,5 +231,289 @@ struct StorySeriesDetailView: View {
 
     private var series: StorySeries? {
         store.seriesById(seriesId)
+    }
+
+    private var detailLaunchBlockPresentation: SeriesDetailLaunchBlockPresentation? {
+        guard let series, let blockedPreflightResponse else { return nil }
+        return SeriesDetailLaunchBlockPresentation(
+            response: blockedPreflightResponse,
+            childName: store.profileById(series.childProfileId)?.displayName ?? store.activeProfile?.displayName,
+            seriesTitle: series.title
+        )
+    }
+
+    private var newEpisodeButtonTitle: String {
+        if isCheckingPlan {
+            return "Checking Plan..."
+        }
+
+        if blockedPreflightResponse != nil {
+            return "Ask a Parent"
+        }
+
+        return "New Episode"
+    }
+
+    private var newEpisodeButtonSystemImage: String {
+        blockedPreflightResponse == nil ? "plus.app" : "lock.shield"
+    }
+
+    private func launchChildProfileID(for series: StorySeries) -> UUID {
+        store.activeProfile?.id ?? series.childProfileId ?? UUID()
+    }
+
+    private func repeatEpisodeLaunchPlan(for series: StorySeries) -> StoryLaunchPlan {
+        StoryLaunchPlan(
+            mode: .repeatEpisode(seriesId: series.id),
+            childProfileId: launchChildProfileID(for: series),
+            experienceMode: store.activeProfile?.preferredMode ?? .classic,
+            usePastStory: true,
+            selectedSeriesId: series.id,
+            usePastCharacters: true,
+            lengthMinutes: max(1, min(10, (series.latestEpisode?.estimatedDurationSec ?? 240) / 60))
+        )
+    }
+
+    private func newEpisodeLaunchPlan(for series: StorySeries) -> StoryLaunchPlan {
+        StoryLaunchPlan(
+            mode: .extend(seriesId: series.id),
+            childProfileId: launchChildProfileID(for: series),
+            experienceMode: store.activeProfile?.preferredMode ?? .classic,
+            usePastStory: true,
+            selectedSeriesId: series.id,
+            usePastCharacters: true,
+            lengthMinutes: 4
+        )
+    }
+
+    private func detailLaunchBlockCard(_ presentation: SeriesDetailLaunchBlockPresentation) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("Needs a parent", systemImage: "lock.shield")
+                .font(.system(size: 13, weight: .bold, design: .rounded))
+                .foregroundStyle(Color(red: 0.14, green: 0.50, blue: 0.96))
+
+            Text(presentation.title)
+                .font(.system(size: 20, weight: .black, design: .rounded))
+                .accessibilityIdentifier("seriesDetailLaunchBlockTitle")
+
+            Text(presentation.summary)
+                .font(.system(size: 14, weight: .medium, design: .rounded))
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("seriesDetailLaunchBlockSummary")
+
+            Text(presentation.footnote)
+                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("seriesDetailLaunchBlockFootnote")
+
+            Button("Ask a Parent to Review Plans") {
+                parentUpgradeSheet = .gate
+            }
+            .buttonStyle(.borderedProminent)
+            .accessibilityIdentifier("seriesDetailAskParentButton")
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(Color.white.opacity(0.92))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .strokeBorder(Color(red: 0.97, green: 0.48, blue: 0.46).opacity(0.35), lineWidth: 1)
+        )
+        .accessibilityIdentifier("seriesDetailLaunchBlockCard")
+    }
+
+    private func detailLaunchErrorCard(_ message: String) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Plan check unavailable")
+                .font(.system(size: 18, weight: .black, design: .rounded))
+                .accessibilityIdentifier("seriesDetailLaunchErrorTitle")
+
+            Text(message)
+                .font(.system(size: 14, weight: .medium, design: .rounded))
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("seriesDetailLaunchErrorSummary")
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(Color.white.opacity(0.92))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .strokeBorder(Color.black.opacity(0.07), lineWidth: 1)
+        )
+        .accessibilityIdentifier("seriesDetailLaunchErrorCard")
+    }
+
+    @MainActor
+    private func startNewEpisodeIfAllowed(for series: StorySeries) async {
+        launchErrorMessage = nil
+        guard let request = EntitlementPreflightRequest(
+            plan: newEpisodeLaunchPlan(for: series),
+            childProfileCount: store.childProfiles.count
+        ) else {
+            allowNewEpisodeLaunch()
+            return
+        }
+
+        isCheckingPlan = true
+        defer { isCheckingPlan = false }
+
+        do {
+            let response = try await APIClient().preflightEntitlements(request: request)
+            handlePreflightDecision(response)
+        } catch {
+            blockedPreflightResponse = nil
+            launchErrorMessage = "I couldn't check the plan right now. Ask a grown-up to try again."
+        }
+    }
+
+    @MainActor
+    private func handlePreflightDecision(_ response: EntitlementPreflightResponse) {
+        launchErrorMessage = nil
+
+        if response.allowed {
+            blockedPreflightResponse = nil
+            allowNewEpisodeLaunch()
+        } else {
+            blockedPreflightResponse = response
+        }
+    }
+
+    @MainActor
+    private func allowNewEpisodeLaunch() {
+        blockedPreflightResponse = nil
+        shouldStartNewEpisode = true
+    }
+}
+
+private enum SeriesDetailParentUpgradeSheet: String, Identifiable {
+    case gate
+    case review
+
+    var id: String { rawValue }
+}
+
+private struct SeriesDetailLaunchBlockPresentation {
+    let response: EntitlementPreflightResponse
+    let title: String
+    let summary: String
+    let footnote: String
+    let planTitle: String
+    let planSummary: String
+
+    init(response: EntitlementPreflightResponse, childName: String?, seriesTitle: String) {
+        self.response = response
+        let childName = childName ?? "this child"
+        self.planTitle = response.snapshot.tier == .plus ? "Plus" : "Starter"
+        self.planSummary = Self.planAllowanceSummary(for: response.snapshot)
+
+        switch response.blockReason ?? .continuationNotAllowed {
+        case .childProfileLimit:
+            title = "This plan is set up for fewer child profiles right now."
+            summary = "Ask a parent to review plan options before continuing \(seriesTitle) for \(childName)."
+            footnote = "Replay of saved stories stays available on this device."
+        case .storyLengthExceeded:
+            title = "This next episode is longer than this plan allows right now."
+            summary = "Ask a parent to review plan options before StoryTime starts another episode in \(seriesTitle)."
+            footnote = "Replay of the latest saved episode stays available on this device."
+        case .newStoryNotAllowed, .storyStartsExhausted, .continuationNotAllowed, .continuationsExhausted:
+            title = "This plan can't start a new episode right now."
+            summary = "Ask a parent to review plan options before continuing \(seriesTitle)."
+            footnote = "Replay of the latest saved episode stays available on this device."
+        }
+    }
+
+    private static func planAllowanceSummary(for snapshot: EntitlementSnapshot) -> String {
+        let planName = snapshot.tier == .plus ? "Plus" : "Starter"
+        let profileLabel = snapshot.maxChildProfiles == 1 ? "child profile" : "child profiles"
+        return "\(planName) currently allows up to \(snapshot.maxChildProfiles) \(profileLabel), \(allowanceSummary(for: snapshot.remainingStoryStarts, singular: "new story start", plural: "new story starts", available: snapshot.canStartNewStories)), and \(allowanceSummary(for: snapshot.remainingContinuations, singular: "saved-series continuation", plural: "saved-series continuations", available: snapshot.canContinueSavedSeries)) in the current window."
+    }
+
+    private static func allowanceSummary(
+        for remaining: Int?,
+        singular: String,
+        plural: String,
+        available: Bool
+    ) -> String {
+        if let remaining {
+            let label = remaining == 1 ? singular : plural
+            return "\(remaining) \(label)"
+        }
+
+        return available ? plural : "no \(plural)"
+    }
+}
+
+private struct SeriesDetailUpgradeReviewView: View {
+    @Environment(\.dismiss) private var dismiss
+
+    @ObservedObject var store: StoryLibraryStore
+    let presentation: SeriesDetailLaunchBlockPresentation
+    let onDone: () -> Void
+
+    var body: some View {
+        List {
+            Section {
+                Text("Parent plan review")
+                    .font(.system(size: 28, weight: .black, design: .rounded))
+                    .accessibilityIdentifier("seriesDetailUpgradeReviewTitle")
+
+                Text(presentation.title)
+                    .font(.system(size: 18, weight: .bold, design: .rounded))
+                    .accessibilityIdentifier("seriesDetailUpgradeReviewBlockTitle")
+
+                Text(presentation.summary)
+                    .font(.system(size: 14, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("seriesDetailUpgradeReviewSummary")
+            }
+
+            Section("Current plan") {
+                Text(presentation.planTitle)
+                    .font(.system(size: 20, weight: .black, design: .rounded))
+                    .accessibilityIdentifier("seriesDetailUpgradeReviewPlanTitle")
+
+                Text(presentation.planSummary)
+                    .font(.system(size: 14, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("seriesDetailUpgradeReviewPlanSummary")
+
+                Text(presentation.footnote)
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("seriesDetailUpgradeReviewFootnote")
+            }
+
+            Section("Next steps") {
+                NavigationLink("Open Parent Controls") {
+                    ParentTrustCenterView(store: store)
+                }
+                .accessibilityIdentifier("seriesDetailUpgradeReviewParentControlsButton")
+
+                Text("Current plan review, upgrades, and restore stay in Parent Controls. Replay of saved stories stays separate from this blocked new-episode path.")
+                    .font(.system(size: 13, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("seriesDetailUpgradeReviewNextStepsSummary")
+            }
+        }
+        .navigationTitle("Plan Review")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("Done") {
+                    onDone()
+                    dismiss()
+                }
+            }
+        }
+        .onAppear {
+            ClientLaunchTelemetry.recordBlockedReviewPresented(
+                surface: .storySeriesDetail,
+                response: presentation.response
+            )
+        }
     }
 }

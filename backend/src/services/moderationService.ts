@@ -60,6 +60,7 @@ export class ModerationService {
       model: this.env.OPENAI_MODERATION_MODEL,
       region: context.region,
       installHash: context.installHash,
+      sessionId: context.sessionId,
       attempts,
       durationMs,
       success

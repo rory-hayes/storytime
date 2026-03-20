@@ -1,7 +1,12 @@
 import request from "supertest";
-import { describe, expect, it } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp, type AppServices } from "../app.js";
+import { analytics } from "../lib/analytics.js";
 import { AppError } from "../lib/errors.js";
+import { resetEntitlementUsageLedger } from "../lib/entitlements.js";
 import { createEntitlementToken } from "../lib/security.js";
 import { makeTestEnv } from "./testHelpers.js";
 
@@ -73,6 +78,17 @@ function mockServices(): AppServices {
 }
 
 describe("v1 API", () => {
+  beforeEach(() => {
+    analytics.reset();
+    resetEntitlementUsageLedger();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    analytics.reset();
+    resetEntitlementUsageLedger();
+  });
+
   it("returns backend health metadata", async () => {
     const app = createApp({ env: makeTestEnv(), services: mockServices() });
     const response = await request(app).get("/health");
@@ -213,6 +229,15 @@ describe("v1 API", () => {
     expect(response.body.allowed).toBe(true);
     expect(response.body.block_reason).toBeNull();
     expect(response.body.snapshot.tier).toBe("starter");
+    expect(response.body.snapshot.max_child_profiles).toBe(1);
+    expect(response.body.snapshot.max_story_starts_per_period).toBe(3);
+    expect(response.body.snapshot.max_continuations_per_period).toBe(3);
+    expect(response.body.snapshot.max_story_length_minutes).toBe(10);
+    expect(response.body.snapshot.usage_window.duration_seconds).toBe(604800);
+    expect(response.body.snapshot.remaining_story_starts).toBe(2);
+    expect(response.body.snapshot.remaining_continuations).toBe(3);
+    expect(response.body.entitlements.token).toBeTruthy();
+    expect(response.body.entitlements.snapshot.remaining_story_starts).toBe(2);
   });
 
   it("blocks entitlement preflight when child profile count exceeds the current entitlement", async () => {
@@ -287,6 +312,201 @@ describe("v1 API", () => {
 
     expect(response.status).toBe(401);
     expect(response.body.error).toBe("invalid_entitlement_token");
+  });
+
+  it("blocks depleted new-story preflight attempts and returns refreshed entitlement state", async () => {
+    const app = createApp({
+      env: makeTestEnv({ STARTER_MAX_STORY_STARTS_PER_PERIOD: 1 }),
+      services: mockServices()
+    });
+    const bootstrap = await request(app)
+      .post("/v1/session/identity")
+      .set("x-storytime-install-id", "install-123")
+      .send({});
+
+    const first = await request(app)
+      .post("/v1/entitlements/preflight")
+      .set("x-storytime-install-id", "install-123")
+      .set("x-storytime-session", bootstrap.headers["x-storytime-session"])
+      .set("x-storytime-entitlement", bootstrap.body.entitlements.token)
+      .send({
+        action: "new_story",
+        child_profile_id: "fbeafe23-42d5-4ea7-8035-5680419504e9",
+        child_profile_count: 1,
+        requested_length_minutes: 4
+      });
+
+    const second = await request(app)
+      .post("/v1/entitlements/preflight")
+      .set("x-storytime-install-id", "install-123")
+      .set("x-storytime-session", bootstrap.headers["x-storytime-session"])
+      .set("x-storytime-entitlement", first.body.entitlements.token)
+      .send({
+        action: "new_story",
+        child_profile_id: "fbeafe23-42d5-4ea7-8035-5680419504e9",
+        child_profile_count: 1,
+        requested_length_minutes: 4
+      });
+
+    expect(first.status).toBe(200);
+    expect(first.body.allowed).toBe(true);
+    expect(first.body.snapshot.remaining_story_starts).toBe(0);
+
+    expect(second.status).toBe(200);
+    expect(second.body.allowed).toBe(false);
+    expect(second.body.block_reason).toBe("story_starts_exhausted");
+    expect(second.body.snapshot.remaining_story_starts).toBe(0);
+    expect(second.body.entitlements.snapshot.remaining_story_starts).toBe(0);
+  });
+
+  it("restores depleted continuation allowance after the rolling window expires", async () => {
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
+    const app = createApp({
+      env: makeTestEnv({
+        STARTER_MAX_CONTINUATIONS_PER_PERIOD: 1,
+        STARTER_USAGE_WINDOW_DURATION_SECONDS: 60
+      }),
+      services: mockServices()
+    });
+    const bootstrap = await request(app)
+      .post("/v1/session/identity")
+      .set("x-storytime-install-id", "install-123")
+      .send({});
+
+    const consumed = await request(app)
+      .post("/v1/entitlements/preflight")
+      .set("x-storytime-install-id", "install-123")
+      .set("x-storytime-session", bootstrap.headers["x-storytime-session"])
+      .set("x-storytime-entitlement", bootstrap.body.entitlements.token)
+      .send({
+        action: "continue_story",
+        child_profile_id: "fbeafe23-42d5-4ea7-8035-5680419504e9",
+        child_profile_count: 1,
+        requested_length_minutes: 4,
+        selected_series_id: "4bf7e64e-6f55-4bc4-9ff4-20e2043614a4"
+      });
+
+    nowSpy.mockReturnValue(1_700_000_061_000);
+    const refreshed = await request(app)
+      .post("/v1/entitlements/sync")
+      .set("x-storytime-install-id", "install-123")
+      .set("x-storytime-session", bootstrap.headers["x-storytime-session"])
+      .send({
+        refresh_reason: "foreground",
+        active_product_ids: [],
+        transactions: []
+      });
+
+    expect(consumed.status).toBe(200);
+    expect(consumed.body.allowed).toBe(true);
+    expect(consumed.body.snapshot.remaining_continuations).toBe(0);
+
+    expect(refreshed.status).toBe(200);
+    expect(refreshed.body.entitlements.snapshot.remaining_continuations).toBe(1);
+  });
+
+  it("exposes launch telemetry counters and session summaries through health", async () => {
+    const app = createApp({
+      env: makeTestEnv({ STARTER_MAX_STORY_STARTS_PER_PERIOD: 1 }),
+      services: mockServices()
+    });
+
+    const bootstrap = await request(app)
+      .post("/v1/session/identity")
+      .set("x-storytime-install-id", "install-telemetry")
+      .send({});
+
+    const preflight = await request(app)
+      .post("/v1/entitlements/preflight")
+      .set("x-storytime-install-id", "install-telemetry")
+      .set("x-storytime-session", bootstrap.headers["x-storytime-session"])
+      .set("x-storytime-entitlement", bootstrap.body.entitlements.token)
+      .send({
+        action: "new_story",
+        child_profile_id: "fbeafe23-42d5-4ea7-8035-5680419504e9",
+        child_profile_count: 1,
+        requested_length_minutes: 4
+      });
+
+    const sync = await request(app)
+      .post("/v1/entitlements/sync")
+      .set("x-storytime-install-id", "install-telemetry")
+      .set("x-storytime-session", bootstrap.headers["x-storytime-session"])
+      .send({
+        refresh_reason: "restore",
+        active_product_ids: [],
+        transactions: []
+      });
+
+    const health = await request(app).get("/health");
+
+    expect(bootstrap.status).toBe(200);
+    expect(preflight.status).toBe(200);
+    expect(sync.status).toBe(200);
+    expect(health.status).toBe(200);
+    expect(health.body.telemetry.counters["launch:entitlement_bootstrap:issued"]).toBe(1);
+    expect(health.body.telemetry.counters["launch:entitlement_preflight:allowed"]).toBe(1);
+    expect(health.body.telemetry.counters["launch_action:new_story:allowed"]).toBe(1);
+    expect(health.body.telemetry.counters["launch:entitlement_sync:completed"]).toBe(1);
+    expect(health.body.telemetry.counters["launch_refresh:restore:completed"]).toBe(1);
+
+    const sessionSummary = health.body.telemetry.sessions[bootstrap.body.session_id];
+    expect(sessionSummary).toBeTruthy();
+    expect(sessionSummary.request_count).toBeGreaterThanOrEqual(3);
+    expect(sessionSummary.routes["/v1/session/identity"]).toBe(1);
+    expect(sessionSummary.routes["/v1/entitlements/preflight"]).toBe(1);
+    expect(sessionSummary.routes["/v1/entitlements/sync"]).toBe(1);
+    expect(sessionSummary.launch_events["entitlement_bootstrap:issued"]).toBe(1);
+    expect(sessionSummary.launch_events["entitlement_preflight:allowed"]).toBe(1);
+    expect(sessionSummary.launch_events["action:new_story:allowed"]).toBe(1);
+    expect(sessionSummary.launch_events["entitlement_sync:completed"]).toBe(1);
+    expect(sessionSummary.last_entitlement_tier).toBe("starter");
+    expect(sessionSummary.remaining_story_starts).toBe(0);
+    expect(sessionSummary.remaining_continuations).toBe(3);
+  });
+
+  it("reloads persisted backend launch telemetry after in-memory reset", async () => {
+    const persistencePath = path.join(os.tmpdir(), `storytime-health-telemetry-${Date.now()}.json`);
+    const env = makeTestEnv({
+      ANALYTICS_PERSIST_PATH: persistencePath,
+      STARTER_MAX_STORY_STARTS_PER_PERIOD: 1
+    });
+    const app = createApp({
+      env,
+      services: mockServices()
+    });
+
+    const bootstrap = await request(app)
+      .post("/v1/session/identity")
+      .set("x-storytime-install-id", "install-persisted-telemetry")
+      .send({});
+
+    await request(app)
+      .post("/v1/entitlements/preflight")
+      .set("x-storytime-install-id", "install-persisted-telemetry")
+      .set("x-storytime-session", bootstrap.headers["x-storytime-session"])
+      .set("x-storytime-entitlement", bootstrap.body.entitlements.token)
+      .send({
+        action: "new_story",
+        child_profile_id: "fbeafe23-42d5-4ea7-8035-5680419504e9",
+        child_profile_count: 1,
+        requested_length_minutes: 4
+      });
+
+    analytics.reset({ clearPersistence: false });
+
+    const reloadedApp = createApp({
+      env,
+      services: mockServices()
+    });
+    const health = await request(reloadedApp).get("/health");
+
+    expect(health.status).toBe(200);
+    expect(health.body.telemetry.counters["launch:entitlement_bootstrap:issued"]).toBe(1);
+    expect(health.body.telemetry.counters["launch:entitlement_preflight:allowed"]).toBe(1);
+    expect(health.body.telemetry.sessions[bootstrap.body.session_id].launch_events["action:new_story:allowed"]).toBe(1);
+
+    fs.unlinkSync(persistencePath);
   });
 
 

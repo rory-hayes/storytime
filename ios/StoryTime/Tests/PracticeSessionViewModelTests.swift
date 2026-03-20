@@ -473,11 +473,10 @@ final class PracticeSessionViewModelTests: XCTestCase {
             [.startup, .discovery, .generation, .revision, .completion]
         )
         XCTAssertTrue(result.voice.spokenTexts.contains(result.revisedScenes[0].text))
-        XCTAssertTrue(result.voice.spokenTexts.contains(result.revisedScenes[1].text))
 
         let reviseRequest = try XCTUnwrap(result.api.reviseRequests.first)
-        XCTAssertEqual(reviseRequest.completedScenes.count, 1)
-        XCTAssertEqual(reviseRequest.remainingScenes.count, 2)
+        XCTAssertEqual(reviseRequest.completedScenes.count, 2)
+        XCTAssertEqual(reviseRequest.remainingScenes.count, 1)
         XCTAssertEqual(reviseRequest.userUpdate, result.revisionText)
     }
 
@@ -1107,7 +1106,12 @@ final class PracticeSessionViewModelTests: XCTestCase {
             )
         ]
         api.generateStoryResult = makeGeneratedEnvelope(title: "Picnic Clues", sceneCount: 3)
-        api.reviseStoryResult = makeRevisedEnvelope()
+        api.reviseStoryResult = makeRevisedEnvelope(
+            scenes: [
+                StoryScene(sceneId: "3", text: "The rainbow clue made Dragon laugh at the final gate.", durationSec: 35)
+            ],
+            revisedFromSceneIndex: 2
+        )
 
         let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [1])
         let narrationTransport = MockNarrationTransport(scriptedResults: [true, true, true], playDelayNanoseconds: 250_000_000)
@@ -1860,15 +1864,15 @@ final class PracticeSessionViewModelTests: XCTestCase {
         api.reviseStoryResponses = [
             makeRevisedEnvelope(
                 scenes: [
-                    StoryScene(sceneId: "2", text: "The rainbow clue made Dragon laugh.", durationSec: 25),
                     StoryScene(sceneId: "3", text: "They hugged at home with a happy picnic.", durationSec: 35)
-                ]
+                ],
+                revisedFromSceneIndex: 2
             ),
             makeRevisedEnvelope(
                 scenes: [
-                    StoryScene(sceneId: "2", text: "The rainbow clue now led to a moonbeam slide.", durationSec: 25),
-                    StoryScene(sceneId: "3", text: "They ended with a cozy song by the fountain.", durationSec: 35)
-                ]
+                    StoryScene(sceneId: "3", text: "The rainbow clue now led to a moonbeam slide.", durationSec: 25)
+                ],
+                revisedFromSceneIndex: 2
             )
         ]
 
@@ -1889,7 +1893,7 @@ final class PracticeSessionViewModelTests: XCTestCase {
 
         await waitUntil { viewModel.phase == .narrating && viewModel.currentSceneIndex == 1 }
 
-        voice.emitTranscriptFinal("Add a rainbow clue")
+        voice.emitTranscriptFinal("Please add a rainbow clue")
         await waitUntil { viewModel.phase == .revising }
         voice.emitTranscriptFinal("Also make it extra cozy")
         try? await Task.sleep(nanoseconds: 60_000_000)
@@ -1900,12 +1904,12 @@ final class PracticeSessionViewModelTests: XCTestCase {
         await waitUntil { api.reviseRequests.count == 2 && viewModel.phase == .narrating }
 
         XCTAssertEqual(api.maxConcurrentRevises, 1)
-        XCTAssertEqual(api.reviseRequests.map(\.userUpdate), ["Add a rainbow clue", "Also make it extra cozy"])
+        XCTAssertEqual(api.reviseRequests.map(\.userUpdate), ["Please add a rainbow clue", "Also make it extra cozy"])
         XCTAssertEqual(
             viewModel.invalidTransitionMessages.last,
             "Rejected revision update while queue full for scene 1"
         )
-        XCTAssertTrue(viewModel.generatedStory?.scenes[1].text.contains("moonbeam slide") == true)
+        XCTAssertTrue(viewModel.generatedStory?.scenes[2].text.contains("moonbeam slide") == true)
     }
 
     func testResumeNarrationFromCorrectSceneAfterRevision() async throws {
@@ -1930,7 +1934,12 @@ final class PracticeSessionViewModelTests: XCTestCase {
             )
         ]
         api.generateStoryResult = makeGeneratedEnvelope(title: "Picnic Clues", sceneCount: 3)
-        api.reviseStoryResult = makeRevisedEnvelope()
+        api.reviseStoryResult = makeRevisedEnvelope(
+            scenes: [
+                StoryScene(sceneId: "3", text: "The rainbow clue made Dragon laugh at the final gate.", durationSec: 35)
+            ],
+            revisedFromSceneIndex: 2
+        )
 
         let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [1, 2])
         let store = StoryLibraryStore()
@@ -1950,7 +1959,12 @@ final class PracticeSessionViewModelTests: XCTestCase {
 
         voice.emitTranscriptFinal("Please make the ending funnier and add a rainbow clue")
 
-        await waitUntil { viewModel.phase == .narrating && viewModel.currentSceneIndex == 1 }
+        await waitUntil {
+            api.reviseRequests.count == 1 &&
+            viewModel.phase == .narrating &&
+            viewModel.currentSceneIndex == 1 &&
+            viewModel.generatedStory?.scenes[2].text == "The rainbow clue made Dragon laugh at the final gate."
+        }
 
         XCTAssertEqual(viewModel.sessionState, .narrating(sceneIndex: 1))
         XCTAssertEqual(api.reviseRequests.first?.currentSceneIndex, 2)
@@ -2888,6 +2902,58 @@ final class PracticeSessionViewModelTests: XCTestCase {
         XCTAssertEqual(replayedSeries.episodes.first?.storyId, story.storyId)
     }
 
+    func testReplayCompletedStoryRestartsNarrationFromTheBeginning() async throws {
+        let api = MockAPIClient()
+        let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [1, 2])
+        let store = StoryLibraryStore()
+        let profileId = try XCTUnwrap(store.activeProfile?.id)
+        let basePlan = makePlan(childProfileId: profileId)
+        let story = StoryData(
+            storyId: "repeat-story-replay",
+            title: "Moonlight Picnic",
+            estimatedDurationSec: 10,
+            scenes: [StoryScene(sceneId: "1", text: "Bunny shared a lantern picnic.", durationSec: 1)],
+            safety: StorySafety(inputModeration: "pass", outputModeration: "pass"),
+            engine: nil
+        )
+        let seriesId = try XCTUnwrap(store.addStory(story, characters: ["Bunny"], plan: basePlan))
+        let series = try XCTUnwrap(store.seriesById(seriesId))
+        let repeatPlan = StoryLaunchPlan(
+            mode: .repeatEpisode(seriesId: seriesId),
+            childProfileId: profileId,
+            experienceMode: .classic,
+            usePastStory: true,
+            selectedSeriesId: seriesId,
+            usePastCharacters: true,
+            lengthMinutes: 3
+        )
+
+        let viewModel = PracticeSessionViewModel(
+            plan: repeatPlan,
+            sourceSeries: series,
+            store: store,
+            api: api,
+            voiceCore: voice,
+            forceMockVoiceCore: false
+        )
+
+        await viewModel.startSession()
+        await waitUntil { viewModel.phase == .completed }
+
+        XCTAssertEqual(voice.spokenTexts, ["Bunny shared a lantern picnic."])
+        XCTAssertEqual(store.series.count, 1)
+
+        await viewModel.replayCompletedStory()
+        await waitUntil { viewModel.phase == .completed && voice.spokenTexts.count == 2 }
+
+        XCTAssertEqual(
+            voice.spokenTexts,
+            ["Bunny shared a lantern picnic.", "Bunny shared a lantern picnic."]
+        )
+        XCTAssertEqual(viewModel.currentSceneIndex, 0)
+        XCTAssertEqual(store.series.count, 1)
+    }
+
     func testMockNarrationChildDidSpeakUsesScriptedUpdateRequest() async throws {
         let api = MockAPIClient()
         api.reviseStoryResult = makeRevisedEnvelope(
@@ -3734,8 +3800,8 @@ final class PracticeSessionViewModelTests: XCTestCase {
         var expectedSceneTexts: [String] {
             [
                 "Scene 1 ends with a happy smile.",
-                revisedScenes[0].text,
-                revisedScenes[1].text
+                "Scene 2 ends with a happy smile.",
+                revisedScenes[0].text
             ]
         }
     }
@@ -3744,7 +3810,6 @@ final class PracticeSessionViewModelTests: XCTestCase {
         let initialTranscript = "Bunny and Dragon should have a picnic adventure"
         let revisionText = "Please add a rainbow clue and a happy parade ending"
         let revisedScenes = [
-            StoryScene(sceneId: "2", text: "The rainbow clue made Dragon laugh.", durationSec: 25),
             StoryScene(sceneId: "3", text: "They ended with a happy parade by the fountain.", durationSec: 35)
         ]
 
@@ -3769,7 +3834,7 @@ final class PracticeSessionViewModelTests: XCTestCase {
             )
         ]
         api.generateStoryResult = makeGeneratedEnvelope(title: "Picnic Clues", sceneCount: 3)
-        api.reviseStoryResult = makeRevisedEnvelope(scenes: revisedScenes)
+        api.reviseStoryResult = makeRevisedEnvelope(scenes: revisedScenes, revisedFromSceneIndex: 2)
 
         let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [1, 2, 4, 5])
         let store = StoryLibraryStore()
@@ -4246,6 +4311,15 @@ final class MockAPIClient: APIClienting {
         }
         emitCompletedTrace(for: .embeddings, requestId: requestId, statusCode: 200)
         return Array(repeating: embeddingsResult.first ?? [0.1, 0.2, 0.3], count: inputs.count)
+    }
+
+    func fetchLaunchTelemetryReport() async throws -> LaunchTelemetryJoinedReport {
+        LaunchTelemetryJoinedReport(
+            defaultRegion: resolvedRegion ?? .us,
+            allowedRegions: StoryTimeRegion.allCases,
+            backend: nil,
+            client: ClientLaunchTelemetry.report()
+        )
     }
 
     private func emitStartedTrace(for operation: APIClientTraceOperation) -> String {
@@ -4815,6 +4889,21 @@ final class HybridRuntimeContractTests: XCTestCase {
         XCTAssertEqual(decision.intent, .reviseFutureScenes)
         XCTAssertTrue(decision.canApplyImmediately)
         XCTAssertEqual(decision.revisionBoundary?.resumeBoundary, StorySceneBoundary(sceneIndex: 1, sceneId: "scene-2"))
+        XCTAssertEqual(decision.revisionBoundary?.futureScenes.map(\.sceneId), ["scene-3"])
+    }
+
+    func testInterruptionIntentRouterClassifiesPlainAddCueAsRevision() throws {
+        let story = makeContractStory()
+        let sceneState = try XCTUnwrap(story.authoritativeSceneState(at: 1))
+        let decision = try XCTUnwrap(
+            InterruptionIntentRouter.classify(
+                transcript: "Add a rainbow clue for the ending.",
+                sceneState: sceneState
+            )
+        )
+
+        XCTAssertEqual(decision.intent, .reviseFutureScenes)
+        XCTAssertTrue(decision.canApplyImmediately)
         XCTAssertEqual(decision.revisionBoundary?.futureScenes.map(\.sceneId), ["scene-3"])
     }
 

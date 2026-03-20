@@ -1,4 +1,6 @@
 import type { Request } from "express";
+import os from "node:os";
+import path from "node:path";
 import type { Env } from "../lib/env.js";
 import { logger } from "../lib/logger.js";
 import type { RequestContext } from "../lib/requestContext.js";
@@ -43,6 +45,17 @@ export function makeTestEnv(overrides: Partial<Env> = {}): Env {
     OPENAI_TIMEOUT_MS: 5_000,
     ENABLE_USAGE_METERING: true,
     ENABLE_STRUCTURED_ANALYTICS: true,
+    ANALYTICS_PERSIST_PATH: path.join(os.tmpdir(), "storytime-launch-telemetry-test.json"),
+    STARTER_MAX_CHILD_PROFILES: 1,
+    STARTER_MAX_STORY_STARTS_PER_PERIOD: 3,
+    STARTER_MAX_CONTINUATIONS_PER_PERIOD: 3,
+    STARTER_MAX_STORY_LENGTH_MINUTES: 10,
+    STARTER_USAGE_WINDOW_DURATION_SECONDS: 604_800,
+    PLUS_MAX_CHILD_PROFILES: 3,
+    PLUS_MAX_STORY_STARTS_PER_PERIOD: 12,
+    PLUS_MAX_CONTINUATIONS_PER_PERIOD: 12,
+    PLUS_MAX_STORY_LENGTH_MINUTES: 10,
+    PLUS_USAGE_WINDOW_DURATION_SECONDS: 604_800,
     APP_VERSION: "test",
     ...overrides
   };

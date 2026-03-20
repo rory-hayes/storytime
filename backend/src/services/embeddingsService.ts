@@ -35,6 +35,7 @@ export class EmbeddingsService {
           model: this.env.OPENAI_EMBEDDINGS_MODEL,
           region: context.region,
           installHash: context.installHash,
+          sessionId: context.sessionId,
           attempts,
           durationMs: Date.now() - startedAt,
           success: true
@@ -53,6 +54,7 @@ export class EmbeddingsService {
           model: this.env.OPENAI_EMBEDDINGS_MODEL,
           region: context.region,
           installHash: context.installHash,
+          sessionId: context.sessionId,
           attempts,
           durationMs: Date.now() - startedAt,
           success: false

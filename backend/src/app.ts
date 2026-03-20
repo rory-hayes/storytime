@@ -9,10 +9,9 @@ import { createOpenAI } from "./lib/openaiClient.js";
 import { analytics } from "./lib/analytics.js";
 import { SESSION_HEADER, resolveSessionIdentityWithOptions } from "./lib/auth.js";
 import {
-  evaluatePreflight,
+  evaluatePreflightForRequest,
   issueBootstrapEntitlements,
   issueSyncedEntitlements,
-  resolveEntitlementSnapshot
 } from "./lib/entitlements.js";
 import {
   attachRequestContext,
@@ -70,6 +69,9 @@ export function createApp(opts?: { env?: Env; services?: AppServices }) {
   const env = opts?.env ?? loadEnv();
   const services = opts?.services ?? buildDefaultServices(env);
   const limiters = createRateLimiters(env);
+  analytics.configurePersistence(
+    env.ENABLE_USAGE_METERING || env.ENABLE_STRUCTURED_ANALYTICS ? env.ANALYTICS_PERSIST_PATH : undefined
+  );
 
   const app = express();
   app.set("trust proxy", env.TRUST_PROXY ? 1 : false);
@@ -169,7 +171,7 @@ export function createApp(opts?: { env?: Env; services?: AppServices }) {
       auth_required: env.API_AUTH_REQUIRED,
       default_region: env.DEFAULT_REGION,
       allowed_regions: env.ALLOWED_REGIONS,
-      telemetry: env.ENABLE_USAGE_METERING ? analytics.snapshot() : undefined
+      telemetry: env.ENABLE_USAGE_METERING ? analytics.report() : undefined
     });
   });
 
@@ -192,6 +194,7 @@ export function createApp(opts?: { env?: Env; services?: AppServices }) {
         },
         env
       );
+      const entitlements = issueBootstrapEntitlements(req, context, env);
       res.setHeader(SESSION_HEADER, issued.token);
       res.setHeader("x-storytime-session-expires-at", String(issued.expires_at));
       res.json({
@@ -200,8 +203,22 @@ export function createApp(opts?: { env?: Env; services?: AppServices }) {
         expires_at: issued.expires_at,
         region: context.region,
         auth_level: context.authLevel,
-        entitlements: issueBootstrapEntitlements(req, context, env)
+        entitlements
       });
+      if (env.ENABLE_STRUCTURED_ANALYTICS || env.ENABLE_USAGE_METERING) {
+        analytics.recordLaunchEvent({
+          requestId: context.requestId,
+          route: context.route,
+          event: "entitlement_bootstrap",
+          outcome: "issued",
+          region: context.region,
+          installHash: context.installHash,
+          sessionId: context.sessionId,
+          entitlementTier: entitlements.snapshot.tier,
+          remainingStoryStarts: entitlements.snapshot.remaining_story_starts,
+          remainingContinuations: entitlements.snapshot.remaining_continuations
+        });
+      }
     } catch (error) {
       next(error);
     }
@@ -211,8 +228,24 @@ export function createApp(opts?: { env?: Env; services?: AppServices }) {
     try {
       const body = EntitlementsSyncRequestSchema.parse(req.body);
       const context = getRequestContext(req);
+      const entitlements = issueSyncedEntitlements(body, context, env);
+      if (env.ENABLE_STRUCTURED_ANALYTICS || env.ENABLE_USAGE_METERING) {
+        analytics.recordLaunchEvent({
+          requestId: context.requestId,
+          route: context.route,
+          event: "entitlement_sync",
+          outcome: "completed",
+          region: context.region,
+          installHash: context.installHash,
+          sessionId: context.sessionId,
+          refreshReason: body.refresh_reason,
+          entitlementTier: entitlements.snapshot.tier,
+          remainingStoryStarts: entitlements.snapshot.remaining_story_starts,
+          remainingContinuations: entitlements.snapshot.remaining_continuations
+        });
+      }
       res.json({
-        entitlements: issueSyncedEntitlements(body, context, env)
+        entitlements
       });
     } catch (error) {
       next(error);
@@ -223,8 +256,25 @@ export function createApp(opts?: { env?: Env; services?: AppServices }) {
     try {
       const body = EntitlementPreflightRequestSchema.parse(req.body);
       const context = getRequestContext(req);
-      const snapshot = resolveEntitlementSnapshot(req, context, env);
-      res.json(evaluatePreflight(body, snapshot));
+      const decision = evaluatePreflightForRequest(req, body, context, env);
+      if (env.ENABLE_STRUCTURED_ANALYTICS || env.ENABLE_USAGE_METERING) {
+        analytics.recordLaunchEvent({
+          requestId: context.requestId,
+          route: context.route,
+          event: "entitlement_preflight",
+          outcome: decision.allowed ? "allowed" : "blocked",
+          region: context.region,
+          installHash: context.installHash,
+          sessionId: context.sessionId,
+          action: body.action,
+          blockReason: decision.block_reason,
+          upgradeSurface: decision.recommended_upgrade_surface,
+          entitlementTier: decision.snapshot.tier,
+          remainingStoryStarts: decision.snapshot.remaining_story_starts,
+          remainingContinuations: decision.snapshot.remaining_continuations
+        });
+      }
+      res.json(decision);
     } catch (error) {
       next(error);
     }

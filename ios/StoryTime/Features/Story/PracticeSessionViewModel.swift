@@ -120,6 +120,67 @@ final class SystemSpeechNarrationTransport: NSObject, StoryNarrationTransporting
 }
 
 @MainActor
+final class UITestNarrationTransport: StoryNarrationTransporting {
+    private let completionDelayNanoseconds: UInt64
+    private let pollDelayNanoseconds: UInt64 = 25_000_000
+    private var hasActivePlayback = false
+    private var isPaused = false
+    private var stopRequested = false
+
+    init(completionDelayNanoseconds: UInt64 = 3_000_000_000) {
+        self.completionDelayNanoseconds = completionDelayNanoseconds
+    }
+
+    func prepareScene(_ scene: PreparedNarrationScene) async {}
+
+    func playScene(_ scene: PreparedNarrationScene, utteranceID: String) async -> Bool {
+        hasActivePlayback = true
+        isPaused = false
+        stopRequested = false
+
+        var elapsedNanoseconds: UInt64 = 0
+        while elapsedNanoseconds < completionDelayNanoseconds {
+            if stopRequested {
+                hasActivePlayback = false
+                return false
+            }
+
+            if !isPaused {
+                elapsedNanoseconds += pollDelayNanoseconds
+            }
+
+            try? await Task.sleep(nanoseconds: pollDelayNanoseconds)
+            if Task.isCancelled {
+                hasActivePlayback = false
+                return false
+            }
+        }
+
+        hasActivePlayback = false
+        return true
+    }
+
+    func invalidatePreparedScenes(keeping cacheKeys: Set<String>) {}
+
+    func pause() -> Bool {
+        guard hasActivePlayback, !isPaused else { return false }
+        isPaused = true
+        return true
+    }
+
+    func resume() -> Bool {
+        guard hasActivePlayback, isPaused else { return false }
+        isPaused = false
+        return true
+    }
+
+    func stop() {
+        stopRequested = true
+        isPaused = false
+    }
+}
+
+@MainActor
 final class PracticeSessionViewModel: ObservableObject {
     private enum SessionEvent {
         case startRequested
@@ -231,6 +292,7 @@ final class PracticeSessionViewModel: ObservableObject {
 
     private enum NarrationStartSource {
         case replayFromBoot
+        case replayAfterCompletion
         case generationResolved
         case resumeAfterInterruption(decision: NarrationResumeDecision, intent: InterruptionIntent)
         case continueAfterScene(sceneIndex: Int)
@@ -239,6 +301,8 @@ final class PracticeSessionViewModel: ObservableObject {
             switch self {
             case .replayFromBoot:
                 return "startNarrationFromReplayBoot"
+            case .replayAfterCompletion:
+                return "startNarrationFromCompletionReplay"
             case .generationResolved:
                 return "startNarrationFromGenerationResolved"
             case .resumeAfterInterruption(_, let intent):
@@ -408,14 +472,16 @@ final class PracticeSessionViewModel: ObservableObject {
         self.store = store
         self.continuityMemory = continuityMemory
         self.api = api
+        let environment = ProcessInfo.processInfo.environment
         let resolvedRealtimeClient = realtimeVoiceClient ?? (voiceCore as? RealtimeVoiceClient)
         let resolvedVoiceCore = voiceCore ?? resolvedRealtimeClient ?? RealtimeVoiceClient()
         self.realtimeVoiceClient = resolvedRealtimeClient ?? (resolvedVoiceCore as? RealtimeVoiceClient)
         self.voiceCore = resolvedVoiceCore
         self.narrationTransport = narrationTransport
             ?? (resolvedVoiceCore as? StoryNarrationTransporting)
+            ?? (environment["STORYTIME_UI_TEST_MODE"] == "1" ? UITestNarrationTransport() : nil)
             ?? SystemSpeechNarrationTransport()
-        self.usesMockVoiceCore = forceMockVoiceCore ?? (ProcessInfo.processInfo.environment["STORYTIME_UI_TEST_MODE"] == "1")
+        self.usesMockVoiceCore = forceMockVoiceCore ?? (environment["STORYTIME_UI_TEST_MODE"] == "1")
 
         bindAPITraceEvents()
         bindRealtimeEvents()
@@ -586,8 +652,53 @@ final class PracticeSessionViewModel: ObservableObject {
         }
     }
 
+    var hasCompletedStory: Bool {
+        guard case .completed = sessionState else { return false }
+        return generatedStory != nil
+    }
+
+    var completionSeries: StorySeries? {
+        guard case .completed = sessionState, let story = generatedStory else { return nil }
+
+        switch launchPlan.mode {
+        case .repeatEpisode(let seriesID), .extend(let seriesID):
+            return store.seriesById(seriesID)
+        case .new:
+            if launchPlan.usePastStory, let selectedSeriesID = launchPlan.selectedSeriesId {
+                return store.seriesById(selectedSeriesID)
+            }
+
+            return store.series.first { series in
+                series.childProfileId == launchPlan.childProfileId
+                    && series.episodes.contains(where: { $0.storyId == story.storyId })
+            }
+        }
+    }
+
     func startSession() async {
         await process(.startRequested)
+    }
+
+    func replayCompletedStory() async {
+        guard case .completed = sessionState, generatedStory != nil else {
+            logInvalidTransition(event: "replayCompletedStory", state: sessionState)
+            return
+        }
+
+        cancelTimedWork()
+        activeStartupAttempt = nil
+        activeDiscoveryRequestID = nil
+        activeGenerationRequestID = nil
+        activeRevisionRequestID = nil
+        activeNarrationUtteranceID = nil
+        activePromptUtteranceID = nil
+        deferredTranscriptPolicy = nil
+        queuedRevisionUpdates.removeAll()
+        interruptionRouteDecision = nil
+        latestUserTranscript = ""
+        clearAppError()
+
+        await startNarration(from: 0, source: .replayAfterCompletion)
     }
 
     private func sceneProgressText(_ sceneIndex: Int) -> String {
@@ -973,7 +1084,8 @@ final class PracticeSessionViewModel: ObservableObject {
                 return
             }
 
-            let mergedScenes = Array(currentStory.scenes.prefix(sceneIndex + 1)) + envelope.data.scenes
+            let revisedFromSceneIndex = max(0, min(envelope.data.revisedFromSceneIndex, currentStory.scenes.count))
+            let mergedScenes = Array(currentStory.scenes.prefix(revisedFromSceneIndex)) + envelope.data.scenes
             let updated = StoryData(
                 storyId: currentStory.storyId,
                 title: currentStory.title,
@@ -995,18 +1107,30 @@ final class PracticeSessionViewModel: ObservableObject {
                 }
             }
 
-            let expectedRevisionStartIndex = sceneIndex + 1
-            if envelope.data.revisedFromSceneIndex != expectedRevisionStartIndex {
+            let expectedRevisionStartIndex = requestedRevisionStartIndex(for: currentStory, sceneIndex: sceneIndex)
+            if !isAcceptedRevisionStartIndex(
+                envelope.data.revisedFromSceneIndex,
+                expected: expectedRevisionStartIndex,
+                sceneIndex: sceneIndex
+            ) {
                 logUnexpectedRevisionIndex(expected: expectedRevisionStartIndex, actual: envelope.data.revisedFromSceneIndex)
             }
 
             recordTrace(.revision, source: envelope.blocked ? "blocked" : "resolved", operation: .storyRevision)
             if !queuedRevisionUpdates.isEmpty {
                 let nextUpdate = queuedRevisionUpdates.removeFirst()
-                if let revisionBoundary = updated.authoritativeSceneState(at: sceneIndex)?.revisionBoundary {
-                    submitRevisionRequest(nextUpdate, sceneIndex: sceneIndex, revisionBoundary: revisionBoundary)
+                if let request = revisionRequest(for: updated, sceneIndex: sceneIndex, userUpdate: nextUpdate) {
+                    submitRevisionRequest(sceneIndex: sceneIndex, request: request)
                     return
                 }
+            }
+
+            if case .repeatEpisode = launchPlan.mode, revisedFromSceneIndex == 0 {
+                completeSession(
+                    status: "Replay updated",
+                    prompt: "Your replay update is saved."
+                )
+                return
             }
 
             statusMessage = envelope.blocked
@@ -1019,13 +1143,17 @@ final class PracticeSessionViewModel: ObservableObject {
                 )
             }
 
-            await resumeNarration(
-                using: .replayCurrentSceneWithRevisedFuture(
+            let resumeDecision: NarrationResumeDecision
+            if case .repeatEpisode = launchPlan.mode, revisedFromSceneIndex == 0 {
+                resumeDecision = .replayCurrentScene(sceneIndex: sceneIndex)
+            } else {
+                resumeDecision = .replayCurrentSceneWithRevisedFuture(
                     sceneIndex: sceneIndex,
-                    revisedFutureStartIndex: expectedRevisionStartIndex
-                ),
-                intent: .reviseFutureScenes
-            )
+                    revisedFutureStartIndex: revisedFromSceneIndex
+                )
+            }
+
+            await resumeNarration(using: resumeDecision, intent: .reviseFutureScenes)
         }
     }
 
@@ -1401,6 +1529,11 @@ final class PracticeSessionViewModel: ObservableObject {
                 logInvalidTransition(event: source.eventName, state: sessionState)
                 return
             }
+        case .replayAfterCompletion:
+            guard case .completed = sessionState, startIndex == 0 else {
+                logInvalidTransition(event: source.eventName, state: sessionState)
+                return
+            }
         case .generationResolved:
             guard case .generating = sessionState, startIndex == 0 else {
                 logInvalidTransition(event: source.eventName, state: sessionState)
@@ -1421,11 +1554,33 @@ final class PracticeSessionViewModel: ObservableObject {
                 guard case .revising(let activeSceneIndex, _) = sessionState,
                       activeSceneIndex == decision.sceneIndex,
                       startIndex == decision.sceneIndex,
-                      interruptionRouteDecision?.intent == .reviseFutureScenes,
-                      case .replayCurrentSceneWithRevisedFuture(
-                        sceneIndex: activeSceneIndex,
-                        revisedFutureStartIndex: activeSceneIndex + 1
-                      ) = decision else {
+                      interruptionRouteDecision?.intent == .reviseFutureScenes else {
+                    logInvalidTransition(event: source.eventName, state: sessionState)
+                    return
+                }
+
+                switch decision {
+                case .replayCurrentSceneWithRevisedFuture(
+                    sceneIndex: activeSceneIndex,
+                    revisedFutureStartIndex: let revisedFutureStartIndex
+                ):
+                    guard isAcceptedRevisionStartIndex(
+                        revisedFutureStartIndex,
+                        expected: activeSceneIndex + 1,
+                        sceneIndex: activeSceneIndex
+                    ) else {
+                        logInvalidTransition(event: source.eventName, state: sessionState)
+                        return
+                    }
+                case .replayCurrentScene(sceneIndex: activeSceneIndex):
+                    guard case .repeatEpisode = launchPlan.mode else {
+                        logInvalidTransition(event: source.eventName, state: sessionState)
+                        return
+                    }
+                case .continueToNextScene:
+                    logInvalidTransition(event: source.eventName, state: sessionState)
+                    return
+                default:
                     logInvalidTransition(event: source.eventName, state: sessionState)
                     return
                 }
@@ -1542,7 +1697,7 @@ final class PracticeSessionViewModel: ObservableObject {
         interruptionRouteDecision = decision
 
         switch decision.intent {
-        case .reviseFutureScenes where decision.canApplyImmediately:
+        case .reviseFutureScenes where decision.canApplyImmediately || canRewriteRepeatEpisodeWithoutFutureScenes(at: sceneIndex):
             startRevisionRequest(userUpdate: decision.transcript, sceneIndex: sceneIndex)
 
         case .answerOnly:
@@ -1559,6 +1714,18 @@ final class PracticeSessionViewModel: ObservableObject {
             statusMessage = "No future scenes left to change"
             aiPrompt = "Revision request captured with no future scenes available"
         }
+    }
+
+    private func canRewriteRepeatEpisodeWithoutFutureScenes(at sceneIndex: Int) -> Bool {
+        guard case .repeatEpisode = launchPlan.mode else {
+            return false
+        }
+
+        guard let currentStory = generatedStory else {
+            return false
+        }
+
+        return currentStory.authoritativeSceneState(at: sceneIndex)?.revisionBoundary == nil
     }
 
     private func startAnswerOnlyResponse(_ decision: InterruptionIntentRouteDecision, sceneIndex: Int) {
@@ -1669,14 +1836,14 @@ final class PracticeSessionViewModel: ObservableObject {
             return
         }
 
-        guard let revisionBoundary = currentStory.authoritativeSceneState(at: sceneIndex)?.revisionBoundary else {
+        guard let request = revisionRequest(for: currentStory, sceneIndex: sceneIndex, userUpdate: cleanUpdate) else {
             activeSpeaker = .idle
             statusMessage = "No future scenes left to change"
             aiPrompt = "Revision request captured with no future scenes available"
             return
         }
 
-        submitRevisionRequest(cleanUpdate, sceneIndex: sceneIndex, revisionBoundary: revisionBoundary)
+        submitRevisionRequest(sceneIndex: sceneIndex, request: request)
     }
 
     private func queueRevisionUpdate(_ userUpdate: String, sceneIndex: Int) {
@@ -1694,11 +1861,7 @@ final class PracticeSessionViewModel: ObservableObject {
         statusMessage = "Finishing the current story update"
     }
 
-    private func submitRevisionRequest(
-        _ userUpdate: String,
-        sceneIndex: Int,
-        revisionBoundary: StoryRevisionBoundary
-    ) {
+    private func submitRevisionRequest(sceneIndex: Int, request: ReviseStoryRequest) {
         clearAppError()
         let requestID = nextOperationID()
         activeRevisionRequestID = requestID
@@ -1706,8 +1869,6 @@ final class PracticeSessionViewModel: ObservableObject {
         activeSpeaker = .child
         statusMessage = "Updating what happens next"
         aiPrompt = "Got it. I'll update what happens next with your new idea."
-
-        let request = revisionBoundary.makeRequest(userUpdate: userUpdate)
 
         Task { [weak self] in
             guard let self else { return }
@@ -1719,6 +1880,46 @@ final class PracticeSessionViewModel: ObservableObject {
             }
             await self.process(.revisionResolved(requestID: requestID, sceneIndex: sceneIndex, result))
         }
+    }
+
+    private func revisionRequest(
+        for story: StoryData,
+        sceneIndex: Int,
+        userUpdate: String
+    ) -> ReviseStoryRequest? {
+        if let revisionBoundary = story.authoritativeSceneState(at: sceneIndex)?.revisionBoundary {
+            return revisionBoundary.makeRequest(userUpdate: userUpdate)
+        }
+
+        guard case .repeatEpisode = launchPlan.mode else {
+            return nil
+        }
+
+        return ReviseStoryRequest(
+            storyId: story.storyId,
+            currentSceneIndex: 0,
+            storyTitle: story.title,
+            userUpdate: userUpdate,
+            completedScenes: [],
+            remainingScenes: story.scenes
+        )
+    }
+
+    private func requestedRevisionStartIndex(for story: StoryData, sceneIndex: Int) -> Int {
+        if case .repeatEpisode = launchPlan.mode,
+           story.authoritativeSceneState(at: sceneIndex)?.revisionBoundary == nil {
+            return 0
+        }
+
+        return sceneIndex + 1
+    }
+
+    private func isAcceptedRevisionStartIndex(_ actual: Int, expected: Int, sceneIndex: Int) -> Bool {
+        if actual == sceneIndex {
+            return true
+        }
+
+        return actual >= expected
     }
 
     private func completeSession(

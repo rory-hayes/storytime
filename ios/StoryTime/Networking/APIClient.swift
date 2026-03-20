@@ -31,11 +31,69 @@ private struct SessionIdentityEnvelope: Decodable {
 private struct BackendHealthEnvelope: Decodable {
     let defaultRegion: StoryTimeRegion?
     let allowedRegions: [StoryTimeRegion]?
+    let telemetry: BackendAnalyticsReport?
 
     private enum CodingKeys: String, CodingKey {
         case defaultRegion = "default_region"
         case allowedRegions = "allowed_regions"
+        case telemetry
     }
+}
+
+struct BackendAnalyticsStageSummary: Codable, Equatable {
+    let callCount: Int
+    let durationMs: Int
+    let successCount: Int
+    let failureCount: Int
+
+    private enum CodingKeys: String, CodingKey {
+        case callCount = "call_count"
+        case durationMs = "duration_ms"
+        case successCount = "success_count"
+        case failureCount = "failure_count"
+    }
+}
+
+struct BackendAnalyticsSessionSummary: Codable, Equatable {
+    let requestCount: Int
+    let requestDurationMs: Int
+    let openAICallCount: Int
+    let openAIDurationMs: Int
+    let openAISuccessCount: Int
+    let openAIFailureCount: Int
+    let routes: [String: Int]
+    let runtimeStageGroups: [String: BackendAnalyticsStageSummary]
+    let launchEvents: [String: Int]
+    let lastEntitlementTier: String?
+    let remainingStoryStarts: Int?
+    let remainingContinuations: Int?
+
+    private enum CodingKeys: String, CodingKey {
+        case requestCount = "request_count"
+        case requestDurationMs = "request_duration_ms"
+        case openAICallCount = "openai_call_count"
+        case openAIDurationMs = "openai_duration_ms"
+        case openAISuccessCount = "openai_success_count"
+        case openAIFailureCount = "openai_failure_count"
+        case routes
+        case runtimeStageGroups = "runtime_stage_groups"
+        case launchEvents = "launch_events"
+        case lastEntitlementTier = "last_entitlement_tier"
+        case remainingStoryStarts = "remaining_story_starts"
+        case remainingContinuations = "remaining_continuations"
+    }
+}
+
+struct BackendAnalyticsReport: Codable, Equatable {
+    let counters: [String: Int]
+    let sessions: [String: BackendAnalyticsSessionSummary]
+}
+
+struct LaunchTelemetryJoinedReport: Codable, Equatable {
+    let defaultRegion: StoryTimeRegion?
+    let allowedRegions: [StoryTimeRegion]?
+    let backend: BackendAnalyticsReport?
+    let client: ClientLaunchTelemetryReport
 }
 
 struct EntitlementBootstrapEnvelope: Codable, Equatable {
@@ -273,6 +331,23 @@ struct EntitlementPreflightResponse: Codable, Equatable {
     let blockReason: EntitlementPreflightBlockReason?
     let recommendedUpgradeSurface: EntitlementUpgradeSurface?
     let snapshot: EntitlementSnapshot
+    let entitlements: EntitlementBootstrapEnvelope?
+
+    init(
+        action: EntitlementPreflightAction,
+        allowed: Bool,
+        blockReason: EntitlementPreflightBlockReason?,
+        recommendedUpgradeSurface: EntitlementUpgradeSurface?,
+        snapshot: EntitlementSnapshot,
+        entitlements: EntitlementBootstrapEnvelope? = nil
+    ) {
+        self.action = action
+        self.allowed = allowed
+        self.blockReason = blockReason
+        self.recommendedUpgradeSurface = recommendedUpgradeSurface
+        self.snapshot = snapshot
+        self.entitlements = entitlements
+    }
 
     private enum CodingKeys: String, CodingKey {
         case action
@@ -280,6 +355,7 @@ struct EntitlementPreflightResponse: Codable, Equatable {
         case blockReason = "block_reason"
         case recommendedUpgradeSurface = "recommended_upgrade_surface"
         case snapshot
+        case entitlements
     }
 }
 
@@ -437,6 +513,393 @@ extension APIClientTraceOperation {
     }
 }
 
+enum ClientLaunchTelemetryEventName: String, Codable, Equatable {
+    case entitlementSync = "entitlement_sync"
+    case entitlementPreflight = "entitlement_preflight"
+    case blockedReviewPresented = "blocked_review_presented"
+    case parentPlanPresented = "parent_plan_presented"
+    case parentPlanRefresh = "parent_plan_refresh"
+    case restorePurchases = "restore_purchases"
+}
+
+enum ClientLaunchTelemetryOutcome: String, Codable, Equatable {
+    case started
+    case completed
+    case failed
+    case allowed
+    case blocked
+    case presented
+}
+
+struct ClientLaunchTelemetryEvent: Codable, Equatable {
+    let name: ClientLaunchTelemetryEventName
+    let outcome: ClientLaunchTelemetryOutcome
+    let sessionId: String?
+    let requestId: String?
+    let refreshReason: EntitlementRefreshReason?
+    let action: EntitlementPreflightAction?
+    let blockReason: EntitlementPreflightBlockReason?
+    let surface: EntitlementUpgradeSurface?
+    let entitlementTier: EntitlementTier?
+    let remainingStoryStarts: Int?
+    let remainingContinuations: Int?
+}
+
+struct ClientLaunchTelemetrySessionSummary: Codable, Equatable {
+    let launchEvents: [String: Int]
+    let lastEntitlementTier: EntitlementTier?
+    let remainingStoryStarts: Int?
+    let remainingContinuations: Int?
+}
+
+struct ClientLaunchTelemetryReport: Codable, Equatable {
+    let counters: [String: Int]
+    let sessions: [String: ClientLaunchTelemetrySessionSummary]
+    let events: [ClientLaunchTelemetryEvent]
+}
+
+final class ClientLaunchTelemetry {
+    static let shared = ClientLaunchTelemetry()
+
+    private let lock = NSLock()
+    private let storageKey = "com.storytime.client-launch-telemetry.v1"
+    private var counters: [String: Int] = [:]
+    private var events: [ClientLaunchTelemetryEvent] = []
+    private var sessionSummaries: [String: MutableSessionSummary] = [:]
+    private var userDefaults: UserDefaults
+
+    private init(userDefaults: UserDefaults = .standard) {
+        self.userDefaults = userDefaults
+        loadPersistedStateLocked()
+    }
+
+    static func reset() {
+        shared.resetLocked()
+    }
+
+    static func report() -> ClientLaunchTelemetryReport {
+        shared.reportLocked()
+    }
+
+    static func replacePersistentStoreForTesting(userDefaults: UserDefaults) {
+        shared.replacePersistentStoreLocked(userDefaults)
+    }
+
+    static func reloadPersistedStateForTesting() {
+        shared.reloadPersistedStateLocked()
+    }
+
+    static func recordEntitlementSync(
+        refreshReason: EntitlementRefreshReason,
+        snapshot: EntitlementSnapshot,
+        requestId: String?
+    ) {
+        shared.record(
+            ClientLaunchTelemetryEvent(
+                name: .entitlementSync,
+                outcome: .completed,
+                sessionId: AppSession.currentSessionId,
+                requestId: requestId,
+                refreshReason: refreshReason,
+                action: nil,
+                blockReason: nil,
+                surface: nil,
+                entitlementTier: snapshot.tier,
+                remainingStoryStarts: snapshot.remainingStoryStarts,
+                remainingContinuations: snapshot.remainingContinuations
+            )
+        )
+    }
+
+    static func recordEntitlementSyncFailure(
+        refreshReason: EntitlementRefreshReason,
+        requestId: String?
+    ) {
+        shared.record(
+            ClientLaunchTelemetryEvent(
+                name: .entitlementSync,
+                outcome: .failed,
+                sessionId: AppSession.currentSessionId,
+                requestId: requestId,
+                refreshReason: refreshReason,
+                action: nil,
+                blockReason: nil,
+                surface: nil,
+                entitlementTier: nil,
+                remainingStoryStarts: nil,
+                remainingContinuations: nil
+            )
+        )
+    }
+
+    static func recordEntitlementPreflight(
+        response: EntitlementPreflightResponse,
+        requestId: String?
+    ) {
+        shared.record(
+            ClientLaunchTelemetryEvent(
+                name: .entitlementPreflight,
+                outcome: response.allowed ? .allowed : .blocked,
+                sessionId: AppSession.currentSessionId,
+                requestId: requestId,
+                refreshReason: nil,
+                action: response.action,
+                blockReason: response.blockReason,
+                surface: response.recommendedUpgradeSurface,
+                entitlementTier: response.snapshot.tier,
+                remainingStoryStarts: response.snapshot.remainingStoryStarts,
+                remainingContinuations: response.snapshot.remainingContinuations
+            )
+        )
+    }
+
+    static func recordEntitlementPreflightFailure(
+        action: EntitlementPreflightAction,
+        requestId: String?
+    ) {
+        shared.record(
+            ClientLaunchTelemetryEvent(
+                name: .entitlementPreflight,
+                outcome: .failed,
+                sessionId: AppSession.currentSessionId,
+                requestId: requestId,
+                refreshReason: nil,
+                action: action,
+                blockReason: nil,
+                surface: nil,
+                entitlementTier: nil,
+                remainingStoryStarts: nil,
+                remainingContinuations: nil
+            )
+        )
+    }
+
+    static func recordBlockedReviewPresented(
+        surface: EntitlementUpgradeSurface,
+        response: EntitlementPreflightResponse
+    ) {
+        shared.record(
+            ClientLaunchTelemetryEvent(
+                name: .blockedReviewPresented,
+                outcome: .presented,
+                sessionId: AppSession.currentSessionId,
+                requestId: nil,
+                refreshReason: nil,
+                action: response.action,
+                blockReason: response.blockReason,
+                surface: surface,
+                entitlementTier: response.snapshot.tier,
+                remainingStoryStarts: response.snapshot.remainingStoryStarts,
+                remainingContinuations: response.snapshot.remainingContinuations
+            )
+        )
+    }
+
+    static func recordParentPlanPresented(snapshot: EntitlementSnapshot?) {
+        shared.record(
+            event(
+                name: .parentPlanPresented,
+                outcome: .presented,
+                surface: .parentTrustCenter,
+                snapshot: snapshot
+            )
+        )
+    }
+
+    static func recordParentPlanRefresh(
+        outcome: ClientLaunchTelemetryOutcome,
+        snapshot: EntitlementSnapshot?
+    ) {
+        shared.record(
+            event(
+                name: .parentPlanRefresh,
+                outcome: outcome,
+                surface: .parentTrustCenter,
+                snapshot: snapshot
+            )
+        )
+    }
+
+    static func recordRestorePurchases(
+        outcome: ClientLaunchTelemetryOutcome,
+        snapshot: EntitlementSnapshot?
+    ) {
+        shared.record(
+            event(
+                name: .restorePurchases,
+                outcome: outcome,
+                refreshReason: .restore,
+                surface: .parentTrustCenter,
+                snapshot: snapshot
+            )
+        )
+    }
+
+    private static func event(
+        name: ClientLaunchTelemetryEventName,
+        outcome: ClientLaunchTelemetryOutcome,
+        refreshReason: EntitlementRefreshReason? = nil,
+        surface: EntitlementUpgradeSurface? = nil,
+        snapshot: EntitlementSnapshot?
+    ) -> ClientLaunchTelemetryEvent {
+        ClientLaunchTelemetryEvent(
+            name: name,
+            outcome: outcome,
+            sessionId: AppSession.currentSessionId,
+            requestId: nil,
+            refreshReason: refreshReason,
+            action: nil,
+            blockReason: nil,
+            surface: surface,
+            entitlementTier: snapshot?.tier,
+            remainingStoryStarts: snapshot?.remainingStoryStarts,
+            remainingContinuations: snapshot?.remainingContinuations
+        )
+    }
+
+    private func record(_ event: ClientLaunchTelemetryEvent) {
+        lock.lock()
+        defer { lock.unlock() }
+
+        events.append(event)
+        incrementCounter(&counters, key: "launch:\(event.name.rawValue):\(event.outcome.rawValue)")
+        if let action = event.action {
+            incrementCounter(&counters, key: "launch_action:\(action.rawValue):\(event.outcome.rawValue)")
+        }
+        if let blockReason = event.blockReason {
+            incrementCounter(&counters, key: "launch_block:\(blockReason.rawValue)")
+        }
+        if let refreshReason = event.refreshReason {
+            incrementCounter(&counters, key: "launch_refresh:\(refreshReason.rawValue):\(event.outcome.rawValue)")
+        }
+        if let surface = event.surface {
+            incrementCounter(&counters, key: "launch_surface:\(surface.rawValue):\(event.outcome.rawValue)")
+        }
+
+        guard let sessionId = event.sessionId else {
+            persistLocked()
+            return
+        }
+        var summary = sessionSummaries[sessionId] ?? MutableSessionSummary()
+        summary.increment("launch:\(event.name.rawValue):\(event.outcome.rawValue)")
+        if let action = event.action {
+            summary.increment("action:\(action.rawValue):\(event.outcome.rawValue)")
+        }
+        if let blockReason = event.blockReason {
+            summary.increment("block:\(blockReason.rawValue)")
+        }
+        if let refreshReason = event.refreshReason {
+            summary.increment("refresh:\(refreshReason.rawValue):\(event.outcome.rawValue)")
+        }
+        if let surface = event.surface {
+            summary.increment("surface:\(surface.rawValue):\(event.outcome.rawValue)")
+        }
+        if let entitlementTier = event.entitlementTier {
+            summary.lastEntitlementTier = entitlementTier
+        }
+        summary.remainingStoryStarts = event.remainingStoryStarts
+        summary.remainingContinuations = event.remainingContinuations
+        sessionSummaries[sessionId] = summary
+        persistLocked()
+    }
+
+    private func reportLocked() -> ClientLaunchTelemetryReport {
+        lock.lock()
+        defer { lock.unlock() }
+
+        return reportUnlocked()
+    }
+
+    private func reportUnlocked() -> ClientLaunchTelemetryReport {
+        ClientLaunchTelemetryReport(
+            counters: counters,
+            sessions: Dictionary(
+                uniqueKeysWithValues: sessionSummaries.map { key, value in
+                    (
+                        key,
+                        ClientLaunchTelemetrySessionSummary(
+                            launchEvents: value.launchEvents,
+                            lastEntitlementTier: value.lastEntitlementTier,
+                            remainingStoryStarts: value.remainingStoryStarts,
+                            remainingContinuations: value.remainingContinuations
+                        )
+                    )
+                }
+            ),
+            events: events
+        )
+    }
+
+    private func replacePersistentStoreLocked(_ userDefaults: UserDefaults) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.userDefaults = userDefaults
+        loadPersistedStateLocked()
+    }
+
+    private func reloadPersistedStateLocked() {
+        lock.lock()
+        defer { lock.unlock() }
+        loadPersistedStateLocked()
+    }
+
+    private func loadPersistedStateLocked() {
+        counters.removeAll()
+        events.removeAll()
+        sessionSummaries.removeAll()
+
+        guard let data = userDefaults.data(forKey: storageKey),
+              let report = try? JSONDecoder().decode(ClientLaunchTelemetryReport.self, from: data) else {
+            return
+        }
+
+        counters = report.counters
+        events = report.events
+        sessionSummaries = Dictionary(
+            uniqueKeysWithValues: report.sessions.map { key, value in
+                (
+                    key,
+                    MutableSessionSummary(
+                        launchEvents: value.launchEvents,
+                        lastEntitlementTier: value.lastEntitlementTier,
+                        remainingStoryStarts: value.remainingStoryStarts,
+                        remainingContinuations: value.remainingContinuations
+                    )
+                )
+            }
+        )
+    }
+
+    private func persistLocked() {
+        guard let data = try? JSONEncoder().encode(reportUnlocked()) else { return }
+        userDefaults.set(data, forKey: storageKey)
+    }
+
+    private func resetLocked() {
+        lock.lock()
+        defer { lock.unlock() }
+        counters.removeAll()
+        events.removeAll()
+        sessionSummaries.removeAll()
+        userDefaults.removeObject(forKey: storageKey)
+    }
+
+    private struct MutableSessionSummary {
+        var launchEvents: [String: Int] = [:]
+        var lastEntitlementTier: EntitlementTier?
+        var remainingStoryStarts: Int?
+        var remainingContinuations: Int?
+
+        mutating func increment(_ key: String) {
+            launchEvents[key] = (launchEvents[key] ?? 0) + 1
+        }
+    }
+}
+
+private func incrementCounter(_ counters: inout [String: Int], key: String) {
+    counters[key] = (counters[key] ?? 0) + 1
+}
+
 enum APIClientTracePhase: String, Equatable {
     case started
     case completed
@@ -486,6 +949,7 @@ protocol APIClienting: AnyObject {
     var resolvedRegion: StoryTimeRegion? { get }
     func prepareConnection() async throws -> URL
     func bootstrapSessionIdentity(baseURL: URL) async throws
+    func fetchLaunchTelemetryReport() async throws -> LaunchTelemetryJoinedReport
     func syncEntitlements(request body: EntitlementSyncRequest) async throws -> EntitlementBootstrapEnvelope
     func preflightEntitlements(request body: EntitlementPreflightRequest) async throws -> EntitlementPreflightResponse
     func fetchVoices() async throws -> [String]
@@ -530,6 +994,28 @@ final class APIClient: APIClienting {
         try await ensureSessionIdentity(baseURL: baseURL)
     }
 
+    func fetchLaunchTelemetryReport() async throws -> LaunchTelemetryJoinedReport {
+        try await withAvailableBaseURL { [self] baseURL in
+            let endpoint = baseURL.appending(path: "health")
+            var request = URLRequest(url: endpoint)
+            request.timeoutInterval = 8
+            request.httpMethod = "GET"
+            self.applyInstallHeaders(to: &request)
+
+            let (data, response) = try await self.perform(request, operation: .healthCheck)
+            try self.validate(response: response, data: data)
+            let envelope = try JSONDecoder().decode(BackendHealthEnvelope.self, from: data)
+            self.storeResolvedRegion(from: envelope)
+
+            return LaunchTelemetryJoinedReport(
+                defaultRegion: envelope.defaultRegion,
+                allowedRegions: envelope.allowedRegions,
+                backend: envelope.telemetry,
+                client: ClientLaunchTelemetry.report()
+            )
+        }
+    }
+
     func syncEntitlements(request body: EntitlementSyncRequest) async throws -> EntitlementBootstrapEnvelope {
         try await withAvailableBaseURL { [self] baseURL in
             try await withAuthenticatedSession(baseURL: baseURL) {
@@ -541,11 +1027,24 @@ final class APIClient: APIClienting {
                 request.timeoutInterval = 20
                 self.applyInstallHeaders(to: &request)
 
-                let (data, response) = try await self.perform(request, operation: .entitlementPreflight)
-                try self.validate(response: response, data: data)
-                let envelope = try JSONDecoder().decode(EntitlementSyncEnvelope.self, from: data).entitlements
-                AppEntitlements.store(envelope: envelope)
-                return envelope
+                do {
+                    let (data, response) = try await self.perform(request, operation: .entitlementSync)
+                    try self.validate(response: response, data: data)
+                    let envelope = try JSONDecoder().decode(EntitlementSyncEnvelope.self, from: data).entitlements
+                    AppEntitlements.store(envelope: envelope)
+                    ClientLaunchTelemetry.recordEntitlementSync(
+                        refreshReason: body.refreshReason,
+                        snapshot: envelope.snapshot,
+                        requestId: self.launchTelemetryRequestID(from: response, request: request)
+                    )
+                    return envelope
+                } catch {
+                    ClientLaunchTelemetry.recordEntitlementSyncFailure(
+                        refreshReason: body.refreshReason,
+                        requestId: self.launchTelemetryRequestID(from: nil, request: request, error: error)
+                    )
+                    throw error
+                }
             }
         }
     }
@@ -562,9 +1061,25 @@ final class APIClient: APIClienting {
                 self.applyInstallHeaders(to: &request)
                 self.applyEntitlementHeader(to: &request)
 
-                let (data, response) = try await self.perform(request, operation: .entitlementSync)
-                try self.validate(response: response, data: data)
-                return try JSONDecoder().decode(EntitlementPreflightResponse.self, from: data)
+                do {
+                    let (data, response) = try await self.perform(request, operation: .entitlementPreflight)
+                    try self.validate(response: response, data: data)
+                    let decoded = try JSONDecoder().decode(EntitlementPreflightResponse.self, from: data)
+                    if let envelope = decoded.entitlements {
+                        AppEntitlements.store(envelope: envelope)
+                    }
+                    ClientLaunchTelemetry.recordEntitlementPreflight(
+                        response: decoded,
+                        requestId: self.launchTelemetryRequestID(from: response, request: request)
+                    )
+                    return decoded
+                } catch {
+                    ClientLaunchTelemetry.recordEntitlementPreflightFailure(
+                        action: body.action,
+                        requestId: self.launchTelemetryRequestID(from: nil, request: request, error: error)
+                    )
+                    throw error
+                }
             }
         }
     }
@@ -988,6 +1503,26 @@ final class APIClient: APIClienting {
 
     private func emitTrace(_ event: APIClientTraceEvent) {
         traceHandler?(event)
+    }
+
+    private func launchTelemetryRequestID(
+        from response: HTTPURLResponse?,
+        request: URLRequest,
+        error: Error? = nil
+    ) -> String? {
+        if let apiError = error as? APIError, let requestId = apiError.requestId, !requestId.isEmpty {
+            return requestId
+        }
+
+        if let responseRequestID = response?.value(forHTTPHeaderField: "x-request-id"), !responseRequestID.isEmpty {
+            return responseRequestID
+        }
+
+        if let requestRequestID = request.value(forHTTPHeaderField: "x-request-id"), !requestRequestID.isEmpty {
+            return requestRequestID
+        }
+
+        return nil
     }
 }
 

@@ -59,7 +59,8 @@ struct NewStoryJourneyView: View {
             VoiceSessionView(
                 plan: launchPlan,
                 sourceSeries: selectedSeries,
-                store: store
+                store: store,
+                onReturnToLibrary: { dismiss() }
             )
         }
         .sheet(item: $parentUpgradeSheet) { destination in
@@ -762,6 +763,7 @@ private enum JourneyParentUpgradeSheet: String, Identifiable {
 }
 
 private struct JourneyLaunchBlockPresentation {
+    let response: EntitlementPreflightResponse
     let title: String
     let summary: String
     let footnote: String
@@ -773,12 +775,11 @@ private struct JourneyLaunchBlockPresentation {
         childName: String?,
         seriesTitle: String?
     ) {
+        self.response = response
         let childName = childName ?? "this child"
         let seriesTitle = seriesTitle ?? "this saved story"
         self.planTitle = response.snapshot.tier == .plus ? "Plus" : "Starter"
-        self.planSummary = response.snapshot.tier == .plus
-            ? "Plus expands child profiles and remote story starts while keeping parent controls, privacy settings, and replay of saved stories on this device."
-            : "Starter keeps parent controls, privacy settings, and replay of saved stories already on this device."
+        self.planSummary = Self.planAllowanceSummary(for: response.snapshot)
 
         switch response.blockReason ?? .newStoryNotAllowed {
         case .childProfileLimit:
@@ -798,6 +799,26 @@ private struct JourneyLaunchBlockPresentation {
             summary = "Ask a parent to review plan options before continuing \(seriesTitle)."
             footnote = "Replay of saved stories stays available on this device."
         }
+    }
+
+    private static func planAllowanceSummary(for snapshot: EntitlementSnapshot) -> String {
+        let planName = snapshot.tier == .plus ? "Plus" : "Starter"
+        let profileLabel = snapshot.maxChildProfiles == 1 ? "child profile" : "child profiles"
+        return "\(planName) currently allows up to \(snapshot.maxChildProfiles) \(profileLabel), \(allowanceSummary(for: snapshot.remainingStoryStarts, singular: "new story start", plural: "new story starts", available: snapshot.canStartNewStories)), and \(allowanceSummary(for: snapshot.remainingContinuations, singular: "saved-series continuation", plural: "saved-series continuations", available: snapshot.canContinueSavedSeries)) in the current window."
+    }
+
+    private static func allowanceSummary(
+        for remaining: Int?,
+        singular: String,
+        plural: String,
+        available: Bool
+    ) -> String {
+        if let remaining {
+            let label = remaining == 1 ? singular : plural
+            return "\(remaining) \(label)"
+        }
+
+        return available ? plural : "no \(plural)"
     }
 }
 
@@ -847,7 +868,7 @@ private struct JourneyUpgradeReviewView: View {
                 }
                 .accessibilityIdentifier("journeyUpgradeReviewParentControlsButton")
 
-                Text("Purchases and restore stay in parent-managed surfaces. The live child story does not show upgrade UI.")
+                Text("Current plan review, upgrades, and restore stay in Parent Controls. The live child story does not show upgrade UI.")
                     .font(.system(size: 13, weight: .medium, design: .rounded))
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("journeyUpgradeReviewNextStepsSummary")
@@ -862,6 +883,12 @@ private struct JourneyUpgradeReviewView: View {
                     dismiss()
                 }
             }
+        }
+        .onAppear {
+            ClientLaunchTelemetry.recordBlockedReviewPresented(
+                surface: .newStoryJourney,
+                response: presentation.response
+            )
         }
     }
 }

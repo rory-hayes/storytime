@@ -1,6 +1,8 @@
 import CoreData
 import Foundation
 
+private let storyLibraryDefaultMaxChildProfiles = 3
+
 struct StoryLibraryV2Snapshot: Codable, Equatable {
     var migrationVersion: Int
     var series: [StorySeries]
@@ -939,7 +941,11 @@ final class StoryLibraryStore: ObservableObject {
     }
 
     var canAddMoreProfiles: Bool {
-        childProfiles.count < 3
+        canAddMoreProfiles(maxProfiles: storyLibraryDefaultMaxChildProfiles)
+    }
+
+    func canAddMoreProfiles(maxProfiles: Int) -> Bool {
+        childProfiles.count < max(1, maxProfiles)
     }
 
     var visibleSeries: [StorySeries] {
@@ -977,8 +983,14 @@ final class StoryLibraryStore: ObservableObject {
         persistStore()
     }
 
-    func addChildProfile(name: String, age: Int, sensitivity: ContentSensitivity, preferredMode: StoryExperienceMode) {
-        guard canAddMoreProfiles else { return }
+    func addChildProfile(
+        name: String,
+        age: Int,
+        sensitivity: ContentSensitivity,
+        preferredMode: StoryExperienceMode,
+        maxProfiles: Int = storyLibraryDefaultMaxChildProfiles
+    ) {
+        guard canAddMoreProfiles(maxProfiles: maxProfiles) else { return }
 
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let resolvedName = trimmedName.isEmpty ? "Story Explorer" : trimmedName

@@ -162,3 +162,40 @@ This was a design-direction pass grounded in active code paths, existing automat
 Reason:
 - The completion loop is now defined.
 - The next remaining milestone in this phase should tighten parent-facing trust, privacy, and value communication across the surfaces that now carry more product and monetization framing.
+
+---
+
+## 2026-03-11 Implementation Addendum For M9.6
+
+This document started as the M8.7 design-direction pass. `M9.6` has now implemented the approved completion loop in the active app.
+
+### Shipped behavior
+
+- VERIFIED BY CODE INSPECTION: `VoiceSessionView` now shows an explicit completion acknowledgement card once `PracticeSessionViewModel` reaches `.completed` with a generated story.
+- VERIFIED BY CODE INSPECTION: the completion action order in the live product now matches the approved hierarchy:
+  1. `Replay this story`
+  2. `Start a new episode`
+  3. `Back to saved stories` or `Back to Home`
+- VERIFIED BY CODE INSPECTION: replay stays inside the finished session and calls `PracticeSessionViewModel.replayCompletedStory()` so narration restarts from scene 1 without changing save semantics.
+- VERIFIED BY CODE INSPECTION: continuation leaves the finished-session acknowledgement and routes back into the saved-series continuation surface (`StorySeriesDetailView`) instead of opening upgrade or purchase UI inside the child session.
+- VERIFIED BY CODE INSPECTION: the return action follows the existing navigation context. Replay sessions launched from saved-series detail return to that saved-story surface; flows without a saved series use the home-oriented return copy.
+- VERIFIED BY CODE INSPECTION: the completion card includes the trust note that raw audio was not saved and keeps parent-managed controls outside the finished story.
+
+### Evidence
+
+Primary code inspected:
+- `ios/StoryTime/Features/Voice/VoiceSessionView.swift`
+- `ios/StoryTime/Features/Story/PracticeSessionViewModel.swift`
+- `ios/StoryTime/Features/Story/NewStoryJourneyView.swift`
+- `ios/StoryTime/Features/Story/StorySeriesDetailView.swift`
+
+Primary automated evidence:
+- VERIFIED BY TEST: `PracticeSessionViewModelTests.testReplayCompletedStoryRestartsNarrationFromTheBeginning`
+- VERIFIED BY TEST: `StoryTimeUITests.testVoiceSessionShowsCompletionLoopAfterStoryFinishes`
+- VERIFIED BY TEST: `StoryTimeUITests.testVoiceSessionCompletionReplayRestartsNarration`
+- VERIFIED BY TEST: `StoryTimeUITests.testVoiceSessionCompletionContinueActionReturnsToSeriesDetail`
+- VERIFIED BY TEST: `StoryTimeUITests.testVoiceSessionCompletionLibraryActionReturnsToSavedStoriesSurface`
+
+### Narrowing note
+
+- PARTIALLY VERIFIED: the original M8.7 wording allowed a generic "saved stories or home" return path. The implemented behavior narrows that to "return through the current navigation context" so saved-series replay returns to the saved-series detail surface instead of forcibly popping to `HomeView`. This keeps the loop deterministic and preserves the saved-story context the child started from.

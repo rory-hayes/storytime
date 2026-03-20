@@ -5,6 +5,8 @@ final class APIClientTests: XCTestCase {
     override func setUp() {
         super.setUp()
         URLProtocolStub.reset()
+        ClientLaunchTelemetry.replacePersistentStoreForTesting(userDefaults: .standard)
+        ClientLaunchTelemetry.reset()
         let defaults = UserDefaults.standard
         defaults.removeObject(forKey: "com.storytime.session-token")
         defaults.removeObject(forKey: "com.storytime.session-expiry")
@@ -15,6 +17,8 @@ final class APIClientTests: XCTestCase {
 
     override func tearDown() {
         URLProtocolStub.reset()
+        ClientLaunchTelemetry.replacePersistentStoreForTesting(userDefaults: .standard)
+        ClientLaunchTelemetry.reset()
         let defaults = UserDefaults.standard
         defaults.removeObject(forKey: "com.storytime.session-token")
         defaults.removeObject(forKey: "com.storytime.session-expiry")
@@ -116,26 +120,26 @@ final class APIClientTests: XCTestCase {
                     "session_id": "session-entitlements-1",
                     "region": "US",
                     "entitlements": [
-                        "snapshot": [
-                            "tier": "starter",
-                            "source": "none",
-                            "max_child_profiles": 1,
-                            "max_story_starts_per_period": NSNull(),
-                            "max_continuations_per_period": NSNull(),
-                            "max_story_length_minutes": NSNull(),
-                            "can_replay_saved_stories": true,
-                            "can_start_new_stories": true,
-                            "can_continue_saved_series": true,
-                            "effective_at": effectiveAt,
-                            "expires_at": expiresAt,
-                            "usage_window": [
-                                "kind": "rolling_period",
-                                "duration_seconds": NSNull(),
-                                "resets_at": NSNull()
+                            "snapshot": [
+                                "tier": "starter",
+                                "source": "none",
+                                "max_child_profiles": 1,
+                                "max_story_starts_per_period": 3,
+                                "max_continuations_per_period": 3,
+                                "max_story_length_minutes": 10,
+                                "can_replay_saved_stories": true,
+                                "can_start_new_stories": true,
+                                "can_continue_saved_series": true,
+                                "effective_at": effectiveAt,
+                                "expires_at": expiresAt,
+                                "usage_window": [
+                                    "kind": "rolling_period",
+                                    "duration_seconds": 604800,
+                                    "resets_at": NSNull()
+                                ],
+                                "remaining_story_starts": 3,
+                                "remaining_continuations": 3
                             ],
-                            "remaining_story_starts": NSNull(),
-                            "remaining_continuations": NSNull()
-                        ],
                         "token": "signed-entitlement-token",
                         "expires_at": expiresAt
                     ]
@@ -154,6 +158,12 @@ final class APIClientTests: XCTestCase {
         XCTAssertEqual(snapshot.tier, .starter)
         XCTAssertEqual(snapshot.source, .none)
         XCTAssertEqual(snapshot.maxChildProfiles, 1)
+        XCTAssertEqual(snapshot.maxStoryStartsPerPeriod, 3)
+        XCTAssertEqual(snapshot.maxContinuationsPerPeriod, 3)
+        XCTAssertEqual(snapshot.maxStoryLengthMinutes, 10)
+        XCTAssertEqual(snapshot.usageWindow.durationSeconds, 604_800)
+        XCTAssertEqual(snapshot.remainingStoryStarts, 3)
+        XCTAssertEqual(snapshot.remainingContinuations, 3)
         XCTAssertTrue(snapshot.canReplaySavedStories)
         XCTAssertEqual(snapshot.usageWindow.kind, .rollingPeriod)
         XCTAssertEqual(AppEntitlements.currentToken, "signed-entitlement-token")
@@ -226,9 +236,9 @@ final class APIClientTests: XCTestCase {
                                 "tier": "plus",
                                 "source": "storekit_verified",
                                 "max_child_profiles": 3,
-                                "max_story_starts_per_period": NSNull(),
-                                "max_continuations_per_period": NSNull(),
-                                "max_story_length_minutes": NSNull(),
+                                "max_story_starts_per_period": 12,
+                                "max_continuations_per_period": 12,
+                                "max_story_length_minutes": 10,
                                 "can_replay_saved_stories": true,
                                 "can_start_new_stories": true,
                                 "can_continue_saved_series": true,
@@ -236,11 +246,11 @@ final class APIClientTests: XCTestCase {
                                 "expires_at": expiresAt,
                                 "usage_window": [
                                     "kind": "rolling_period",
-                                    "duration_seconds": NSNull(),
+                                    "duration_seconds": 604800,
                                     "resets_at": NSNull()
                                 ],
-                                "remaining_story_starts": NSNull(),
-                                "remaining_continuations": NSNull()
+                                "remaining_story_starts": 12,
+                                "remaining_continuations": 12
                             ],
                             "token": "refreshed-entitlement-token",
                             "expires_at": expiresAt
@@ -289,6 +299,11 @@ final class APIClientTests: XCTestCase {
         XCTAssertTrue(sawSyncRequest)
         XCTAssertEqual(envelope.snapshot.tier, .plus)
         XCTAssertEqual(envelope.snapshot.source, .storekitVerified)
+        XCTAssertEqual(envelope.snapshot.maxStoryStartsPerPeriod, 12)
+        XCTAssertEqual(envelope.snapshot.maxContinuationsPerPeriod, 12)
+        XCTAssertEqual(envelope.snapshot.maxStoryLengthMinutes, 10)
+        XCTAssertEqual(envelope.snapshot.remainingStoryStarts, 12)
+        XCTAssertEqual(envelope.snapshot.remainingContinuations, 12)
         XCTAssertEqual(AppEntitlements.currentSnapshot?.tier, .plus)
         XCTAssertEqual(AppEntitlements.currentToken, "refreshed-entitlement-token")
     }
@@ -402,6 +417,30 @@ final class APIClientTests: XCTestCase {
                             ],
                             "remaining_story_starts": 2,
                             "remaining_continuations": 0
+                        ],
+                        "entitlements": [
+                            "snapshot": [
+                                "tier": "starter",
+                                "source": "none",
+                                "max_child_profiles": 1,
+                                "max_story_starts_per_period": 3,
+                                "max_continuations_per_period": 3,
+                                "max_story_length_minutes": NSNull(),
+                                "can_replay_saved_stories": true,
+                                "can_start_new_stories": true,
+                                "can_continue_saved_series": true,
+                                "effective_at": effectiveAt,
+                                "expires_at": expiresAt,
+                                "usage_window": [
+                                    "kind": "rolling_period",
+                                    "duration_seconds": NSNull(),
+                                    "resets_at": NSNull()
+                                ],
+                                "remaining_story_starts": 2,
+                                "remaining_continuations": 0
+                            ],
+                            "token": "refreshed-preflight-entitlement-token",
+                            "expires_at": expiresAt
                         ]
                     ]
                 )
@@ -427,6 +466,484 @@ final class APIClientTests: XCTestCase {
         XCTAssertEqual(response.blockReason, .continuationsExhausted)
         XCTAssertEqual(response.recommendedUpgradeSurface, .storySeriesDetail)
         XCTAssertEqual(response.snapshot.remainingContinuations, 0)
+        XCTAssertEqual(response.entitlements?.token, "refreshed-preflight-entitlement-token")
+        XCTAssertEqual(AppEntitlements.currentToken, "refreshed-preflight-entitlement-token")
+        XCTAssertEqual(AppEntitlements.currentSnapshot?.remainingContinuations, 0)
+    }
+
+    func testEntitlementTraceEventsUseCorrectOperationsForSyncAndPreflight() async throws {
+        let session = makeSession()
+        let baseURL = URL(string: "https://backend.example.com/")!
+        let effectiveAt = Date().addingTimeInterval(-60).timeIntervalSince1970
+        let expiresAt = Date().addingTimeInterval(3_600).timeIntervalSince1970
+        var traceEvents: [APIClientTraceEvent] = []
+
+        URLProtocolStub.handler = { request in
+            let url = try XCTUnwrap(request.url)
+
+            switch url.path {
+            case "/v1/session/identity":
+                return try Self.httpResponse(
+                    url: url,
+                    statusCode: 200,
+                    json: ["session_id": "session-entitlement-trace", "region": "US"],
+                    headers: [
+                        "x-request-id": "req-entitlement-bootstrap",
+                        "x-storytime-session": "signed-session-token",
+                        "x-storytime-session-expires-at": String(Date().addingTimeInterval(300).timeIntervalSince1970)
+                    ]
+                )
+            case "/v1/entitlements/sync":
+                return try Self.httpResponse(
+                    url: url,
+                    statusCode: 200,
+                    json: [
+                        "entitlements": [
+                            "snapshot": [
+                                "tier": "starter",
+                                "source": "none",
+                                "max_child_profiles": 2,
+                                "max_story_starts_per_period": 2,
+                                "max_continuations_per_period": 1,
+                                "max_story_length_minutes": 10,
+                                "can_replay_saved_stories": true,
+                                "can_start_new_stories": true,
+                                "can_continue_saved_series": true,
+                                "effective_at": effectiveAt,
+                                "expires_at": expiresAt,
+                                "usage_window": [
+                                    "kind": "rolling_period",
+                                    "duration_seconds": 604800,
+                                    "resets_at": NSNull()
+                                ],
+                                "remaining_story_starts": 2,
+                                "remaining_continuations": 1
+                            ],
+                            "token": "sync-token",
+                            "expires_at": expiresAt
+                        ]
+                    ],
+                    headers: ["x-request-id": "req-entitlement-sync"]
+                )
+            case "/v1/entitlements/preflight":
+                return try Self.httpResponse(
+                    url: url,
+                    statusCode: 200,
+                    json: [
+                        "action": "new_story",
+                        "allowed": true,
+                        "block_reason": NSNull(),
+                        "recommended_upgrade_surface": NSNull(),
+                        "snapshot": [
+                            "tier": "starter",
+                            "source": "none",
+                            "max_child_profiles": 2,
+                            "max_story_starts_per_period": 2,
+                            "max_continuations_per_period": 1,
+                            "max_story_length_minutes": 10,
+                            "can_replay_saved_stories": true,
+                            "can_start_new_stories": true,
+                            "can_continue_saved_series": true,
+                            "effective_at": effectiveAt,
+                            "expires_at": expiresAt,
+                            "usage_window": [
+                                "kind": "rolling_period",
+                                "duration_seconds": 604800,
+                                "resets_at": NSNull()
+                            ],
+                            "remaining_story_starts": 1,
+                            "remaining_continuations": 1
+                        ],
+                        "entitlements": [
+                            "snapshot": [
+                                "tier": "starter",
+                                "source": "none",
+                                "max_child_profiles": 2,
+                                "max_story_starts_per_period": 2,
+                                "max_continuations_per_period": 1,
+                                "max_story_length_minutes": 10,
+                                "can_replay_saved_stories": true,
+                                "can_start_new_stories": true,
+                                "can_continue_saved_series": true,
+                                "effective_at": effectiveAt,
+                                "expires_at": expiresAt,
+                                "usage_window": [
+                                    "kind": "rolling_period",
+                                    "duration_seconds": 604800,
+                                    "resets_at": NSNull()
+                                ],
+                                "remaining_story_starts": 1,
+                                "remaining_continuations": 1
+                            ],
+                            "token": "preflight-token",
+                            "expires_at": expiresAt
+                        ]
+                    ],
+                    headers: ["x-request-id": "req-entitlement-preflight"]
+                )
+            default:
+                XCTFail("Unexpected entitlement trace request: \(url.absoluteString)")
+                return Self.rawResponse(url: url, statusCode: 404, body: "")
+            }
+        }
+
+        let client = APIClient(baseURLs: [baseURL], session: session, installId: "install-123")
+        client.traceHandler = { traceEvents.append($0) }
+
+        _ = try await client.syncEntitlements(
+            request: EntitlementSyncRequest(refreshReason: .restore, transactions: [])
+        )
+        _ = try await client.preflightEntitlements(
+            request: EntitlementPreflightRequest(
+                action: .newStory,
+                childProfileID: "11111111-1111-1111-1111-111111111111",
+                childProfileCount: 1,
+                requestedLengthMinutes: 4
+            )
+        )
+
+        let entitlementTraceEvents = traceEvents.filter {
+            $0.operation == .entitlementSync || $0.operation == .entitlementPreflight
+        }
+
+        XCTAssertEqual(
+            entitlementTraceEvents.map(\.operation),
+            [.entitlementSync, .entitlementSync, .entitlementPreflight, .entitlementPreflight]
+        )
+        XCTAssertEqual(
+            entitlementTraceEvents.map(\.phase),
+            [.started, .completed, .started, .completed]
+        )
+        XCTAssertEqual(entitlementTraceEvents[1].requestId, "req-entitlement-sync")
+        XCTAssertEqual(entitlementTraceEvents[3].requestId, "req-entitlement-preflight")
+    }
+
+    func testClientLaunchTelemetryCapturesEntitlementAndParentManagedSurfaceEvents() async throws {
+        let session = makeSession()
+        let baseURL = URL(string: "https://backend.example.com/")!
+        let effectiveAt = Date().addingTimeInterval(-60).timeIntervalSince1970
+        let expiresAt = Date().addingTimeInterval(3_600).timeIntervalSince1970
+
+        URLProtocolStub.handler = { request in
+            let url = try XCTUnwrap(request.url)
+
+            switch url.path {
+            case "/v1/session/identity":
+                return try Self.httpResponse(
+                    url: url,
+                    statusCode: 200,
+                    json: ["session_id": "session-launch-telemetry", "region": "US"],
+                    headers: [
+                        "x-request-id": "req-launch-bootstrap",
+                        "x-storytime-session": "signed-session-token",
+                        "x-storytime-session-expires-at": String(Date().addingTimeInterval(300).timeIntervalSince1970)
+                    ]
+                )
+            case "/v1/entitlements/sync":
+                return try Self.httpResponse(
+                    url: url,
+                    statusCode: 200,
+                    json: [
+                        "entitlements": [
+                            "snapshot": [
+                                "tier": "starter",
+                                "source": "none",
+                                "max_child_profiles": 2,
+                                "max_story_starts_per_period": 1,
+                                "max_continuations_per_period": 1,
+                                "max_story_length_minutes": 10,
+                                "can_replay_saved_stories": true,
+                                "can_start_new_stories": true,
+                                "can_continue_saved_series": true,
+                                "effective_at": effectiveAt,
+                                "expires_at": expiresAt,
+                                "usage_window": [
+                                    "kind": "rolling_period",
+                                    "duration_seconds": 604800,
+                                    "resets_at": NSNull()
+                                ],
+                                "remaining_story_starts": 1,
+                                "remaining_continuations": 0
+                            ],
+                            "token": "sync-telemetry-token",
+                            "expires_at": expiresAt
+                        ]
+                    ],
+                    headers: ["x-request-id": "req-launch-sync"]
+                )
+            case "/v1/entitlements/preflight":
+                return try Self.httpResponse(
+                    url: url,
+                    statusCode: 200,
+                    json: [
+                        "action": "continue_story",
+                        "allowed": false,
+                        "block_reason": "continuations_exhausted",
+                        "recommended_upgrade_surface": "story_series_detail",
+                        "snapshot": [
+                            "tier": "starter",
+                            "source": "none",
+                            "max_child_profiles": 2,
+                            "max_story_starts_per_period": 1,
+                            "max_continuations_per_period": 1,
+                            "max_story_length_minutes": 10,
+                            "can_replay_saved_stories": true,
+                            "can_start_new_stories": true,
+                            "can_continue_saved_series": true,
+                            "effective_at": effectiveAt,
+                            "expires_at": expiresAt,
+                            "usage_window": [
+                                "kind": "rolling_period",
+                                "duration_seconds": 604800,
+                                "resets_at": NSNull()
+                            ],
+                            "remaining_story_starts": 1,
+                            "remaining_continuations": 0
+                        ],
+                        "entitlements": [
+                            "snapshot": [
+                                "tier": "starter",
+                                "source": "none",
+                                "max_child_profiles": 2,
+                                "max_story_starts_per_period": 1,
+                                "max_continuations_per_period": 1,
+                                "max_story_length_minutes": 10,
+                                "can_replay_saved_stories": true,
+                                "can_start_new_stories": true,
+                                "can_continue_saved_series": true,
+                                "effective_at": effectiveAt,
+                                "expires_at": expiresAt,
+                                "usage_window": [
+                                    "kind": "rolling_period",
+                                    "duration_seconds": 604800,
+                                    "resets_at": NSNull()
+                                ],
+                                "remaining_story_starts": 1,
+                                "remaining_continuations": 0
+                            ],
+                            "token": "preflight-telemetry-token",
+                            "expires_at": expiresAt
+                        ]
+                    ],
+                    headers: ["x-request-id": "req-launch-preflight"]
+                )
+            default:
+                XCTFail("Unexpected launch telemetry request: \(url.absoluteString)")
+                return Self.rawResponse(url: url, statusCode: 404, body: "")
+            }
+        }
+
+        let client = APIClient(baseURLs: [baseURL], session: session, installId: "install-123")
+        let syncEnvelope = try await client.syncEntitlements(
+            request: EntitlementSyncRequest(refreshReason: .restore, transactions: [])
+        )
+        let preflightResponse = try await client.preflightEntitlements(
+            request: EntitlementPreflightRequest(
+                action: .continueStory,
+                childProfileID: "11111111-1111-1111-1111-111111111111",
+                childProfileCount: 1,
+                requestedLengthMinutes: 4,
+                selectedSeriesID: "22222222-2222-2222-2222-222222222222"
+            )
+        )
+
+        ClientLaunchTelemetry.recordBlockedReviewPresented(
+            surface: .storySeriesDetail,
+            response: preflightResponse
+        )
+        ClientLaunchTelemetry.recordParentPlanPresented(snapshot: syncEnvelope.snapshot)
+        ClientLaunchTelemetry.recordParentPlanRefresh(outcome: .started, snapshot: syncEnvelope.snapshot)
+        ClientLaunchTelemetry.recordParentPlanRefresh(outcome: .completed, snapshot: syncEnvelope.snapshot)
+        ClientLaunchTelemetry.recordRestorePurchases(outcome: .started, snapshot: syncEnvelope.snapshot)
+        ClientLaunchTelemetry.recordRestorePurchases(outcome: .completed, snapshot: syncEnvelope.snapshot)
+
+        let report = ClientLaunchTelemetry.report()
+
+        XCTAssertEqual(report.counters["launch:entitlement_sync:completed"], 1)
+        XCTAssertEqual(report.counters["launch_refresh:restore:completed"], 2)
+        XCTAssertEqual(report.counters["launch:entitlement_preflight:blocked"], 1)
+        XCTAssertEqual(report.counters["launch_action:continue_story:blocked"], 1)
+        XCTAssertEqual(report.counters["launch_block:continuations_exhausted"], 2)
+        XCTAssertEqual(report.counters["launch_surface:story_series_detail:blocked"], 1)
+        XCTAssertEqual(report.counters["launch:blocked_review_presented:presented"], 1)
+        XCTAssertEqual(report.counters["launch_surface:story_series_detail:presented"], 1)
+        XCTAssertEqual(report.counters["launch:parent_plan_presented:presented"], 1)
+        XCTAssertEqual(report.counters["launch:parent_plan_refresh:started"], 1)
+        XCTAssertEqual(report.counters["launch:parent_plan_refresh:completed"], 1)
+        XCTAssertEqual(report.counters["launch:restore_purchases:started"], 1)
+        XCTAssertEqual(report.counters["launch:restore_purchases:completed"], 1)
+        XCTAssertEqual(report.counters["launch_surface:parent_trust_center:presented"], 1)
+        XCTAssertEqual(report.counters["launch_surface:parent_trust_center:started"], 2)
+        XCTAssertEqual(report.counters["launch_surface:parent_trust_center:completed"], 2)
+
+        let sessionSummary = try XCTUnwrap(report.sessions["session-launch-telemetry"])
+        XCTAssertEqual(sessionSummary.launchEvents["launch:entitlement_sync:completed"], 1)
+        XCTAssertEqual(sessionSummary.launchEvents["refresh:restore:completed"], 2)
+        XCTAssertEqual(sessionSummary.launchEvents["action:continue_story:blocked"], 1)
+        XCTAssertEqual(sessionSummary.launchEvents["block:continuations_exhausted"], 2)
+        XCTAssertEqual(sessionSummary.launchEvents["surface:story_series_detail:presented"], 1)
+        XCTAssertEqual(sessionSummary.launchEvents["surface:parent_trust_center:completed"], 2)
+        XCTAssertEqual(sessionSummary.lastEntitlementTier, .starter)
+        XCTAssertEqual(sessionSummary.remainingStoryStarts, 1)
+        XCTAssertEqual(sessionSummary.remainingContinuations, 0)
+        XCTAssertEqual(report.events.map(\.name), [
+            .entitlementSync,
+            .entitlementPreflight,
+            .blockedReviewPresented,
+            .parentPlanPresented,
+            .parentPlanRefresh,
+            .parentPlanRefresh,
+            .restorePurchases,
+            .restorePurchases
+        ])
+    }
+
+    func testClientLaunchTelemetryPersistsAcrossStoreReload() throws {
+        let suiteName = "ClientLaunchTelemetryPersist.\(UUID().uuidString)"
+        let alternateSuiteName = "ClientLaunchTelemetryAlternate.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        let alternateDefaults = try XCTUnwrap(UserDefaults(suiteName: alternateSuiteName))
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+            alternateDefaults.removePersistentDomain(forName: alternateSuiteName)
+        }
+
+        ClientLaunchTelemetry.replacePersistentStoreForTesting(userDefaults: defaults)
+        ClientLaunchTelemetry.reset()
+        AppSession.store(sessionId: "session-client-persist")
+
+        let snapshot = EntitlementSnapshot(
+            tier: .starter,
+            source: .none,
+            maxChildProfiles: 1,
+            maxStoryStartsPerPeriod: 3,
+            maxContinuationsPerPeriod: 3,
+            maxStoryLengthMinutes: 10,
+            canReplaySavedStories: true,
+            canStartNewStories: true,
+            canContinueSavedSeries: true,
+            effectiveAt: 1_700_000_000,
+            expiresAt: 1_700_003_600,
+            usageWindow: EntitlementUsageWindow(kind: .rollingPeriod, durationSeconds: 604_800, resetsAt: nil),
+            remainingStoryStarts: 2,
+            remainingContinuations: 1
+        )
+
+        ClientLaunchTelemetry.recordParentPlanPresented(snapshot: snapshot)
+        ClientLaunchTelemetry.recordRestorePurchases(outcome: .completed, snapshot: snapshot)
+        let persisted = ClientLaunchTelemetry.report()
+
+        ClientLaunchTelemetry.replacePersistentStoreForTesting(userDefaults: alternateDefaults)
+        XCTAssertTrue(ClientLaunchTelemetry.report().counters.isEmpty)
+
+        ClientLaunchTelemetry.replacePersistentStoreForTesting(userDefaults: defaults)
+        XCTAssertEqual(ClientLaunchTelemetry.report(), persisted)
+    }
+
+    func testFetchLaunchTelemetryReportJoinsBackendAndPersistedClientTelemetry() async throws {
+        let suiteName = "ClientLaunchTelemetryJoined.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+
+        ClientLaunchTelemetry.replacePersistentStoreForTesting(userDefaults: defaults)
+        ClientLaunchTelemetry.reset()
+        AppSession.store(sessionId: "session-joined-launch")
+
+        let session = makeSession()
+        let baseURL = URL(string: "https://backend.example.com/")!
+
+        URLProtocolStub.handler = { request in
+            let url = try XCTUnwrap(request.url)
+            switch url.path {
+            case "/health":
+                return try Self.httpResponse(
+                    url: url,
+                    statusCode: 200,
+                    json: [
+                        "ok": true,
+                        "default_region": "EU",
+                        "allowed_regions": ["US", "EU"],
+                        "telemetry": [
+                            "counters": [
+                                "launch:entitlement_preflight:blocked": 1
+                            ],
+                            "sessions": [
+                                "session-joined-launch": [
+                                    "request_count": 2,
+                                    "request_duration_ms": 30,
+                                    "openai_call_count": 1,
+                                    "openai_duration_ms": 20,
+                                    "openai_success_count": 1,
+                                    "openai_failure_count": 0,
+                                    "routes": [
+                                        "/v1/entitlements/preflight": 1
+                                    ],
+                                    "runtime_stage_groups": [
+                                        "interaction": [
+                                            "call_count": 1,
+                                            "duration_ms": 20,
+                                            "success_count": 1,
+                                            "failure_count": 0
+                                        ]
+                                    ],
+                                    "launch_events": [
+                                        "entitlement_preflight:blocked": 1
+                                    ],
+                                    "last_entitlement_tier": "starter",
+                                    "remaining_story_starts": 0,
+                                    "remaining_continuations": 1
+                                ]
+                            ]
+                        ]
+                    ]
+                )
+            default:
+                XCTFail("Unexpected joined launch telemetry request: \(url.absoluteString)")
+                return Self.rawResponse(url: url, statusCode: 404, body: "")
+            }
+        }
+
+        let snapshot = EntitlementSnapshot(
+            tier: .starter,
+            source: .none,
+            maxChildProfiles: 1,
+            maxStoryStartsPerPeriod: 3,
+            maxContinuationsPerPeriod: 3,
+            maxStoryLengthMinutes: 10,
+            canReplaySavedStories: true,
+            canStartNewStories: true,
+            canContinueSavedSeries: true,
+            effectiveAt: 1_700_000_000,
+            expiresAt: 1_700_003_600,
+            usageWindow: EntitlementUsageWindow(kind: .rollingPeriod, durationSeconds: 604_800, resetsAt: nil),
+            remainingStoryStarts: 0,
+            remainingContinuations: 1
+        )
+        let sessionResponse = HTTPURLResponse(
+            url: baseURL.appending(path: "v1").appending(path: "session").appending(path: "identity"),
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: [
+                "x-storytime-session": "joined-launch-token",
+                "x-storytime-session-expires-at": String(Date().addingTimeInterval(300).timeIntervalSince1970)
+            ]
+        )!
+        AppSession.store(from: sessionResponse)
+        AppSession.store(sessionId: "session-joined-launch")
+        ClientLaunchTelemetry.recordParentPlanPresented(snapshot: snapshot)
+
+        let client = APIClient(baseURLs: [baseURL], session: session, installId: "install-123")
+        let report = try await client.fetchLaunchTelemetryReport()
+
+        XCTAssertEqual(report.defaultRegion, .eu)
+        XCTAssertEqual(report.allowedRegions, [.us, .eu])
+        XCTAssertEqual(report.backend?.counters["launch:entitlement_preflight:blocked"], 1)
+        XCTAssertEqual(report.backend?.sessions["session-joined-launch"]?.requestCount, 2)
+        XCTAssertEqual(report.client.counters["launch:parent_plan_presented:presented"], 1)
+        XCTAssertEqual(report.client.sessions["session-joined-launch"]?.lastEntitlementTier, .starter)
+        XCTAssertEqual(report.client.events.map(\.name), [.parentPlanPresented])
     }
 
     func testTraceEventsCarryGeneratedRequestIDsAndSessionCorrelation() async throws {

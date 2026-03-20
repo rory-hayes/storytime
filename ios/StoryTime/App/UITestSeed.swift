@@ -93,6 +93,7 @@ enum UITestSeed {
         defaults.set(primaryProfile.id.uuidString, forKey: "storytime.active.child.profile.v1")
         defaults.set(try? JSONEncoder().encode(privacy), forKey: "storytime.parent.privacy.v1")
         defaults.set(true, forKey: FirstRunExperienceStore.onboardingCompletedKey)
+        AppEntitlements.store(envelope: seededEntitlementEnvelope(childProfileCount: 2, environment: environment))
     }
 
     static func entitlementPreflightOverride(for plan: StoryLaunchPlan, childProfileCount: Int) -> EntitlementPreflightResponse? {
@@ -103,6 +104,36 @@ enum UITestSeed {
 
         let override = environment["STORYTIME_UI_TEST_PREFLIGHT_OVERRIDE"]?.trimmingCharacters(in: .whitespacesAndNewlines)
         switch override {
+        case "allow_new_story":
+            guard case .new = plan.mode else { return nil }
+            return EntitlementPreflightResponse(
+                action: .newStory,
+                allowed: true,
+                blockReason: nil,
+                recommendedUpgradeSurface: nil,
+                snapshot: allowedSnapshot(
+                    tier: seededTier(environment: environment),
+                    childProfileCount: childProfileCount,
+                    remainingStoryStarts: 1,
+                    remainingContinuations: 1,
+                    environment: environment
+                )
+            )
+        case "allow_continue_story":
+            guard case .extend = plan.mode else { return nil }
+            return EntitlementPreflightResponse(
+                action: .continueStory,
+                allowed: true,
+                blockReason: nil,
+                recommendedUpgradeSurface: nil,
+                snapshot: allowedSnapshot(
+                    tier: seededTier(environment: environment),
+                    childProfileCount: childProfileCount,
+                    remainingStoryStarts: 1,
+                    remainingContinuations: 1,
+                    environment: environment
+                )
+            )
         case "block_new_story":
             guard case .new = plan.mode else { return nil }
             return EntitlementPreflightResponse(
@@ -115,7 +146,8 @@ enum UITestSeed {
                     canStartNewStories: false,
                     canContinueSavedSeries: true,
                     remainingStoryStarts: 0,
-                    remainingContinuations: 1
+                    remainingContinuations: 1,
+                    environment: environment
                 )
             )
         case "block_continue_story":
@@ -124,18 +156,75 @@ enum UITestSeed {
                 action: .continueStory,
                 allowed: false,
                 blockReason: .continuationsExhausted,
-                recommendedUpgradeSurface: .newStoryJourney,
+                recommendedUpgradeSurface: .storySeriesDetail,
                 snapshot: blockedStarterSnapshot(
                     childProfileCount: childProfileCount,
                     canStartNewStories: true,
                     canContinueSavedSeries: false,
                     remainingStoryStarts: 1,
-                    remainingContinuations: 0
+                    remainingContinuations: 0,
+                    environment: environment
                 )
             )
         default:
-            return nil
+            guard let request = EntitlementPreflightRequest(plan: plan, childProfileCount: childProfileCount),
+                  let snapshot = AppEntitlements.currentSnapshot else {
+                return nil
+            }
+            return defaultPreflightResponse(for: request, snapshot: snapshot)
         }
+    }
+
+    private static func defaultPreflightResponse(
+        for request: EntitlementPreflightRequest,
+        snapshot: EntitlementSnapshot
+    ) -> EntitlementPreflightResponse {
+        let upgradeSurface: EntitlementUpgradeSurface = request.action == .newStory ? .newStoryJourney : .storySeriesDetail
+        let childProfileAllowed = request.childProfileCount <= snapshot.maxChildProfiles
+        let lengthAllowed = snapshot.maxStoryLengthMinutes.map { request.requestedLengthMinutes <= $0 } ?? true
+
+        let actionAllowed: Bool
+        let remainingAllowed: Bool
+        let blockReason: EntitlementPreflightBlockReason?
+
+        switch request.action {
+        case .newStory:
+            actionAllowed = snapshot.canStartNewStories
+            remainingAllowed = (snapshot.remainingStoryStarts ?? 1) > 0
+            if !childProfileAllowed {
+                blockReason = .childProfileLimit
+            } else if !lengthAllowed {
+                blockReason = .storyLengthExceeded
+            } else if !actionAllowed {
+                blockReason = .newStoryNotAllowed
+            } else if !remainingAllowed {
+                blockReason = .storyStartsExhausted
+            } else {
+                blockReason = nil
+            }
+        case .continueStory:
+            actionAllowed = snapshot.canContinueSavedSeries
+            remainingAllowed = (snapshot.remainingContinuations ?? 1) > 0
+            if !childProfileAllowed {
+                blockReason = .childProfileLimit
+            } else if !lengthAllowed {
+                blockReason = .storyLengthExceeded
+            } else if !actionAllowed {
+                blockReason = .continuationNotAllowed
+            } else if !remainingAllowed {
+                blockReason = .continuationsExhausted
+            } else {
+                blockReason = nil
+            }
+        }
+
+        return EntitlementPreflightResponse(
+            action: request.action,
+            allowed: blockReason == nil,
+            blockReason: blockReason,
+            recommendedUpgradeSurface: blockReason == nil ? nil : upgradeSurface,
+            snapshot: snapshot
+        )
     }
 
     private static func blockedStarterSnapshot(
@@ -143,16 +232,24 @@ enum UITestSeed {
         canStartNewStories: Bool,
         canContinueSavedSeries: Bool,
         remainingStoryStarts: Int?,
-        remainingContinuations: Int?
+        remainingContinuations: Int?,
+        environment: [String: String]
     ) -> EntitlementSnapshot {
         let now = Date()
+        let tier = seededTier(environment: environment)
         return EntitlementSnapshot(
-            tier: .starter,
+            tier: tier,
             source: .debugSeed,
-            maxChildProfiles: max(1, childProfileCount),
-            maxStoryStartsPerPeriod: 1,
-            maxContinuationsPerPeriod: 1,
-            maxStoryLengthMinutes: 10,
+            maxChildProfiles: resolvedMaxChildProfiles(for: tier, childProfileCount: childProfileCount, environment: environment),
+            maxStoryStartsPerPeriod: resolvedLimit(
+                environment["STORYTIME_UI_TEST_MAX_STORY_STARTS"],
+                defaultValue: tier == .plus ? 4 : 1
+            ),
+            maxContinuationsPerPeriod: resolvedLimit(
+                environment["STORYTIME_UI_TEST_MAX_CONTINUATIONS"],
+                defaultValue: tier == .plus ? 4 : 1
+            ),
+            maxStoryLengthMinutes: resolvedLimit(environment["STORYTIME_UI_TEST_MAX_STORY_LENGTH"], defaultValue: 10),
             canReplaySavedStories: true,
             canStartNewStories: canStartNewStories,
             canContinueSavedSeries: canContinueSavedSeries,
@@ -166,5 +263,103 @@ enum UITestSeed {
             remainingStoryStarts: remainingStoryStarts,
             remainingContinuations: remainingContinuations
         )
+    }
+
+    private static func seededEntitlementEnvelope(childProfileCount: Int, environment: [String: String]) -> EntitlementBootstrapEnvelope {
+        let now = Date()
+        let tier = seededTier(environment: environment)
+        let snapshot = EntitlementSnapshot(
+            tier: tier,
+            source: .debugSeed,
+            maxChildProfiles: resolvedMaxChildProfiles(for: tier, childProfileCount: childProfileCount, environment: environment),
+            maxStoryStartsPerPeriod: resolvedLimit(
+                environment["STORYTIME_UI_TEST_MAX_STORY_STARTS"],
+                defaultValue: tier == .plus ? 4 : 1
+            ),
+            maxContinuationsPerPeriod: resolvedLimit(
+                environment["STORYTIME_UI_TEST_MAX_CONTINUATIONS"],
+                defaultValue: tier == .plus ? 4 : 1
+            ),
+            maxStoryLengthMinutes: resolvedLimit(environment["STORYTIME_UI_TEST_MAX_STORY_LENGTH"], defaultValue: 10),
+            canReplaySavedStories: true,
+            canStartNewStories: true,
+            canContinueSavedSeries: true,
+            effectiveAt: now.timeIntervalSince1970,
+            expiresAt: now.addingTimeInterval(600).timeIntervalSince1970,
+            usageWindow: EntitlementUsageWindow(
+                kind: .rollingPeriod,
+                durationSeconds: 86_400,
+                resetsAt: now.addingTimeInterval(86_400).timeIntervalSince1970
+            ),
+            remainingStoryStarts: 1,
+            remainingContinuations: 1
+        )
+
+        return EntitlementBootstrapEnvelope(
+            snapshot: snapshot,
+            token: "ui-seeded-entitlement-token",
+            expiresAt: now.addingTimeInterval(600).timeIntervalSince1970
+        )
+    }
+
+    private static func allowedSnapshot(
+        tier: EntitlementTier,
+        childProfileCount: Int,
+        remainingStoryStarts: Int?,
+        remainingContinuations: Int?,
+        environment: [String: String]
+    ) -> EntitlementSnapshot {
+        let now = Date()
+        return EntitlementSnapshot(
+            tier: tier,
+            source: .debugSeed,
+            maxChildProfiles: resolvedMaxChildProfiles(for: tier, childProfileCount: childProfileCount, environment: environment),
+            maxStoryStartsPerPeriod: resolvedLimit(
+                environment["STORYTIME_UI_TEST_MAX_STORY_STARTS"],
+                defaultValue: tier == .plus ? 4 : 1
+            ),
+            maxContinuationsPerPeriod: resolvedLimit(
+                environment["STORYTIME_UI_TEST_MAX_CONTINUATIONS"],
+                defaultValue: tier == .plus ? 4 : 1
+            ),
+            maxStoryLengthMinutes: resolvedLimit(environment["STORYTIME_UI_TEST_MAX_STORY_LENGTH"], defaultValue: 10),
+            canReplaySavedStories: true,
+            canStartNewStories: true,
+            canContinueSavedSeries: true,
+            effectiveAt: now.timeIntervalSince1970,
+            expiresAt: now.addingTimeInterval(300).timeIntervalSince1970,
+            usageWindow: EntitlementUsageWindow(
+                kind: .rollingPeriod,
+                durationSeconds: 86_400,
+                resetsAt: now.addingTimeInterval(86_400).timeIntervalSince1970
+            ),
+            remainingStoryStarts: remainingStoryStarts,
+            remainingContinuations: remainingContinuations
+        )
+    }
+
+    private static func seededTier(environment: [String: String]) -> EntitlementTier {
+        environment["STORYTIME_UI_TEST_ENTITLEMENT_TIER"]?.lowercased() == "plus" ? .plus : .starter
+    }
+
+    private static func resolvedMaxChildProfiles(
+        for tier: EntitlementTier,
+        childProfileCount: Int,
+        environment: [String: String]
+    ) -> Int {
+        let override = resolvedLimit(environment["STORYTIME_UI_TEST_MAX_CHILD_PROFILES"], defaultValue: -1)
+        if override > 0 {
+            return override
+        }
+
+        return tier == .plus ? max(3, childProfileCount + 1) : max(1, childProfileCount)
+    }
+
+    private static func resolvedLimit(_ rawValue: String?, defaultValue: Int) -> Int {
+        guard let rawValue, let value = Int(rawValue), value > 0 else {
+            return defaultValue
+        }
+
+        return value
     }
 }

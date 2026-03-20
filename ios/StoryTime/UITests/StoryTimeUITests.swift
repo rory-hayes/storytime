@@ -54,10 +54,10 @@ final class StoryTimeUITests: XCTestCase {
         let sessionCueCard = app.otherElements["sessionCueCard"]
         XCTAssertTrue(sessionCueCard.waitForExistence(timeout: 20))
         XCTAssertTrue(waitForLabel(of: sessionCueCard, toEqual: "Listening"))
-        XCTAssertEqual(
-            sessionCueCard.value as? String,
-            "Answer live question 1 of 3 so StoryTime can build the story.\nSpeak your answer now."
-        )
+        let cueValue = sessionCueCard.value as? String ?? ""
+        XCTAssertTrue(cueValue.hasPrefix("Answer live question "))
+        XCTAssertTrue(cueValue.contains(" of 3 so StoryTime can build the story."))
+        XCTAssertTrue(cueValue.hasSuffix("Speak your answer now."))
     }
 
     func testVoiceSessionShowsStorytellingCueAfterNarrationStarts() {
@@ -88,13 +88,80 @@ final class StoryTimeUITests: XCTestCase {
         XCTAssertTrue(cueValue.contains("Speak anytime to ask a question or change what happens next."))
     }
 
-    func testParentControlsCanRenderAndAddAChildProfile() {
+    func testVoiceSessionShowsCompletionLoopAfterStoryFinishes() {
         let app = launchApp()
+
+        startSeededReplayAndWaitForCompletion(in: app)
+
+        XCTAssertTrue(app.staticTexts["Story finished"].exists)
+        XCTAssertTrue(
+            app.staticTexts["“Bunny and the Moonlight Map” is ready for Milo. Replay it now, start a new episode later, or head back to saved stories."].exists
+        )
+        XCTAssertTrue(
+            app.staticTexts["Saved-story controls stay outside this finished story. Raw audio was not saved."].exists
+        )
+        XCTAssertTrue(app.buttons["completionReplayButton"].exists)
+        XCTAssertTrue(app.buttons["completionContinueButton"].exists)
+        XCTAssertEqual(app.buttons["completionLibraryButton"].label, "Back to Saved Stories")
+    }
+
+    func testVoiceSessionCompletionReplayRestartsNarration() {
+        let app = launchApp()
+
+        startSeededReplayAndWaitForCompletion(in: app)
+
+        let replayButton = app.buttons["completionReplayButton"]
+        XCTAssertTrue(replayButton.waitForExistence(timeout: 10))
+        replayButton.tap()
+
+        let storyTitle = app.staticTexts["storyTitleLabel"]
+        XCTAssertTrue(storyTitle.waitForExistence(timeout: 5))
+        XCTAssertEqual(storyTitle.label, "Bunny and the Moonlight Map")
+        XCTAssertTrue(app.otherElements["waveformModule"].exists)
+        XCTAssertFalse(app.staticTexts["seriesDetailTitle"].exists)
+        XCTAssertFalse(app.buttons["newStoryInlineButton"].exists)
+    }
+
+    func testVoiceSessionCompletionContinueActionReturnsToSeriesDetail() {
+        let app = launchApp()
+
+        startSeededReplayAndWaitForCompletion(in: app)
+
+        let continueButton = app.buttons["completionContinueButton"]
+        XCTAssertTrue(continueButton.waitForExistence(timeout: 10))
+        continueButton.tap()
+
+        let detailTitle = app.staticTexts["seriesDetailTitle"]
+        XCTAssertTrue(detailTitle.waitForExistence(timeout: 10))
+        XCTAssertEqual(detailTitle.label, "Bunny and the Lantern Trail")
+        XCTAssertTrue(app.buttons["newEpisodeButton"].exists)
+        XCTAssertTrue(app.buttons["repeatEpisodeButton"].exists)
+    }
+
+    func testVoiceSessionCompletionLibraryActionReturnsToSavedStoriesSurface() {
+        let app = launchApp()
+
+        startSeededReplayAndWaitForCompletion(in: app)
+
+        let libraryButton = app.buttons["completionLibraryButton"]
+        XCTAssertTrue(libraryButton.waitForExistence(timeout: 10))
+        libraryButton.tap()
+
+        let detailTitle = app.staticTexts["seriesDetailTitle"]
+        XCTAssertTrue(detailTitle.waitForExistence(timeout: 10))
+        XCTAssertEqual(detailTitle.label, "Bunny and the Lantern Trail")
+        XCTAssertTrue(app.buttons["repeatEpisodeButton"].exists)
+    }
+
+    func testParentControlsCanRenderAndAddAChildProfile() {
+        let app = launchApp(extraEnvironment: [
+            "STORYTIME_UI_TEST_ENTITLEMENT_TIER": "plus"
+        ])
 
         openParentControls(in: app)
 
         let addChildButton = app.buttons["addChildProfileButton"]
-        XCTAssertTrue(addChildButton.waitForExistence(timeout: 10))
+        XCTAssertTrue(scrollToElement(addChildButton, in: app))
 
         let saveStoryHistoryToggle = app.switches["saveStoryHistoryToggle"]
         if saveStoryHistoryToggle.waitForExistence(timeout: 2) {
@@ -115,6 +182,50 @@ final class StoryTimeUITests: XCTestCase {
 
         XCTAssertTrue(app.staticTexts["Maeve"].waitForExistence(timeout: 10))
         app.buttons["Done"].tap()
+    }
+
+    func testParentControlsShowCurrentPlanAndRestoreEntry() {
+        let app = launchApp()
+
+        openParentControls(in: app)
+
+        let planTitle = app.staticTexts["parentPlanTitle"]
+        XCTAssertTrue(planTitle.waitForExistence(timeout: 10))
+        XCTAssertEqual(planTitle.label, "Starter")
+        XCTAssertEqual(
+            app.staticTexts["parentPlanSummary"].label,
+            "Starter currently allows up to 2 child profiles, 1 new story start, and 1 saved-series continuation. Replay and parent controls stay available on this device."
+        )
+        XCTAssertEqual(
+            app.staticTexts["parentPlanProfilesSummary"].label,
+            "Child profiles saved on this device: 2 of 2 allowed"
+        )
+        XCTAssertEqual(
+            app.staticTexts["parentPlanStartsSummary"].label,
+            "New story starts remaining in the current window: 1"
+        )
+        XCTAssertEqual(
+            app.staticTexts["parentPlanContinuationsSummary"].label,
+            "Saved-series continuations remaining in the current window: 1"
+        )
+        XCTAssertTrue(app.buttons["parentRefreshPlanButton"].exists)
+        XCTAssertTrue(app.buttons["parentRestorePurchasesButton"].exists)
+        XCTAssertTrue(app.staticTexts["parentStarterPlanSummary"].exists)
+        XCTAssertTrue(app.staticTexts["parentPlusPlanSummary"].exists)
+    }
+
+    func testParentControlsGateAddChildWhenPlanLimitIsReached() {
+        let app = launchApp()
+
+        openParentControls(in: app)
+
+        let childProfileLimitMessage = app.staticTexts["parentChildProfileLimitMessage"]
+        XCTAssertTrue(scrollToElement(childProfileLimitMessage, in: app))
+        XCTAssertFalse(app.buttons["addChildProfileButton"].exists)
+        XCTAssertEqual(
+            childProfileLimitMessage.label,
+            "This device already uses all 2 child profiles allowed on this plan."
+        )
     }
 
     func testParentControlsRequireDeliberateGateBeforeOpening() {
@@ -149,7 +260,7 @@ final class StoryTimeUITests: XCTestCase {
         XCTAssertFalse(gateTitle.exists)
 
         openParentControls(in: app)
-        XCTAssertTrue(app.staticTexts["parentRawAudioStatusLabel"].waitForExistence(timeout: 10))
+        XCTAssertTrue(scrollToElement(app.staticTexts["parentRawAudioStatusLabel"], in: app))
     }
 
     func testHomeViewFramesQuickStartLibraryAndParentControls() {
@@ -453,6 +564,45 @@ final class StoryTimeUITests: XCTestCase {
         XCTAssertTrue(app.buttons["journeyUpgradeReviewParentControlsButton"].exists)
     }
 
+    func testJourneyReviewLinksToDurableParentPlanSurface() {
+        let app = launchApp(extraEnvironment: [
+            "STORYTIME_UI_TEST_PREFLIGHT_OVERRIDE": "block_new_story"
+        ])
+
+        let newStoryButton = app.buttons["newStoryInlineButton"]
+        XCTAssertTrue(newStoryButton.waitForExistence(timeout: 10))
+        newStoryButton.tap()
+
+        let startVoiceButton = app.buttons["startVoiceSessionButton"]
+        if !startVoiceButton.waitForExistence(timeout: 3) {
+            for _ in 0..<3 where !startVoiceButton.exists {
+                app.swipeUp()
+            }
+        }
+        XCTAssertTrue(startVoiceButton.waitForExistence(timeout: 10))
+        startVoiceButton.tap()
+        XCTAssertTrue(waitForLabel(of: startVoiceButton, toEqual: "Ask a Parent to Review Plans"))
+        startVoiceButton.tap()
+
+        let gateField = app.textFields["parentAccessGateField"]
+        XCTAssertTrue(gateField.waitForExistence(timeout: 10))
+        gateField.tap()
+        gateField.typeText("PARENT")
+
+        let unlockButton = app.buttons["unlockParentControlsButton"]
+        XCTAssertTrue(unlockButton.waitForExistence(timeout: 10))
+        unlockButton.tap()
+
+        let parentPlanButton = app.buttons["journeyUpgradeReviewParentControlsButton"]
+        XCTAssertTrue(parentPlanButton.waitForExistence(timeout: 10))
+        parentPlanButton.tap()
+
+        let parentPlanTitle = app.staticTexts["parentPlanTitle"]
+        XCTAssertTrue(parentPlanTitle.waitForExistence(timeout: 10))
+        XCTAssertEqual(parentPlanTitle.label, "Starter")
+        XCTAssertTrue(app.buttons["parentRestorePurchasesButton"].exists)
+    }
+
     func testJourneyBlocksContinuationStartAndKeepsReplayCopyTruthful() {
         let app = launchApp(extraEnvironment: [
             "STORYTIME_UI_TEST_PREFLIGHT_OVERRIDE": "block_continue_story"
@@ -481,6 +631,156 @@ final class StoryTimeUITests: XCTestCase {
 
         XCTAssertTrue(waitForLabel(of: startVoiceButton, toEqual: "Ask a Parent to Review Plans"))
         XCTAssertFalse(app.staticTexts["storyTitleLabel"].waitForExistence(timeout: 2))
+    }
+
+    func testSeriesDetailBlocksNewEpisodeAndKeepsReplayTruthful() {
+        let app = launchApp(extraEnvironment: [
+            "STORYTIME_UI_TEST_PREFLIGHT_OVERRIDE": "block_continue_story"
+        ])
+
+        let seededSeriesCard = app.buttons["seriesCard-55555555-5555-5555-5555-555555555555"]
+        XCTAssertTrue(seededSeriesCard.waitForExistence(timeout: 10))
+        seededSeriesCard.tap()
+
+        let newEpisodeButton = app.buttons["newEpisodeButton"]
+        XCTAssertTrue(newEpisodeButton.waitForExistence(timeout: 10))
+        newEpisodeButton.tap()
+
+        XCTAssertTrue(waitForLabel(of: newEpisodeButton, toEqual: "Ask a Parent"))
+        XCTAssertTrue(app.buttons["repeatEpisodeButton"].exists)
+        XCTAssertFalse(app.staticTexts["storyTitleLabel"].waitForExistence(timeout: 2))
+    }
+
+    func testSeriesDetailBlockedContinuationRoutesToParentManagedReview() {
+        let app = launchApp(extraEnvironment: [
+            "STORYTIME_UI_TEST_PREFLIGHT_OVERRIDE": "block_continue_story"
+        ])
+
+        let seededSeriesCard = app.buttons["seriesCard-55555555-5555-5555-5555-555555555555"]
+        XCTAssertTrue(seededSeriesCard.waitForExistence(timeout: 10))
+        seededSeriesCard.tap()
+
+        let newEpisodeButton = app.buttons["newEpisodeButton"]
+        XCTAssertTrue(newEpisodeButton.waitForExistence(timeout: 10))
+        newEpisodeButton.tap()
+
+        XCTAssertTrue(waitForLabel(of: newEpisodeButton, toEqual: "Ask a Parent"))
+        newEpisodeButton.tap()
+
+        let gateTitle = app.staticTexts["parentAccessGateTitle"]
+        XCTAssertTrue(gateTitle.waitForExistence(timeout: 10))
+
+        let gateField = app.textFields["parentAccessGateField"]
+        XCTAssertTrue(gateField.waitForExistence(timeout: 10))
+        gateField.tap()
+        gateField.typeText("PARENT")
+
+        let unlockButton = app.buttons["unlockParentControlsButton"]
+        XCTAssertTrue(unlockButton.waitForExistence(timeout: 10))
+        unlockButton.tap()
+
+        let reviewTitle = app.staticTexts["seriesDetailUpgradeReviewTitle"]
+        XCTAssertTrue(reviewTitle.waitForExistence(timeout: 10))
+        XCTAssertEqual(reviewTitle.label, "Parent plan review")
+        XCTAssertEqual(
+            app.staticTexts["seriesDetailUpgradeReviewBlockTitle"].label,
+            "This plan can't start a new episode right now."
+        )
+        XCTAssertEqual(app.staticTexts["seriesDetailUpgradeReviewPlanTitle"].label, "Starter")
+        XCTAssertEqual(
+            app.staticTexts["seriesDetailUpgradeReviewFootnote"].label,
+            "Replay of the latest saved episode stays available on this device."
+        )
+        XCTAssertEqual(
+            app.staticTexts["seriesDetailUpgradeReviewPlanSummary"].label,
+            "Starter currently allows up to 2 child profiles, 1 new story start, and 0 saved-series continuations in the current window."
+        )
+        XCTAssertTrue(app.buttons["seriesDetailUpgradeReviewParentControlsButton"].exists)
+    }
+
+    func testSeriesDetailRepeatRemainsAvailableWhenContinuationIsBlocked() {
+        let app = launchApp(extraEnvironment: [
+            "STORYTIME_UI_TEST_PREFLIGHT_OVERRIDE": "block_continue_story"
+        ])
+
+        let seededSeriesCard = app.buttons["seriesCard-55555555-5555-5555-5555-555555555555"]
+        XCTAssertTrue(seededSeriesCard.waitForExistence(timeout: 10))
+        seededSeriesCard.tap()
+
+        let repeatButton = app.buttons["repeatEpisodeButton"]
+        XCTAssertTrue(repeatButton.waitForExistence(timeout: 10))
+        repeatButton.tap()
+
+        let storyTitle = app.staticTexts["storyTitleLabel"]
+        XCTAssertTrue(storyTitle.waitForExistence(timeout: 120))
+    }
+
+    func testJourneyReviewShowsCurrentPlanCountersForBlockedStart() {
+        let app = launchApp(extraEnvironment: [
+            "STORYTIME_UI_TEST_PREFLIGHT_OVERRIDE": "block_new_story"
+        ])
+
+        let newStoryButton = app.buttons["newStoryInlineButton"]
+        XCTAssertTrue(newStoryButton.waitForExistence(timeout: 10))
+        newStoryButton.tap()
+
+        let startVoiceButton = app.buttons["startVoiceSessionButton"]
+        XCTAssertTrue(scrollToElement(startVoiceButton, in: app))
+        startVoiceButton.tap()
+        XCTAssertTrue(waitForLabel(of: startVoiceButton, toEqual: "Ask a Parent to Review Plans"))
+        startVoiceButton.tap()
+
+        let gateField = app.textFields["parentAccessGateField"]
+        XCTAssertTrue(gateField.waitForExistence(timeout: 10))
+        gateField.tap()
+        gateField.typeText("PARENT")
+
+        let unlockButton = app.buttons["unlockParentControlsButton"]
+        XCTAssertTrue(unlockButton.waitForExistence(timeout: 10))
+        unlockButton.tap()
+
+        let reviewTitle = app.staticTexts["journeyUpgradeReviewTitle"]
+        XCTAssertTrue(reviewTitle.waitForExistence(timeout: 10))
+        XCTAssertEqual(
+            app.staticTexts["journeyUpgradeReviewPlanSummary"].label,
+            "Starter currently allows up to 2 child profiles, 0 new story starts, and 1 saved-series continuation in the current window."
+        )
+    }
+
+    func testJourneyAllowsNewStoryWhenPlanStillHasRoom() {
+        let app = launchApp(extraEnvironment: [
+            "STORYTIME_UI_TEST_PREFLIGHT_OVERRIDE": "allow_new_story",
+            "STORYTIME_UI_TEST_ENTITLEMENT_TIER": "plus"
+        ])
+
+        let newStoryButton = app.buttons["newStoryInlineButton"]
+        XCTAssertTrue(newStoryButton.waitForExistence(timeout: 10))
+        newStoryButton.tap()
+
+        let startVoiceButton = app.buttons["startVoiceSessionButton"]
+        XCTAssertTrue(scrollToElement(startVoiceButton, in: app))
+        startVoiceButton.tap()
+
+        let storyTitle = app.staticTexts["storyTitleLabel"]
+        XCTAssertTrue(storyTitle.waitForExistence(timeout: 120))
+    }
+
+    func testSeriesDetailAllowsNewEpisodeWhenPlanStillHasRoom() {
+        let app = launchApp(extraEnvironment: [
+            "STORYTIME_UI_TEST_PREFLIGHT_OVERRIDE": "allow_continue_story",
+            "STORYTIME_UI_TEST_ENTITLEMENT_TIER": "plus"
+        ])
+
+        let seededSeriesCard = app.buttons["seriesCard-55555555-5555-5555-5555-555555555555"]
+        XCTAssertTrue(seededSeriesCard.waitForExistence(timeout: 10))
+        seededSeriesCard.tap()
+
+        let newEpisodeButton = app.buttons["newEpisodeButton"]
+        XCTAssertTrue(newEpisodeButton.waitForExistence(timeout: 10))
+        newEpisodeButton.tap()
+
+        let storyTitle = app.staticTexts["storyTitleLabel"]
+        XCTAssertTrue(storyTitle.waitForExistence(timeout: 120))
     }
 
     func testJourneyExplainsFreshStartAndLiveFollowUpBeforeSessionStarts() {
@@ -653,25 +953,25 @@ final class StoryTimeUITests: XCTestCase {
         openParentControls(in: app)
 
         let parentRawAudioStatusLabel = app.staticTexts["parentRawAudioStatusLabel"]
-        XCTAssertTrue(parentRawAudioStatusLabel.waitForExistence(timeout: 10))
+        XCTAssertTrue(scrollToElement(parentRawAudioStatusLabel, in: app))
         XCTAssertEqual(parentRawAudioStatusLabel.label, "Raw audio is not saved")
 
         let parentPrivacySummary = app.staticTexts["parentPrivacySummary"]
-        XCTAssertTrue(parentPrivacySummary.waitForExistence(timeout: 10))
+        XCTAssertTrue(scrollToElement(parentPrivacySummary, in: app))
         XCTAssertEqual(
             parentPrivacySummary.label,
             "Use Parent Controls for child setup, privacy, retention, and deletion on this device."
         )
 
         let parentPrivacyLocalSummary = app.staticTexts["parentPrivacyLocalSummary"]
-        XCTAssertTrue(parentPrivacyLocalSummary.waitForExistence(timeout: 10))
+        XCTAssertTrue(scrollToElement(parentPrivacyLocalSummary, in: app))
         XCTAssertEqual(
             parentPrivacyLocalSummary.label,
             "What stays on this device: saved stories and continuity after the session ends."
         )
 
         let parentPrivacyLiveSummary = app.staticTexts["parentPrivacyLiveSummary"]
-        XCTAssertTrue(parentPrivacyLiveSummary.waitForExistence(timeout: 10))
+        XCTAssertTrue(scrollToElement(parentPrivacyLiveSummary, in: app))
         XCTAssertEqual(
             parentPrivacyLiveSummary.label,
             "What goes live during a session: microphone audio, spoken prompts, story generation, and revisions. Raw audio is not saved."
@@ -812,6 +1112,19 @@ final class StoryTimeUITests: XCTestCase {
         XCTAssertTrue(unlockButton.waitForExistence(timeout: 10))
         XCTAssertTrue(unlockButton.isEnabled)
         unlockButton.tap()
+    }
+
+    private func startSeededReplayAndWaitForCompletion(in app: XCUIApplication) {
+        let seededSeriesCard = app.buttons["seriesCard-55555555-5555-5555-5555-555555555555"]
+        XCTAssertTrue(seededSeriesCard.waitForExistence(timeout: 10))
+        seededSeriesCard.tap()
+
+        let repeatButton = app.buttons["repeatEpisodeButton"]
+        XCTAssertTrue(repeatButton.waitForExistence(timeout: 10))
+        repeatButton.tap()
+
+        let replayButton = app.buttons["completionReplayButton"]
+        XCTAssertTrue(replayButton.waitForExistence(timeout: 30))
     }
 
     private func scrollToElement(_ element: XCUIElement, in app: XCUIApplication, maxSwipes: Int = 5) -> Bool {

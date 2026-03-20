@@ -1,5 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
-import { analytics } from "../lib/analytics.js";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { AnalyticsSink, analytics } from "../lib/analytics.js";
 import { createOpenAI } from "../lib/openaiClient.js";
 import { SlidingWindowRateLimiter } from "../lib/rateLimiter.js";
 import {
@@ -12,6 +15,15 @@ import { defaultShouldRetry, withRetry } from "../lib/retry.js";
 import { makeRequest, makeRequestContext, makeTestEnv } from "./testHelpers.js";
 
 describe("request context, retry, rate limiting, analytics", () => {
+  beforeEach(() => {
+    analytics.reset();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    analytics.reset();
+  });
+
   it("resolves request ids and regions", () => {
     const env = makeTestEnv({ DEFAULT_REGION: "EU", ALLOWED_REGIONS: ["EU"] });
     const exactRequest = makeRequest({
@@ -86,9 +98,9 @@ describe("request context, retry, rate limiting, analytics", () => {
     randomSpy.mockRestore();
   });
 
-  it("records analytics counters and can create an OpenAI client", () => {
+  it("records analytics counters session summaries and launch events", () => {
     const suffix = Date.now().toString();
-    const before = analytics.snapshot();
+    const sessionId = `session-${suffix}`;
     analytics.recordRequest({
       requestId: `req-${suffix}`,
       route: `/voice/${suffix}`,
@@ -96,7 +108,7 @@ describe("request context, retry, rate limiting, analytics", () => {
       status: 200,
       durationMs: 12,
       region: "US",
-      sessionId: `session-${suffix}`
+      sessionId
     });
     analytics.recordOpenAI({
       requestId: `req-openai-${suffix}`,
@@ -106,6 +118,7 @@ describe("request context, retry, rate limiting, analytics", () => {
       provider: "openai",
       model: "gpt-realtime",
       region: "US",
+      sessionId,
       attempts: 1,
       durationMs: 20,
       success: true
@@ -118,6 +131,7 @@ describe("request context, retry, rate limiting, analytics", () => {
       provider: "openai",
       model: "gpt-4.1-mini",
       region: "US",
+      sessionId,
       attempts: 1,
       durationMs: 22,
       success: true
@@ -130,6 +144,7 @@ describe("request context, retry, rate limiting, analytics", () => {
       provider: "openai",
       model: "text-embedding-3-small",
       region: "US",
+      sessionId,
       attempts: 1,
       durationMs: 10,
       success: true
@@ -140,20 +155,92 @@ describe("request context, retry, rate limiting, analytics", () => {
       event: `session_issued_${suffix}`,
       region: "US"
     });
+    analytics.recordLaunchEvent({
+      requestId: `req-launch-${suffix}`,
+      route: "/v1/entitlements/preflight",
+      event: "entitlement_preflight",
+      outcome: "blocked",
+      region: "US",
+      sessionId,
+      action: "new_story",
+      blockReason: "story_starts_exhausted",
+      upgradeSurface: "new_story_journey",
+      entitlementTier: "starter",
+      remainingStoryStarts: 0,
+      remainingContinuations: 2
+    });
 
     const snapshot = analytics.snapshot();
+    const report = analytics.report();
+    const session = report.sessions[sessionId];
     expect(snapshot[`http:/voice/${suffix}:2xx`]).toBe(1);
     expect(snapshot[`openai:realtime.call.${suffix}:success`]).toBe(1);
     expect(snapshot[`openai:responses.story_generate.${suffix}:success`]).toBe(1);
-    expect((snapshot["openai_stage:interaction:success"] ?? 0) - (before["openai_stage:interaction:success"] ?? 0)).toBe(1);
-    expect((snapshot["openai_stage_group:interaction:success"] ?? 0) - (before["openai_stage_group:interaction:success"] ?? 0)).toBe(1);
-    expect((snapshot["openai_stage:story_generation:success"] ?? 0) - (before["openai_stage:story_generation:success"] ?? 0)).toBe(1);
-    expect((snapshot["openai_stage_group:generation:success"] ?? 0) - (before["openai_stage_group:generation:success"] ?? 0)).toBe(1);
-    expect((snapshot["openai_stage:continuity_retrieval:success"] ?? 0) - (before["openai_stage:continuity_retrieval:success"] ?? 0)).toBe(1);
-    expect(snapshot["openai_stage_group:narration:success"]).toBe(before["openai_stage_group:narration:success"]);
+    expect(snapshot["openai_stage:interaction:success"]).toBe(1);
+    expect(snapshot["openai_stage_group:interaction:success"]).toBe(1);
+    expect(snapshot["openai_stage:story_generation:success"]).toBe(1);
+    expect(snapshot["openai_stage_group:generation:success"]).toBe(1);
+    expect(snapshot["openai_stage:continuity_retrieval:success"]).toBe(1);
+    expect(snapshot["launch:entitlement_preflight:blocked"]).toBe(1);
+    expect(snapshot["launch_action:new_story:blocked"]).toBe(1);
+    expect(snapshot["launch_block:story_starts_exhausted"]).toBe(1);
+    expect(snapshot["launch_surface:new_story_journey:blocked"]).toBe(1);
     expect(snapshot[`security:session_issued_${suffix}`]).toBe(1);
+    expect(report.counters["launch:entitlement_preflight:blocked"]).toBe(1);
+    expect(session.request_count).toBe(1);
+    expect(session.request_duration_ms).toBe(12);
+    expect(session.openai_call_count).toBe(3);
+    expect(session.openai_duration_ms).toBe(52);
+    expect(session.runtime_stage_groups.interaction?.call_count).toBe(1);
+    expect(session.runtime_stage_groups.generation?.call_count).toBe(1);
+    expect(session.runtime_stage_groups.supporting?.call_count).toBe(1);
+    expect(session.launch_events["entitlement_preflight:blocked"]).toBe(1);
+    expect(session.launch_events["action:new_story:blocked"]).toBe(1);
+    expect(session.launch_events["block:story_starts_exhausted"]).toBe(1);
+    expect(session.launch_events["surface:new_story_journey:blocked"]).toBe(1);
+    expect(session.last_entitlement_tier).toBe("starter");
+    expect(session.remaining_story_starts).toBe(0);
+    expect(session.remaining_continuations).toBe(2);
 
     const client = createOpenAI(makeTestEnv());
     expect(client).toBeTruthy();
+  });
+
+  it("reloads persisted analytics state from disk", () => {
+    const persistencePath = path.join(os.tmpdir(), `storytime-analytics-persist-${Date.now()}.json`);
+    const firstSink = new AnalyticsSink(persistencePath);
+
+    firstSink.recordRequest({
+      requestId: "req-persist-1",
+      route: "/v1/session/identity",
+      method: "POST",
+      status: 200,
+      durationMs: 14,
+      region: "US",
+      sessionId: "session-persist"
+    });
+    firstSink.recordLaunchEvent({
+      requestId: "req-persist-launch",
+      route: "/v1/entitlements/preflight",
+      event: "entitlement_preflight",
+      outcome: "allowed",
+      region: "US",
+      sessionId: "session-persist",
+      action: "new_story",
+      entitlementTier: "starter",
+      remainingStoryStarts: 2,
+      remainingContinuations: 3
+    });
+
+    const secondSink = new AnalyticsSink(persistencePath);
+    const report = secondSink.report();
+
+    expect(report.counters["http:/v1/session/identity:2xx"]).toBe(1);
+    expect(report.counters["launch:entitlement_preflight:allowed"]).toBe(1);
+    expect(report.sessions["session-persist"]?.request_count).toBe(1);
+    expect(report.sessions["session-persist"]?.launch_events["entitlement_preflight:allowed"]).toBe(1);
+
+    secondSink.reset();
+    expect(fs.existsSync(persistencePath)).toBe(false);
   });
 });

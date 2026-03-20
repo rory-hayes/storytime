@@ -2200,7 +2200,7 @@ Completion notes:
 
 ### M9.4.2 - Saved-series continuation gate and replay-safe routing
 
-Status: `TODO`
+Status: `DONE`
 
 Goal:
 - Add the continuation-focused upgrade surface to `StorySeriesDetailView` while keeping replay available according to the locked MVP rules.
@@ -2221,9 +2221,14 @@ Definition of done:
 - `StorySeriesDetailView` blocks new-episode launches before runtime cost begins when preflight disallows them.
 - Replay remains available according to the approved rules.
 
+Completion notes:
+- `StorySeriesDetailView` now runs entitlement preflight before `New Episode`, keeps blocked continuation out of `VoiceSessionView`, and routes the parent through the lightweight gate into a saved-series review sheet.
+- `Repeat` remains a direct replay path and is not preflighted, keeping the surface aligned to the locked MVP replay rule.
+- Targeted UI coverage now pins blocked saved-series continuation, parent-managed review routing, replay remaining available under a continuation block, and the unchanged saved-series action hierarchy.
+
 ### M9.4.3 - Durable parent plan management and optional home awareness
 
-Status: `TODO`
+Status: `DONE`
 
 Goal:
 - Add the durable parent-managed plan surface, restore affordance, and any low-risk soft plan awareness needed to complete the approved upgrade hierarchy.
@@ -2246,9 +2251,15 @@ Definition of done:
 - The approved parent-managed upgrade hierarchy is fully present.
 - Durable plan-state and restore entry are available outside the live child session.
 
+Completion notes:
+- `ParentTrustCenterView` now exposes a durable plan section with current Starter status, remaining-use summaries, explicit Starter versus Plus framing, refresh, and restore entry without introducing child-facing purchase UI.
+- The blocked new-story review flow now points parents at `ParentTrustCenterView`, and the review copy explicitly says that current plan review, upgrades, and restore live in Parent Controls.
+- Optional `HomeView` plan awareness was intentionally deferred because it was not required to complete the approved hierarchy and would have widened launch-scope risk.
+- Targeted UI coverage now pins the durable parent plan surface, the journey-review handoff into Parent Controls, and the existing add-child parent-controls flow with scrolling for the new higher plan section.
+
 ### M9.5 - Usage limits and plan enforcement
 
-Status: `TODO`
+Status: `DONE`
 
 Goal:
 - Enforce the final Starter versus Plus boundaries before realtime boot, discovery, generation, or continuation cost is incurred.
@@ -2275,9 +2286,109 @@ Definition of done:
 - Client and backend agree on blocked versus allowed behavior.
 - Allowed replay and trust flows remain intact.
 
+Split note:
+- `M9.5` is too large for one safe run because the repo still lacks both config-backed launch defaults and a backend-owned usage ledger. It is split into `M9.5.1` through `M9.5.3` so launch-readiness enforcement can land in deterministic slices without inventing a fake client-side counter system.
+
+Completion notes:
+- `M9.5.1` moved Starter and Plus defaults into backend config-backed entitlement snapshots so live bootstrap, sync, and preflight all expose explicit caps and remaining allowance.
+- `M9.5.2` added backend-owned rolling usage depletion at entitlement preflight and refreshed entitlement envelopes back to the client cache.
+- `M9.5.3` aligned parent-facing copy, child-profile gating, and blocked-launch review summaries to the enforced counters and finished the blocked-versus-allowed UI verification for the final launch-path rules.
+
+### M9.5.1 - Config-backed entitlement defaults in live snapshots
+
+Status: `DONE`
+
+Goal:
+- Replace the current nil-heavy starter and plus capability defaults with config-backed launch defaults in backend-issued entitlement snapshots.
+
+Concrete tasks:
+- Add backend configuration for starter and plus launch defaults covering child-profile cap, new-story cap, continuation cap, and rolling usage window.
+- Issue bootstrap and sync entitlement snapshots from those configured defaults instead of hardcoded nil counters.
+- Keep replay and parent-trust capabilities allowed, and do not introduce fake counter depletion before a backend-owned usage ledger exists.
+
+Required tests or verification method:
+- backend `entitlements.test.ts` for configured starter and plus snapshot issuance
+- backend `app.integration.test.ts` for bootstrap or preflight snapshots carrying the configured defaults
+- iOS `APIClientTests` for decoding and caching the updated entitlement snapshot contract
+
+Dependencies:
+- M9.1
+- M9.3.2
+- M9.3.3
+
+Definition of done:
+- Live bootstrap and sync snapshots expose explicit config-backed plan defaults instead of nil counters.
+- Preflight decisions consume those configured defaults through the existing contract.
+- Client and backend tests pin the updated snapshot shape.
+
+Completion notes:
+- Backend env now defines config-backed Starter and Plus launch defaults for child-profile cap, new-story allowance, continuation allowance, story-length cap, and rolling usage-window duration.
+- `issueBootstrapEntitlements(...)` and `issueSyncedEntitlements(...)` now issue live snapshots with explicit remaining counts and window duration instead of nil-heavy placeholder values.
+- Targeted backend entitlement and integration tests plus iOS `APIClientTests` now pin the updated snapshot contract.
+
+### M9.5.2 - Backend usage accounting and preflight depletion
+
+Status: `DONE`
+
+Goal:
+- Add backend-owned usage accounting so starter and plus snapshots can deplete remaining new-story and continuation allowance across launches.
+
+Concrete tasks:
+- Introduce a backend-owned usage ledger keyed to the active install/session identity model.
+- Decrement remaining new-story and continuation allowance at the correct pre-cost boundary.
+- Refresh issued entitlement snapshots so remaining counters stay aligned with backend truth.
+
+Required tests or verification method:
+- backend route and service tests for counter initialization, depletion, and reset-window behavior
+- iOS `APIClientTests` for refreshed remaining-counter handling if response shapes change
+- targeted `StoryTimeUITests` for blocked versus allowed new-story and saved-series continuation flows once live depletion is wired
+
+Dependencies:
+- M9.5.1
+
+Definition of done:
+- Remaining story-start and continuation counts are backend-owned and survive beyond a single bootstrap.
+- Preflight blocks depleted launches before runtime cost starts.
+- Replay and parent-trust flows remain available.
+
+Completion notes:
+- Backend entitlement handling now maintains an install-scoped rolling usage ledger for `new_story` and `continue_story` actions, recalculates remaining counters against the current plan snapshot, and reflects depleted counters in bootstrap and sync responses.
+- `/v1/entitlements/preflight` now consumes allowed cost-bearing launches at the preflight boundary, returns refreshed remaining counters, and includes a refreshed entitlement envelope for client cache alignment.
+- `APIClient.preflightEntitlements(...)` now stores refreshed entitlement envelopes from preflight responses, and targeted backend, client, and focused UI verification now pin depletion, reset-window behavior, blocked launch behavior, and replay-safe routing.
+
+### M9.5.3 - Client plan-limit alignment and launch-path verification
+
+Status: `DONE`
+
+Goal:
+- Align parent-managed client surfaces with the enforced plan limits and finish the launch-facing verification for `M9.5`.
+
+Concrete tasks:
+- Update parent-controls child-profile management and plan messaging so they reflect the enforced entitlement limits truthfully.
+- Ensure blocked new-story and continuation paths present plan state and review guidance consistent with the backend-owned counters.
+- Finish the directly affected UI coverage for allowed and blocked launch paths under the final `M9.5` rules.
+
+Required tests or verification method:
+- directly affected `StoryTimeUITests` for blocked and allowed launch paths plus parent-controls child-profile gating
+- targeted iOS unit tests for plan-state presentation if helper extraction is needed
+
+Dependencies:
+- M9.5.1
+- M9.5.2
+
+Definition of done:
+- Parent-managed client surfaces reflect the enforced plan limits truthfully.
+- Launch-facing UI coverage pins the final blocked versus allowed behavior.
+- `M9.5` can be marked done without known launch-readiness gaps in usage-limit enforcement.
+
+Completion notes:
+- `ParentTrustCenterView` now uses entitlement-backed child-profile caps for add-child gating, shows truthful plan allowance summaries, and surfaces the blocked child-profile state without fallback hardcoded marketing copy.
+- Blocked new-story and saved-series continuation review copy now mirrors the live entitlement snapshot counters so parent-managed guidance stays aligned with backend-owned limits.
+- `UITestSeed` now exposes deterministic allowed and blocked entitlement variants, `StoryLibraryStore` now accepts a plan-backed child-profile cap for gating, and targeted `StoryLibraryStoreTests` plus `StoryTimeUITests` now pin blocked and allowed launch behavior for the final `M9.5` rules.
+
 ### M9.6 - End-of-story and repeat-use loop implementation
 
-Status: `TODO`
+Status: `DONE`
 
 Goal:
 - Turn the documented completion-loop direction into a real product flow that bridges a finished session into replay, continuation, and return-to-library behavior.
@@ -2306,9 +2417,15 @@ Definition of done:
 - Replay, continuation, and return-to-library actions map cleanly to real product behavior.
 - Finished stories are not interrupted by blocking upgrade UI.
 
+Completion notes:
+- `VoiceSessionView` now shows an explicit completion card plus child-safe replay, new-episode, and return actions once a story finishes.
+- `PracticeSessionViewModel.replayCompletedStory()` now restarts narration from the beginning of the completed story without widening save behavior, and targeted tests pin the replay path plus repeat-history invariants.
+- Saved-series sessions now return to the existing `StorySeriesDetailView` context for continuation and "Back to Saved Stories," while new-story launches still keep a clean path back toward home through the journey flow.
+- `docs/end-of-story-repeat-use-loop.md` now includes an implementation addendum documenting the shipped behavior and the narrowed saved-series return-path decision.
+
 ### M9.7 - Cost, usage, and latency telemetry for launch confidence
 
-Status: `TODO`
+Status: `DONE`
 
 Goal:
 - Finalize the telemetry needed to make launch economics, limit decisions, and launch-candidate confidence evidence-based.
@@ -2337,9 +2454,99 @@ Definition of done:
 - New entitlement and upgrade events are measurable and redacted appropriately.
 - The later launch-candidate milestone can rely on explicit telemetry evidence instead of inference.
 
+Completion notes:
+- `M9.7` is split into `M9.7.1` through `M9.7.3` because the original milestone combines backend analytics shape, client launch-event capture, and the final verification/report artifact. Landing those in one run would make it too easy to blur instrumentation, reporting, and acceptance evidence changes.
+- `backend/src/app.ts` and `backend/src/lib/analytics.ts` now expose a concrete backend `/health` telemetry report with launch-event counters plus per-session usage summaries, and `APIClient.swift` now exposes the parallel client `ClientLaunchTelemetry.report()` surface for restore, blocked-review, and parent-plan events.
+- `docs/verification/launch-confidence-telemetry-report.md` now records the exact verification commands, evidence labels, minimum commercial-confidence report shape, and the remaining threshold and durability gaps that still feed `M9.8`.
+
+### M9.7.1 - Backend launch telemetry and session-reporting foundation
+
+Status: `DONE`
+
+Goal:
+- Extend the backend analytics layer so launch-relevant entitlement activity and provider usage can be inspected by session instead of only through flat counters.
+
+Concrete tasks:
+- Add backend launch telemetry for entitlement bootstrap, entitlement sync, and entitlement preflight allow or block outcomes.
+- Extend backend analytics to keep per-session request, provider-usage, and launch-event summaries without logging transcript text, story text, or raw audio.
+- Expose a concrete backend reporting surface that later launch-confidence verification can inspect directly.
+
+Required tests or verification method:
+- targeted backend analytics and integration tests for new counters and session summaries
+- no completion without a backend-visible reporting path for launch-relevant telemetry
+
+Dependencies:
+- M9.3.2
+- M9.3.3
+- M9.5
+
+Definition of done:
+- Backend telemetry now exposes redacted launch-event counters plus per-session summaries for request, provider-usage, and entitlement activity.
+- The reporting surface is concrete enough for later launch-confidence verification to consume directly.
+
+Completion notes:
+- Backend analytics now records launch events for entitlement bootstrap, entitlement sync, and entitlement preflight allow or block outcomes.
+- Provider-usage telemetry is now session-joinable through `sessionId`, and the analytics report now exposes both flat counters and per-session summaries for request, OpenAI usage, runtime-stage groups, and launch-event activity.
+- `/health` now returns the concrete backend telemetry report shape needed for later launch-confidence verification, and targeted analytics plus integration tests pin that reporting surface.
+
+### M9.7.2 - Client launch telemetry for entitlement and upgrade surfaces
+
+Status: `DONE`
+
+Goal:
+- Add the client-side launch telemetry needed to observe restore, upgrade-surface presentation, and launch-path outcomes on the active iOS product surfaces.
+
+Concrete tasks:
+- Record launch-relevant client events for restore attempts, blocked-launch review presentation, parent-controls plan management, and related entitlement outcomes.
+- Keep the existing grouped runtime-stage telemetry intact while making launch moments observable without transcript leakage.
+- Add targeted iOS tests for the new launch-event capture path.
+
+Required tests or verification method:
+- targeted iOS unit or UI telemetry tests for the emitted launch events
+
+Dependencies:
+- M9.7.1
+
+Definition of done:
+- The active iOS launch surfaces emit redacted launch telemetry for restore, upgrade review, and blocked-versus-allowed launch moments.
+
+Completion notes:
+- `APIClient` now records entitlement sync and preflight launch outcomes into a redacted client launch-telemetry store, and the entitlement trace operation labels for sync versus preflight are corrected so API traces and launch telemetry stay aligned.
+- `ParentTrustCenterView` now emits parent-managed plan presentation plus refresh and restore events, and both blocked-review surfaces now emit presentation events without logging transcript text, story text, or raw audio.
+- Targeted `APIClientTests` now pin the emitted counters and per-session summary shape, and focused existing UI tests re-verify the touched parent-managed review and plan surfaces.
+
+### M9.7.3 - Launch-confidence verification artifact and reporting path
+
+Status: `DONE`
+
+Goal:
+- Turn the backend and client telemetry foundations into the explicit verification artifact required for launch-go or no-go review.
+
+Concrete tasks:
+- Update the verification artifact for launch telemetry with exact commands, evidence labels, and remaining gaps.
+- Define the minimum commercial-confidence report shape for launch review using the concrete reporting paths added in `M9.7.1` and `M9.7.2`.
+- Record any still-unverified telemetry limits or threshold gaps explicitly.
+
+Required tests or verification method:
+- updated verification artifact with evidence labels and exact commands
+- targeted reruns needed to support the recorded evidence
+
+Dependencies:
+- M9.7.1
+- M9.7.2
+
+Definition of done:
+- The repo contains an explicit launch-confidence telemetry report with evidence labels, exact commands, and remaining gaps.
+- `M9.8` can consume that report instead of inferring telemetry readiness.
+
+Completion notes:
+- `docs/verification/launch-confidence-telemetry-report.md` now turns the backend `/health` telemetry report and the client `ClientLaunchTelemetry.report()` surface into one explicit repo-owned verification artifact for launch review.
+- The report records the exact backend, unit-test, and focused UI commands used for evidence, and it labels material telemetry claims as `VERIFIED BY TEST`, `VERIFIED BY CODE INSPECTION`, `PARTIALLY VERIFIED`, or `UNVERIFIED`.
+- The minimum commercial-confidence report shape is now explicit in repo terms, and the remaining gaps are narrowed to undefined numeric thresholds plus the current in-memory or process-local durability limits.
+
 ### M9.8 - Launch candidate QA and acceptance pass
 
-Status: `TODO`
+Status: `DONE`
 
 Goal:
 - Run the explicit launch-candidate QA and acceptance pass for the MVP defined in `M9.1`.
@@ -2371,9 +2578,317 @@ Dependencies:
 - M9.4
 - M9.5
 - M9.6
+- M9.7.1
+- M9.7.2
+- M9.7.3
 - M9.7
 
 Definition of done:
 - The repo has an explicit launch-candidate acceptance report with pass, fail, or blocked outcomes.
 - Remaining blockers are recorded clearly in `PLANS.md` and `SPRINT.md`.
 - StoryTime is either evidence-backed launch-ready or the blocking gaps are explicit and queued.
+
+Completion notes:
+- `docs/verification/launch-candidate-acceptance-report.md` now records the exact launch-candidate command set, evidence labels, checklist findings, blocker inventory, and final go or no-go decision.
+- The launch-candidate QA pass completed with a `NO-GO` outcome because the backend launch-contract suite and hybrid-runtime baseline are green, but the final iOS launch-product unit and UI suites still fail on coordinator repeat-revision behavior, first-story entry, session cueing, privacy-copy, and parent-gate regressions.
+- Pricing-confidence thresholds and durable joined telemetry remain only partially verified, so they are recorded explicitly instead of being treated as hidden assumptions.
+
+### M9.9 - Launch blocker remediation
+
+Status: `IN PROGRESS`
+
+Goal:
+- Clear the concrete blockers found in `M9.8` and rerun launch acceptance against a green candidate.
+
+Concrete tasks:
+- Fix the failing coordinator repeat or revision acceptance regressions.
+- Fix the failing first-story, session-cue, privacy-copy, and parent-gate UI regressions.
+- Re-run the blocked launch-product suites and carry any remaining go or no-go gaps into a final launch rerun.
+
+Required tests or verification method:
+- the failing iOS unit and UI cases recorded in `docs/verification/launch-candidate-acceptance-report.md`
+- targeted regression reruns per blocker slice
+- a final `M9.9.3` launch-rerun verification update
+
+Dependencies:
+- M9.8
+
+Definition of done:
+- The blockers recorded in `M9.8` are either fixed and green or explicitly reclassified with evidence.
+- The next launch-candidate rerun has a concrete blocker-free target.
+
+### M9.9.1 - Coordinator repeat/revision acceptance regression fixes
+
+Status: `DONE`
+
+Goal:
+- Restore green coordinator acceptance coverage for revised-story persistence, repeat-episode replacement, resume position, and bounded revision-queue behavior.
+
+Concrete tasks:
+- Reproduce and fix the failing `PracticeSessionViewModelTests` acceptance and repeat-revision cases recorded by `M9.8`.
+- Keep revision ownership, repeat replacement semantics, and continuity replacement deterministic.
+- Add or update coordinator regression tests only as needed for the repaired behavior.
+
+Required tests or verification method:
+- targeted `PracticeSessionViewModelTests`
+- targeted related `StoryLibraryStoreTests` only if persistence semantics change
+
+Dependencies:
+- M9.8
+
+Definition of done:
+- The current `M9.8` coordinator blocker cases pass and the repaired behavior stays regression-covered.
+
+Completion notes:
+- `PracticeSessionViewModel` now issues deterministic repeat-episode full-story rewrite requests when no future-scene boundary exists, merges revisions from the backend-reported `revisedFromSceneIndex`, and completes repeat-mode replace-in-place saves without getting stuck in a resume path.
+- The blocked coordinator acceptance tests from `M9.8` are green again, and the interruption router now explicitly treats plain "add a ..." cues as revision language.
+
+### M9.9.2 - Launch UI and parent-trust regression fixes
+
+Status: `DONE`
+
+Goal:
+- Restore green launch-product UI coverage for parent gate behavior, truthful privacy copy, first-story entry, and session cue presentation.
+
+Concrete tasks:
+- Reproduce and fix the failing `StoryTimeUITests` cases recorded by `M9.8`.
+- Keep onboarding, parent controls, privacy messaging, and voice-session cueing aligned with the current hybrid runtime and trust model.
+- Add or update only the directly affected UI coverage.
+
+Required tests or verification method:
+- targeted `StoryTimeUITests`
+
+Dependencies:
+- M9.8
+
+Definition of done:
+- The current `M9.8` UI blocker cases pass and the repaired launch surfaces remain truthfully aligned.
+
+Completion notes:
+- The blocked `StoryTimeUITests` launch-product cases from `M9.8` are green again, including parent gate entry, privacy-copy verification, first-story entry, and the listening plus storytelling cue surfaces.
+- Seeded UI-test preflight now derives a local fallback decision from the current entitlement snapshot when no explicit override is present, so launch-facing UI coverage no longer depends on live backend availability.
+- `VoiceSessionView` now swaps in a deterministic UI-test session client under `STORYTIME_UI_TEST_MODE`, keeping story generation and revision stable for the launch-product UI suite without changing production behavior.
+- Parent/privacy UI assertions now scroll within the current plan-first parent-controls form, and the listening-cue assertion now checks the stable child-facing contract instead of a timing-sensitive discovery question number.
+
+### M9.9.3 - Launch candidate re-run and commercial-threshold decision
+
+Status: `DONE`
+
+Goal:
+- Re-run the blocked launch-candidate pack after `M9.9.1` and `M9.9.2`, then record the final threshold decision and launch state.
+
+Concrete tasks:
+- Re-run the `M9.8` command set after blocker remediation.
+- Update the launch-candidate report with the new outcomes.
+- Record the commercial threshold decision explicitly as pass, fail, or deferred blocker.
+
+Required tests or verification method:
+- the exact `M9.8` command set
+- updated launch verification report in `docs/verification/`
+
+Dependencies:
+- M9.9.1
+- M9.9.2
+
+Definition of done:
+- The repo has an updated post-remediation launch decision with explicit threshold treatment and no hidden blocker state.
+
+Completion notes:
+- The launch-candidate pack was rerun cleanly on dedicated simulators after `M9.9.1` and `M9.9.2`.
+- The hybrid-runtime baseline and backend launch-contract suite are green, and the full `StoryTimeUITests` launch-product UI suite is now green.
+- The final launch-product unit suite still fails on `PracticeSessionViewModelTests.testBlockedRevisionUsesModerationCategoryAndSafeMessage()` and `PracticeSessionViewModelTests.testTranscriptStartedDuringRevisionIsRejectedAfterNarrationResumes()`, so the launch decision remains `NO-GO`.
+- Commercial thresholds remain explicitly deferred instead of being treated as a hidden launch-ready assumption.
+
+### M9.10 - Remaining launch blockers and threshold closure
+
+Status: `DONE`
+
+Goal:
+- Clear the last verified launch blocker cases and finish the explicit commercial threshold decision before one final launch rerun.
+
+Concrete tasks:
+- Fix the remaining coordinator revision-resume failures that still block the final launch-product unit suite.
+- Define explicit repo-owned cost, latency, and launch-cap threshold treatment for launch review.
+- Re-run the final launch-candidate pack once those items are complete and record the updated go or no-go state.
+
+Required tests or verification method:
+- targeted `PracticeSessionViewModelTests` for the remaining blocker cases
+- updated launch verification report in `docs/verification/launch-candidate-acceptance-report.md`
+
+Dependencies:
+- M9.9.3
+
+Definition of done:
+- The remaining verified launch blocker cases are green.
+- Commercial thresholds are explicit in repo-owned pass, fail, or deferred terms.
+- The repo has one updated final launch decision based on a clean rerun.
+
+Notes:
+- `M9.10.1` through `M9.10.4` are complete.
+- Launch-default cap treatment is explicit and passing, cost plus latency thresholds now have repo-owned numeric terms, and the final launch rerun is green.
+- The current locked MVP candidate is now recorded as `GO`; the next workstream is post-launch telemetry durability and joined-report hardening rather than launch-blocker remediation.
+
+### M9.10.1 - Revision-resume moderation and deferred-transcript blocker fix
+
+Status: `DONE`
+
+Goal:
+- Repair the remaining revision-resume mismatch so blocked revision moderation and deferred transcript rejection after narration resumes both return to deterministic green behavior.
+
+Concrete tasks:
+- Reproduce and fix the two remaining `PracticeSessionViewModelTests` failures from `M9.9.3`.
+- Keep moderation-safe blocked revision handling and deferred transcript rejection aligned with the active revision boundary rules.
+- Add or update only the directly affected coordinator regressions.
+
+Required tests or verification method:
+- `PracticeSessionViewModelTests/testBlockedRevisionUsesModerationCategoryAndSafeMessage`
+- `PracticeSessionViewModelTests/testTranscriptStartedDuringRevisionIsRejectedAfterNarrationResumes`
+- related targeted coordinator tests only if the repaired behavior actually changes
+
+Dependencies:
+- M9.9.3
+
+Definition of done:
+- The remaining `M9.9.3` coordinator blocker cases are green and regression-covered.
+
+Notes:
+- `PracticeSessionViewModel` now accepts backend-authored current-scene replay as a valid revision resume target when narration needs to restart from the interrupted scene.
+- The remaining blocker tests `testBlockedRevisionUsesModerationCategoryAndSafeMessage` and `testTranscriptStartedDuringRevisionIsRejectedAfterNarrationResumes` are green again.
+- Related revision resume, repeat replacement, and revision queue coordinator reruns also passed after the fix.
+
+### M9.10.2 - Commercial threshold definition and final launch rerun
+
+Status: `DONE`
+
+Goal:
+- Define explicit launch-threshold treatment in repo terms and rerun the launch pack after `M9.10.1`.
+
+Concrete tasks:
+- Record explicit pass, fail, or deferred treatment for acceptable cost, latency, and launch-default cap thresholds.
+- Re-run the `M9.8` launch-candidate command set after `M9.10.1`.
+- Update the launch-candidate report with the resulting final go or no-go decision.
+
+Required tests or verification method:
+- the exact `M9.8` command set
+- updated launch verification report in `docs/verification/`
+
+Dependencies:
+- M9.10.1
+
+Definition of done:
+- The repo has an updated final launch decision with explicit threshold treatment and no hidden blocker state.
+
+Notes:
+- The full launch-candidate command set was rerun on March 13, 2026.
+- The hybrid-runtime baseline passed, the backend launch-contract suite passed `53` tests, and the full `StoryTimeUITests` launch-product UI suite passed all `35` tests.
+- The launch-product unit suite still fails on `PracticeSessionViewModelTests.testPausedNarrationHandsOffToInteractionWithoutReconnect()` and `PracticeSessionViewModelTests.testPausedNarrationTranscriptFinalStartsInteractionHandoffDirectly()`, so the launch decision remains `NO-GO`.
+- Launch-default caps now have explicit PASS treatment in repo terms, while cost and latency thresholds are explicit deferred blockers.
+
+### M9.10.3 - Paused-narration interaction handoff blocker fix
+
+Status: `DONE`
+
+Goal:
+- Repair the remaining paused-narration interaction-handoff mismatch so the launch-product unit suite returns to green behavior for no-reconnect handoff and transcript-final direct handoff.
+
+Concrete tasks:
+- Reproduce and fix `PracticeSessionViewModelTests.testPausedNarrationHandsOffToInteractionWithoutReconnect()`.
+- Reproduce and fix `PracticeSessionViewModelTests.testPausedNarrationTranscriptFinalStartsInteractionHandoffDirectly()`.
+- Keep paused narration, direct interaction handoff, and no-reconnect semantics aligned with the active hybrid runtime.
+
+Required tests or verification method:
+- `PracticeSessionViewModelTests/testPausedNarrationHandsOffToInteractionWithoutReconnect`
+- `PracticeSessionViewModelTests/testPausedNarrationTranscriptFinalStartsInteractionHandoffDirectly`
+- related targeted coordinator tests only if the repaired behavior actually changes
+
+Dependencies:
+- M9.10.2
+
+Definition of done:
+- The remaining paused-narration interaction-handoff blocker cases are green and regression-covered.
+
+Notes:
+- `PracticeSessionViewModel` now accepts later future-scene revision start indices during resume validation, which matches the existing `NarrationResumeDecision` and hybrid-state-model contract instead of assuming every revision must restart at `sceneIndex + 1`.
+- `testPausedNarrationHandsOffToInteractionWithoutReconnect()` and `testPausedNarrationTranscriptFinalStartsInteractionHandoffDirectly()` are green again.
+- The broader launch-product unit slice covering `APIClientTests`, `PracticeSessionViewModelTests`, and `StoryLibraryStoreTests` now passes `126` tests with `0` failures.
+
+### M9.10.4 - Numeric commercial threshold decision and clean launch rerun
+
+Status: `DONE`
+
+Goal:
+- Convert cost and latency threshold treatment from deferred blockers into repo-owned numeric pass or fail terms, then rerun the launch pack after `M9.10.3`.
+
+Concrete tasks:
+- Record explicit numeric pass or fail thresholds for launch cost review.
+- Record explicit numeric pass or fail thresholds for launch latency review.
+- Re-run the `M9.8` launch-candidate command set after `M9.10.3`.
+- Update the launch-candidate report with the resulting final go or no-go decision.
+
+Required tests or verification method:
+- the exact `M9.8` command set
+- updated launch verification report in `docs/verification/launch-candidate-acceptance-report.md`
+
+Dependencies:
+- M9.10.3
+
+Definition of done:
+- The repo has one updated launch decision with green verified product suites and commercial thresholds that are no longer deferred.
+
+Notes:
+- The final March 13, 2026 rerun is green: the hybrid-runtime baseline passed, the backend launch-contract suite passed `53` tests, the launch-product unit suite passed `126` tests with `0` failures, and the full `StoryTimeUITests` suite passed `35` tests with `0` failures.
+- Launch cost thresholds are now explicit numeric pass criteria tied to enforced backend plan caps: Starter allows `6` remote-cost-bearing launches per rolling `7` days for `1` child, and Plus allows `24` remote-cost-bearing launches per rolling `7` days across up to `3` children, both with a `10` minute story-length cap.
+- Launch latency thresholds are now explicit numeric pass criteria tied to the active timeout ceilings: `<= 8` seconds for health checks, `<= 12` seconds for session identity and voices, and `<= 20` seconds for entitlement sync, entitlement preflight, realtime session, discovery, generation, revision, and the backend realtime upstream proxy.
+- `docs/verification/launch-candidate-acceptance-report.md` now records the current locked MVP candidate as `GO`.
+
+### M9.11 - Telemetry durability and joined launch-report hardening
+
+Status: `DONE`
+
+Goal:
+- Persist launch telemetry beyond process lifetime and define a joined backend-plus-client launch report so post-launch confidence no longer depends on separate transient reporting surfaces.
+
+Concrete tasks:
+- Persist backend launch telemetry and usage history beyond backend process lifetime.
+- Persist client launch telemetry beyond app process lifetime or export it into a durable launch-review surface.
+- Define one joined backend-plus-client launch report shape that can be inspected directly during post-launch verification.
+
+Required tests or verification method:
+- targeted backend analytics tests
+- targeted iOS telemetry tests
+- updated verification artifact in `docs/verification/`
+
+Dependencies:
+- M9.10.4
+
+Definition of done:
+- Launch telemetry survives process restarts or is exported durably enough for verification.
+- The repo has one joined launch-report surface instead of separate transient backend and client reports.
+
+Notes:
+- Backend analytics now persist counters and per-session summaries to `ANALYTICS_PERSIST_PATH`, and `/health` reloads and serves that durable report through `analytics.report()`.
+- Client launch telemetry now persists its report in `UserDefaults`, and `APIClient.fetchLaunchTelemetryReport()` now joins that durable client report with backend `/health` telemetry in one `LaunchTelemetryJoinedReport`.
+- Targeted backend telemetry tests passed `38` tests, targeted iOS telemetry tests passed `3` tests, and `docs/verification/launch-confidence-telemetry-report.md` now records the durable and joined-report evidence.
+
+### M9.12 - Narration wall-clock telemetry hardening
+
+Status: `TODO`
+
+Goal:
+- Extend narration telemetry from preparation-heavy timing into playback wall-clock evidence so post-launch review can reason about actual narration latency and completion behavior.
+
+Concrete tasks:
+- Record narration playback start, completion, and cancellation wall-clock timing at the coordinator or narration-transport boundary.
+- Preserve explicit stage attribution between narration preparation and playback so the telemetry stays economically meaningful.
+- Update the verification artifact to show the new playback-wall-clock evidence and any remaining measurement gaps.
+
+Required tests or verification method:
+- targeted iOS telemetry or coordinator tests for narration playback timing
+- updated verification artifact in `docs/verification/`
+
+Dependencies:
+- M9.11
+
+Definition of done:
+- Narration telemetry includes playback wall-clock evidence instead of relying primarily on TTS preparation timing.
+- The verification docs record the updated evidence and the remaining telemetry limits clearly.

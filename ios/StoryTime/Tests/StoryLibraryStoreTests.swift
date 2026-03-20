@@ -68,6 +68,20 @@ final class StoryLibraryStoreTests: XCTestCase {
         XCTAssertNotNil(store.activeProfile)
     }
 
+    func testAddChildProfileHonorsProvidedPlanLimit() {
+        let store = makeStore()
+
+        XCTAssertTrue(store.canAddMoreProfiles(maxProfiles: 2))
+
+        store.addChildProfile(name: "Nora", age: 4, sensitivity: .standard, preferredMode: .educational, maxProfiles: 2)
+        XCTAssertEqual(store.childProfiles.count, 2)
+        XCTAssertFalse(store.canAddMoreProfiles(maxProfiles: 2))
+
+        store.addChildProfile(name: "Maeve", age: 6, sensitivity: .extraGentle, preferredMode: .classic, maxProfiles: 2)
+        XCTAssertEqual(store.childProfiles.count, 2)
+        XCTAssertFalse(store.childProfiles.contains(where: { $0.displayName == "Maeve" }))
+    }
+
     func testStoryLifecycleVisibilityAndReplacement() throws {
         let store = makeStore()
         let primaryId = try XCTUnwrap(store.activeProfile?.id)

@@ -1,3 +1,5 @@
+import os from "node:os";
+import path from "node:path";
 import { z } from "zod";
 
 const RegionSchema = z.enum(["US", "EU"]);
@@ -65,6 +67,17 @@ const RawEnvSchema = z.object({
   OPENAI_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(120_000).default(20_000),
   ENABLE_USAGE_METERING: booleanish,
   ENABLE_STRUCTURED_ANALYTICS: booleanish,
+  ANALYTICS_PERSIST_PATH: z.string().trim().min(1).optional(),
+  STARTER_MAX_CHILD_PROFILES: z.coerce.number().int().min(1).max(12).default(1),
+  STARTER_MAX_STORY_STARTS_PER_PERIOD: z.coerce.number().int().min(1).max(100).default(3),
+  STARTER_MAX_CONTINUATIONS_PER_PERIOD: z.coerce.number().int().min(1).max(100).default(3),
+  STARTER_MAX_STORY_LENGTH_MINUTES: z.coerce.number().int().min(1).max(10).default(10),
+  STARTER_USAGE_WINDOW_DURATION_SECONDS: z.coerce.number().int().min(3_600).max(31_536_000).default(604_800),
+  PLUS_MAX_CHILD_PROFILES: z.coerce.number().int().min(1).max(12).default(3),
+  PLUS_MAX_STORY_STARTS_PER_PERIOD: z.coerce.number().int().min(1).max(500).default(12),
+  PLUS_MAX_CONTINUATIONS_PER_PERIOD: z.coerce.number().int().min(1).max(500).default(12),
+  PLUS_MAX_STORY_LENGTH_MINUTES: z.coerce.number().int().min(1).max(10).default(10),
+  PLUS_USAGE_WINDOW_DURATION_SECONDS: z.coerce.number().int().min(3_600).max(31_536_000).default(604_800),
   APP_VERSION: z.string().default("0.1.0")
 });
 
@@ -81,7 +94,10 @@ const EnvSchema = RawEnvSchema.transform((raw) => {
     TRUST_PROXY: trustProxy,
     API_AUTH_REQUIRED: apiAuthRequired,
     ENABLE_USAGE_METERING: enableUsageMetering,
-    ENABLE_STRUCTURED_ANALYTICS: enableStructuredAnalytics
+    ENABLE_STRUCTURED_ANALYTICS: enableStructuredAnalytics,
+    ANALYTICS_PERSIST_PATH: path.resolve(
+      raw.ANALYTICS_PERSIST_PATH ?? path.join(os.tmpdir(), "storytime-launch-telemetry.json")
+    )
   };
 });
 
@@ -97,6 +113,22 @@ export function loadEnv(raw: NodeJS.ProcessEnv = process.env): Env {
 function assertSecureEnv(env: Env) {
   if (env.SESSION_TOKEN_REFRESH_SECONDS >= env.SESSION_TOKEN_TTL_SECONDS) {
     throw new Error("SESSION_TOKEN_REFRESH_SECONDS must be lower than SESSION_TOKEN_TTL_SECONDS.");
+  }
+
+  if (env.PLUS_MAX_CHILD_PROFILES < env.STARTER_MAX_CHILD_PROFILES) {
+    throw new Error("PLUS_MAX_CHILD_PROFILES must be greater than or equal to STARTER_MAX_CHILD_PROFILES.");
+  }
+
+  if (env.PLUS_MAX_STORY_STARTS_PER_PERIOD < env.STARTER_MAX_STORY_STARTS_PER_PERIOD) {
+    throw new Error("PLUS_MAX_STORY_STARTS_PER_PERIOD must be greater than or equal to STARTER_MAX_STORY_STARTS_PER_PERIOD.");
+  }
+
+  if (env.PLUS_MAX_CONTINUATIONS_PER_PERIOD < env.STARTER_MAX_CONTINUATIONS_PER_PERIOD) {
+    throw new Error("PLUS_MAX_CONTINUATIONS_PER_PERIOD must be greater than or equal to STARTER_MAX_CONTINUATIONS_PER_PERIOD.");
+  }
+
+  if (env.PLUS_MAX_STORY_LENGTH_MINUTES < env.STARTER_MAX_STORY_LENGTH_MINUTES) {
+    throw new Error("PLUS_MAX_STORY_LENGTH_MINUTES must be greater than or equal to STARTER_MAX_STORY_LENGTH_MINUTES.");
   }
 
   if (env.NODE_ENV !== "production") {

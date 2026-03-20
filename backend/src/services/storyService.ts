@@ -691,6 +691,7 @@ export class StoryService {
       model: this.env.OPENAI_RESPONSES_MODEL,
       region: context.region,
       installHash: context.installHash,
+      sessionId: context.sessionId,
       attempts,
       durationMs,
       success
