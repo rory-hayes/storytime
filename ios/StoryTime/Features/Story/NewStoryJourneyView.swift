@@ -121,6 +121,11 @@ struct NewStoryJourneyView: View {
         .onChange(of: lengthMinutes) { _, _ in
             clearLaunchBlockState()
         }
+        .onChange(of: parentUpgradeSheet) { _, destination in
+            if destination == nil {
+                refreshBlockedStateAfterParentReview()
+            }
+        }
     }
 
     private var selectedSeries: StorySeries? {
@@ -723,6 +728,19 @@ struct NewStoryJourneyView: View {
         launchErrorMessage = nil
     }
 
+    private func refreshBlockedStateAfterParentReview() {
+        guard let blockedResponse = blockedPreflightResponse,
+              let currentSnapshot = AppEntitlements.currentSnapshot else {
+            return
+        }
+
+        let tokenChanged = AppEntitlements.currentToken != blockedResponse.entitlements?.token
+        let snapshotChanged = currentSnapshot != blockedResponse.snapshot
+        if tokenChanged || snapshotChanged {
+            clearLaunchBlockState()
+        }
+    }
+
     private func syncSelectedSeriesSelection() {
         guard let selectedSeriesId else {
             self.selectedSeriesId = scopedVisibleSeries.first?.id
@@ -868,7 +886,7 @@ private struct JourneyUpgradeReviewView: View {
                 }
                 .accessibilityIdentifier("journeyUpgradeReviewParentControlsButton")
 
-                Text("Current plan review, upgrades, and restore stay in Parent Controls. The live child story does not show upgrade UI.")
+                Text("Current plan review, upgrades, and restore stay in Parent Controls. After a parent updates the plan there, come back here and try again without moving purchase UI into the live child story.")
                     .font(.system(size: 13, weight: .medium, design: .rounded))
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("journeyUpgradeReviewNextStepsSummary")

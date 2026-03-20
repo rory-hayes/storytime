@@ -57,6 +57,11 @@ struct StorySeriesDetailView: View {
                 }
             }
         }
+        .onChange(of: parentUpgradeSheet) { _, destination in
+            if destination == nil {
+                refreshBlockedStateAfterParentReview()
+            }
+        }
         .navigationTitle("Story Series")
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -387,6 +392,20 @@ struct StorySeriesDetailView: View {
         blockedPreflightResponse = nil
         shouldStartNewEpisode = true
     }
+
+    private func refreshBlockedStateAfterParentReview() {
+        guard let blockedResponse = blockedPreflightResponse,
+              let currentSnapshot = AppEntitlements.currentSnapshot else {
+            return
+        }
+
+        let tokenChanged = AppEntitlements.currentToken != blockedResponse.entitlements?.token
+        let snapshotChanged = currentSnapshot != blockedResponse.snapshot
+        if tokenChanged || snapshotChanged {
+            blockedPreflightResponse = nil
+            launchErrorMessage = nil
+        }
+    }
 }
 
 private enum SeriesDetailParentUpgradeSheet: String, Identifiable {
@@ -493,7 +512,7 @@ private struct SeriesDetailUpgradeReviewView: View {
                 }
                 .accessibilityIdentifier("seriesDetailUpgradeReviewParentControlsButton")
 
-                Text("Current plan review, upgrades, and restore stay in Parent Controls. Replay of saved stories stays separate from this blocked new-episode path.")
+                Text("Current plan review, upgrades, and restore stay in Parent Controls. After a parent updates the plan there, come back here and try this next episode again while replay stays separate.")
                     .font(.system(size: 13, weight: .medium, design: .rounded))
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("seriesDetailUpgradeReviewNextStepsSummary")

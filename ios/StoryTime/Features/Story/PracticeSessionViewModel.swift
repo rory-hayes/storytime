@@ -1624,12 +1624,24 @@ final class PracticeSessionViewModel: ObservableObject {
 
         let utteranceID = nextUtteranceID(prefix: "scene-\(startIndex)")
         activeNarrationUtteranceID = utteranceID
+        recordNarrationPlaybackTelemetry(
+            stage: .ttsPlaybackStarted,
+            source: source.eventName,
+            durationMs: 0
+        )
 
         scenePlaybackTask = Task { [weak self] in
             guard let self else { return }
             let scene = self.preparedNarrationScene(for: story.scenes[startIndex])
+            let startedAt = DispatchTime.now().uptimeNanoseconds
 
             let didComplete = await self.narrationTransport.playScene(scene, utteranceID: utteranceID)
+            let playbackDurationMs = Self.durationMs(since: startedAt)
+            self.recordNarrationPlaybackTelemetry(
+                stage: didComplete ? .ttsPlaybackCompleted : .ttsPlaybackCancelled,
+                source: source.eventName,
+                durationMs: playbackDurationMs
+            )
 
             guard !Task.isCancelled, didComplete else { return }
             await self.process(.narrationSceneFinished(utteranceID: utteranceID, sceneIndex: startIndex))
@@ -2497,6 +2509,19 @@ final class PracticeSessionViewModel: ObservableObject {
         let statusCodeValue = statusCode.map(String.init) ?? "-"
         Self.logger.debug(
             "Voice session runtime telemetry: stage=\(stage.rawValue, privacy: .public) source=\(source, privacy: .public) durationMs=\(durationMs, privacy: .public) costDriver=\(costDriver.rawValue, privacy: .public) operation=\(operationName, privacy: .public) requestId=\(requestIdValue, privacy: .public) sessionId=\(sessionIdValue, privacy: .public) statusCode=\(statusCodeValue, privacy: .public)"
+        )
+    }
+
+    private func recordNarrationPlaybackTelemetry(
+        stage: RuntimeTelemetryStage,
+        source: String,
+        durationMs: Int
+    ) {
+        recordRuntimeTelemetry(
+            stage: stage,
+            source: source,
+            durationMs: durationMs,
+            costDriver: .localSpeech
         )
     }
 

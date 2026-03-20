@@ -86,6 +86,7 @@ final class StoryTimeUITests: XCTestCase {
         let cueValue = sessionCueCard.value as? String ?? ""
         XCTAssertTrue(cueValue.hasPrefix("StoryTime is telling scene "))
         XCTAssertTrue(cueValue.contains("Speak anytime to ask a question or change what happens next."))
+        XCTAssertFalse(app.buttons["parentUpgradeToPlusButton"].exists)
     }
 
     func testVoiceSessionShowsCompletionLoopAfterStoryFinishes() {
@@ -208,10 +209,29 @@ final class StoryTimeUITests: XCTestCase {
             app.staticTexts["parentPlanContinuationsSummary"].label,
             "Saved-series continuations remaining in the current window: 1"
         )
-        XCTAssertTrue(app.buttons["parentRefreshPlanButton"].exists)
-        XCTAssertTrue(app.buttons["parentRestorePurchasesButton"].exists)
-        XCTAssertTrue(app.staticTexts["parentStarterPlanSummary"].exists)
-        XCTAssertTrue(app.staticTexts["parentPlusPlanSummary"].exists)
+        XCTAssertTrue(scrollToElement(app.buttons["parentRefreshPlanButton"], in: app))
+        XCTAssertTrue(scrollToElement(app.buttons["parentRestorePurchasesButton"], in: app))
+        XCTAssertTrue(scrollToElement(app.staticTexts["parentPlanFootnote"], in: app))
+    }
+
+    func testParentControlsCanCompleteParentManagedPlusPurchase() {
+        let app = launchApp()
+
+        openParentControls(in: app)
+
+        let upgradeButton = app.buttons["parentUpgradeToPlusButton"]
+        XCTAssertTrue(upgradeButton.waitForExistence(timeout: 10))
+        XCTAssertEqual(upgradeButton.label, "Upgrade to Plus - $4.99")
+        upgradeButton.tap()
+
+        let planTitle = app.staticTexts["parentPlanTitle"]
+        XCTAssertTrue(waitForLabel(of: planTitle, toEqual: "Plus"))
+        XCTAssertTrue(app.staticTexts["parentPlusActiveSummary"].waitForExistence(timeout: 10))
+        XCTAssertEqual(
+            app.staticTexts["parentPlanActionStatus"].label,
+            "Plus is now ready on this device."
+        )
+        XCTAssertFalse(app.buttons["parentUpgradeToPlusButton"].exists)
     }
 
     func testParentControlsGateAddChildWhenPlanLimitIsReached() {
@@ -600,7 +620,53 @@ final class StoryTimeUITests: XCTestCase {
         let parentPlanTitle = app.staticTexts["parentPlanTitle"]
         XCTAssertTrue(parentPlanTitle.waitForExistence(timeout: 10))
         XCTAssertEqual(parentPlanTitle.label, "Starter")
-        XCTAssertTrue(app.buttons["parentRestorePurchasesButton"].exists)
+        XCTAssertTrue(scrollToElement(app.buttons["parentRestorePurchasesButton"], in: app))
+    }
+
+    func testJourneyBlockedStartCanRecoverAfterParentManagedPurchase() {
+        let app = launchApp(extraEnvironment: [
+            "STORYTIME_UI_TEST_PREFLIGHT_OVERRIDE": "block_new_story"
+        ])
+
+        let newStoryButton = app.buttons["newStoryInlineButton"]
+        XCTAssertTrue(newStoryButton.waitForExistence(timeout: 10))
+        newStoryButton.tap()
+
+        let startVoiceButton = app.buttons["startVoiceSessionButton"]
+        XCTAssertTrue(scrollToElement(startVoiceButton, in: app))
+        startVoiceButton.tap()
+        XCTAssertTrue(waitForLabel(of: startVoiceButton, toEqual: "Ask a Parent to Review Plans"))
+        startVoiceButton.tap()
+
+        let gateField = app.textFields["parentAccessGateField"]
+        XCTAssertTrue(gateField.waitForExistence(timeout: 10))
+        gateField.tap()
+        gateField.typeText("PARENT")
+
+        let unlockButton = app.buttons["unlockParentControlsButton"]
+        XCTAssertTrue(unlockButton.waitForExistence(timeout: 10))
+        unlockButton.tap()
+
+        let parentPlanButton = app.buttons["journeyUpgradeReviewParentControlsButton"]
+        XCTAssertTrue(parentPlanButton.waitForExistence(timeout: 10))
+        parentPlanButton.tap()
+
+        let upgradeButton = app.buttons["parentUpgradeToPlusButton"]
+        XCTAssertTrue(upgradeButton.waitForExistence(timeout: 10))
+        upgradeButton.tap()
+
+        let parentPlanTitle = app.staticTexts["parentPlanTitle"]
+        XCTAssertTrue(waitForLabel(of: parentPlanTitle, toEqual: "Plus"))
+
+        app.buttons["Done"].tap()
+        XCTAssertTrue(app.staticTexts["journeyUpgradeReviewTitle"].waitForExistence(timeout: 10))
+        app.buttons["Done"].tap()
+
+        XCTAssertTrue(waitForLabel(of: startVoiceButton, toEqual: "Start Voice Session"))
+        startVoiceButton.tap()
+
+        let storyTitle = app.staticTexts["storyTitleLabel"]
+        XCTAssertTrue(storyTitle.waitForExistence(timeout: 120))
     }
 
     func testJourneyBlocksContinuationStartAndKeepsReplayCopyTruthful() {
@@ -696,6 +762,53 @@ final class StoryTimeUITests: XCTestCase {
             "Starter currently allows up to 2 child profiles, 1 new story start, and 0 saved-series continuations in the current window."
         )
         XCTAssertTrue(app.buttons["seriesDetailUpgradeReviewParentControlsButton"].exists)
+    }
+
+    func testSeriesDetailBlockedContinuationCanRecoverAfterParentManagedPurchase() {
+        let app = launchApp(extraEnvironment: [
+            "STORYTIME_UI_TEST_PREFLIGHT_OVERRIDE": "block_continue_story"
+        ])
+
+        let seededSeriesCard = app.buttons["seriesCard-55555555-5555-5555-5555-555555555555"]
+        XCTAssertTrue(seededSeriesCard.waitForExistence(timeout: 10))
+        seededSeriesCard.tap()
+
+        let newEpisodeButton = app.buttons["newEpisodeButton"]
+        XCTAssertTrue(newEpisodeButton.waitForExistence(timeout: 10))
+        newEpisodeButton.tap()
+
+        XCTAssertTrue(waitForLabel(of: newEpisodeButton, toEqual: "Ask a Parent"))
+        newEpisodeButton.tap()
+
+        let gateField = app.textFields["parentAccessGateField"]
+        XCTAssertTrue(gateField.waitForExistence(timeout: 10))
+        gateField.tap()
+        gateField.typeText("PARENT")
+
+        let unlockButton = app.buttons["unlockParentControlsButton"]
+        XCTAssertTrue(unlockButton.waitForExistence(timeout: 10))
+        unlockButton.tap()
+
+        let parentPlanButton = app.buttons["seriesDetailUpgradeReviewParentControlsButton"]
+        XCTAssertTrue(parentPlanButton.waitForExistence(timeout: 10))
+        parentPlanButton.tap()
+
+        let upgradeButton = app.buttons["parentUpgradeToPlusButton"]
+        XCTAssertTrue(upgradeButton.waitForExistence(timeout: 10))
+        upgradeButton.tap()
+
+        let parentPlanTitle = app.staticTexts["parentPlanTitle"]
+        XCTAssertTrue(waitForLabel(of: parentPlanTitle, toEqual: "Plus"))
+
+        app.buttons["Done"].tap()
+        XCTAssertTrue(app.staticTexts["seriesDetailUpgradeReviewTitle"].waitForExistence(timeout: 10))
+        app.buttons["Done"].tap()
+
+        XCTAssertTrue(waitForLabel(of: newEpisodeButton, toEqual: "New Episode"))
+        newEpisodeButton.tap()
+
+        let storyTitle = app.staticTexts["storyTitleLabel"]
+        XCTAssertTrue(storyTitle.waitForExistence(timeout: 120))
     }
 
     func testSeriesDetailRepeatRemainsAvailableWhenContinuationIsBlocked() {

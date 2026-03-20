@@ -19,6 +19,8 @@ Active product loop:
 
 The hybrid runtime migration is materially stabilized, verified, and acceptance-hardened enough to support the next workstream. The productization groundwork is also complete enough to move into launch readiness. The current mission is to turn the verified runtime and M8 product direction into a launch-ready MVP with explicit onboarding, entitlement and billing foundations, parent-managed upgrade surfaces, enforceable usage limits, a coherent repeat-use loop, and evidence-backed launch acceptance criteria. Stability, correctness, low-latency interaction feel, deterministic session behavior, stage-level telemetry, and cost-aware routing remain gating requirements, but broad core-runtime rescue work is no longer the default next step unless a new defect is discovered.
 
+The launch-gap assessment in `docs/verification/launch-readiness-gap-assessment.md` is now the source of truth for the remaining launch work. StoryTime is currently `CONDITIONALLY READY IF BLOCKERS ARE CLOSED`. The active final sprint is commercial-closure only: add the smallest truthful parent-managed purchase completion path, prove the blocked-to-upgraded-to-unblocked happy path, and rerun launch readiness with an explicit final recommendation. Do not widen scope into speculative monetization polish, broader operational tooling, or unrelated feature work unless a blocker is first recorded in `PLANS.md` and queued in `SPRINT.md`.
+
 ## Active Code Areas
 
 - Active iOS app: `ios/StoryTime`
@@ -72,6 +74,10 @@ Primary test surfaces:
 
 ## Current Program Priorities
 
+- Final commercial-closure sprint on top of the verified hybrid runtime and completed M8/M9 groundwork
+- Parent-managed purchase completion in already-approved upgrade surfaces only
+- End-to-end verification that blocked new-story and blocked continuation flows can recover after purchase or entitlement refresh
+- Final evidence-based launch recommendation after commercial blocker closure
 - Launch readiness on top of the verified hybrid runtime and completed M8 productization groundwork
 - MVP scope lock and explicit launch acceptance criteria
 - Onboarding and first-run clarity
@@ -104,6 +110,8 @@ Primary test surfaces:
 ## Non-Goals
 
 - Broad core-runtime refactors without a reproduced defect or explicit reprioritization
+- Speculative monetization polish, package expansion, or pricing experiments before the commercial blockers are closed
+- Broader telemetry, dashboard, authentication, or account-system work unless a current commercial milestone requires a tightly related unblocker
 - Speculative post-launch package expansion or growth experiments before MVP scope lock
 - Marketing-site or acquisition work outside the in-app product flow
 - New growth features
@@ -202,12 +210,15 @@ Primary test surfaces:
 
 - UX work must stay grounded in the current technical architecture: realtime for live interaction, TTS for long-form narration, and story/scene state as the authoritative control layer.
 - After the productization groundwork is complete, launch readiness is the default priority. Prefer shipping clarity, enforceable MVP boundaries, and explicit acceptance evidence over speculative expansion.
+- During the final sprint, keep scope limited to the commercial blockers recorded in `docs/verification/launch-readiness-gap-assessment.md` and the ordered `M10.1` through `M10.3` milestones in `SPRINT.md`.
 - Treat onboarding, paywall, entitlements, usage limits, and telemetry as connected product systems. Do not treat them as isolated cosmetic screens or copy-only tasks.
 - Monetization work must use model-routing economics and runtime-stage cost telemetry instead of arbitrary package or cap guesses.
 - Onboarding, paywall, upgrade, and parent-trust work should be handled as end-to-end product flows across `HomeView`, `NewStoryJourneyView`, `VoiceSessionView`, `StorySeriesDetailView`, and the parent hub, not as isolated cosmetic screens.
 - Prefer parent-managed upgrade entry points and trust-sensitive surfaces unless a milestone explicitly defines a child-facing prompt and its protections.
+- Purchase and entitlement work must remain parent-managed. Do not place purchase UI, purchase recovery UI, or transactional prompts inside `VoiceSessionView`, live interruption handling, or other active child-session surfaces.
 - Billing and provider choices must stay grounded in runtime-stage cost telemetry, pre-session enforcement needs, and truthful parent-managed trust surfaces.
 - Final QA and launch-acceptance milestones must define what MVP-launch-ready means in repo terms, including exact commands, evidence labels, remaining gaps, and any go/no-go blockers.
+- The final launch recommendation must be explicit and evidence-based. Future launch-readiness reports must clearly choose `READY FOR MVP LAUNCH`, `CONDITIONALLY READY`, or `NOT YET READY FOR MVP LAUNCH` and cite the exact blocker-closure evidence.
 - Verification remains required for productization work: planning milestones must cite repo evidence, and implementation milestones must update the directly affected UI/unit/backend tests as appropriate.
 
 ## Documentation And Status Update Rules

@@ -15,12 +15,156 @@ Use the verified hybrid-runtime baseline and completed M8 groundwork to ship the
 - Keep `tiny-backend/` out of active implementation and planning except as labeled historical context.
 - The hybrid runtime baseline and M8 productization groundwork are established; prioritize launch readiness, onboarding, entitlement implementation, upgrade surfaces, usage enforcement, repeat-use flow, telemetry confidence, and explicit acceptance evidence unless a new runtime defect is explicitly recorded in `PLANS.md`.
 
+## Queue State
+
+- Sprint 10 is complete.
+- The final launch recommendation is now recorded in `docs/verification/launch-candidate-acceptance-report.md` as `READY FOR MVP LAUNCH`.
+- No ordered incomplete milestone remains in this sprint queue. Add a new approved milestone group before starting further implementation work.
+
 ## Status Legend
 
 - `TODO`
 - `IN PROGRESS`
 - `DONE`
 - `BLOCKED`
+
+## Planning Placeholder
+
+### M10.0 - Launch-gap assessment review and Sprint 10 approval
+
+Status: `DONE`
+
+Goal:
+- Turn the current launch-gap assessment into an approved Sprint 10 execution queue without inventing scope during implementation runs.
+
+Concrete tasks:
+- Review `docs/verification/launch-readiness-gap-assessment.md`.
+- Decide whether StoryTime is pursuing a commercial MVP launch or a narrower non-commercial launch scope.
+- Approve an ordered Sprint 10 milestone group that closes any chosen launch blockers.
+
+Required tests:
+- None. This is a planning-only milestone.
+
+Dependencies:
+- `docs/verification/launch-readiness-gap-assessment.md`
+
+Definition of done:
+- `SPRINT.md` contains an approved ordered Sprint 10 milestone queue.
+- The chosen launch scope is explicit enough that future runs can classify blockers consistently.
+
+Completion notes:
+- Gap assessment created on 2026-03-20.
+- The final commercial-closure sprint is now approved and narrowed to `M10.1` through `M10.3`.
+- Current recommendation remains `CONDITIONALLY READY IF BLOCKERS ARE CLOSED` until the commercial blockers are closed and launch readiness is rerun.
+
+## Phase 10 - Final Commercial Closure
+
+### M10.1 - Parent-managed purchase surface closure
+
+Status: `DONE`
+
+Goal:
+- Add the smallest truthful in-app purchase completion path on parent-managed surfaces only so blocked commercial flows can close without moving purchase UI into the child runtime.
+
+Concrete tasks:
+- Inspect the current parent-managed upgrade destinations in `ParentTrustCenterView`, `JourneyUpgradeReviewView`, and `SeriesDetailUpgradeReviewView` and keep the approved parent-managed hierarchy intact.
+- Add the minimum purchase completion path needed for the locked MVP using the existing StoreKit normalization seam and entitlement refresh flow.
+- Keep purchase entry and recovery inside parent-managed surfaces only; do not add purchase UI to `VoiceSessionView`, live interruption flows, narration, or other child-facing runtime surfaces.
+- Keep blocked-flow copy, plan framing, and upgrade affordances aligned with the active entitlement architecture and current Starter/Plus limits.
+- Preserve existing restore behavior and truthful privacy or trust messaging while introducing purchase completion.
+
+Required tests:
+- `StoryTimeUITests` coverage for the parent-managed purchase entry path and for the absence of purchase UI in child-session surfaces
+- `APIClientTests` coverage if purchase-state normalization, sync, or refresh handling changes
+- backend entitlement route tests if sync or preflight contract behavior changes
+
+Dependencies:
+- `M10.0`
+- `docs/verification/launch-readiness-gap-assessment.md`
+- Existing entitlement bootstrap, sync, restore, and preflight foundations from `M9.3` through `M9.5`
+
+Definition of done:
+- A parent can complete the smallest truthful purchase path from approved parent-managed surfaces.
+- Blocked launch-review surfaces can route into that purchase path without entering the child session.
+- Purchase UI remains absent from `VoiceSessionView` and other child-facing runtime surfaces.
+- Directly affected UI, unit, and backend tests pass.
+
+Completion notes:
+- `ParentTrustCenterView` now loads parent-managed Plus purchase options, presents a parent-only purchase CTA, and completes the smallest StoreKit-backed purchase path without moving purchase UI into the child runtime.
+- `EntitlementManager` now supports purchase completion through the existing StoreKit normalization seam and refreshes the local entitlement snapshot after a verified purchase.
+- Seeded UI coverage now proves the parent-managed upgrade path can complete and that `VoiceSessionView` still shows no purchase UI.
+
+### M10.2 - Upgrade unblock happy-path verification
+
+Status: `DONE`
+
+Goal:
+- Prove that the blocked-to-upgraded-to-unblocked happy path works end to end for the remaining commercial blockers.
+
+Concrete tasks:
+- Add or update automated coverage for blocked new-story start -> parent-managed purchase or entitlement refresh -> successful retry.
+- Add or update automated coverage for blocked saved-series continuation -> parent-managed purchase or entitlement refresh -> successful retry, if the path remains applicable after `M10.1`.
+- Verify that post-purchase or post-refresh retry uses refreshed entitlement state and preflight behavior instead of bypassing gating.
+- Verify that replay remains available when only new remote-cost-bearing actions are blocked.
+- Record the verification evidence in the appropriate repo verification artifact without widening into unrelated post-launch telemetry work.
+
+Required tests or verification method:
+- `StoryTimeUITests` for blocked new-story and blocked continuation recovery paths
+- `APIClientTests` for refreshed entitlement-state handling and retry-safe preflight behavior
+- backend integration tests for any changed `/v1/entitlements/sync` or `/v1/entitlements/preflight` contract behavior
+- Updated verification doc with explicit evidence labels
+
+Dependencies:
+- `M10.1`
+
+Definition of done:
+- The repo has direct automated evidence that blocked commercial flows can recover after purchase or entitlement refresh.
+- Both new-story and continuation recovery are covered if both remain launch-relevant.
+- Retry succeeds without introducing purchase UI into the child session.
+- Verification docs clearly distinguish what was verified by test versus inspection.
+
+Completion notes:
+- `NewStoryJourneyView` and `StorySeriesDetailView` now clear stale blocked state only after the entitlement snapshot or token changes, so retry stays on the normal preflight path instead of bypassing gating.
+- Seeded UI tests now prove blocked new-story and blocked continuation flows can recover after parent-managed purchase and still enter `VoiceSessionView` without showing purchase UI in the child session.
+- `APIClientTests` and backend integration coverage now prove purchase-refreshed entitlement tokens are reused on retry and that blocked preflight can become allowed after purchase refresh.
+- `docs/verification/commercial-upgrade-happy-path-verification.md` now records the exact commands, evidence labels, and remaining live StoreKit gap for the final launch rerun.
+
+### M10.3 - Commercial launch rerun and blocker closeout
+
+Status: `DONE`
+
+Goal:
+- Rerun launch readiness after commercial blocker closure and record an explicit final launch recommendation for the active MVP scope.
+
+Concrete tasks:
+- Re-run the exact launch-readiness suites needed for the active MVP candidate, including the commercial closure coverage added in `M10.1` and `M10.2`.
+- Update the launch-readiness report with the final blocker status, deferred non-blocking gaps, and the exact commands plus evidence labels.
+- Explicitly choose one final recommendation in repo terms:
+  - `READY FOR MVP LAUNCH`
+  - `CONDITIONALLY READY`
+  - `NOT YET READY FOR MVP LAUNCH`
+- Update `PLANS.md` and `SPRINT.md` with the final sprint outcome and any remaining blocker or no-go state if the rerun does not pass cleanly.
+
+Required tests or verification method:
+- `scripts/run_hybrid_runtime_validation.sh`
+- Backend launch-contract suite covering entitlement routes and existing launch-critical behavior
+- iOS launch-product unit suite
+- iOS launch-product UI suite including the new commercial blocker-closure coverage
+- Updated launch report in `docs/verification/`
+
+Dependencies:
+- `M10.1`
+- `M10.2`
+
+Definition of done:
+- The required launch-readiness command set has been rerun after commercial blocker closure.
+- The repo contains an updated final launch report with exact commands, evidence labels, and one explicit recommendation.
+- `PLANS.md` and `SPRINT.md` reflect whether StoryTime is ready, conditionally ready, or not yet ready after the final sprint.
+
+Completion notes:
+- The March 20, 2026 rerun passed the hybrid validation baseline, backend launch-contract suite, iOS launch-product unit suite, and full `38`-test iOS UI launch suite after `M10.1` and `M10.2`.
+- The only rerun issue was a tightly related brittle UI assertion in `testJourneyReviewLinksToDurableParentPlanSurface`; updating that test to use the existing `scrollToElement(...)` pattern produced a clean targeted rerun and a clean full rerun without changing product behavior.
+- `docs/verification/launch-candidate-acceptance-report.md` now records the final repo-grounded recommendation as `READY FOR MVP LAUNCH`, while keeping the external live App Store environment gap explicitly labeled as non-blocking and unverified in repo terms.
 
 ## Phase 1 - Core Voice Reliability
 
@@ -2595,7 +2739,7 @@ Completion notes:
 
 ### M9.9 - Launch blocker remediation
 
-Status: `IN PROGRESS`
+Status: `DONE`
 
 Goal:
 - Clear the concrete blockers found in `M9.8` and rerun launch acceptance against a green candidate.
@@ -2872,7 +3016,7 @@ Notes:
 
 ### M9.12 - Narration wall-clock telemetry hardening
 
-Status: `TODO`
+Status: `DONE`
 
 Goal:
 - Extend narration telemetry from preparation-heavy timing into playback wall-clock evidence so post-launch review can reason about actual narration latency and completion behavior.
@@ -2892,3 +3036,9 @@ Dependencies:
 Definition of done:
 - Narration telemetry includes playback wall-clock evidence instead of relying primarily on TTS preparation timing.
 - The verification docs record the updated evidence and the remaining telemetry limits clearly.
+
+Notes:
+- `RuntimeTelemetryStage` now separates narration preparation from playback with `tts_generation`, `tts_playback_started`, `tts_playback_completed`, and `tts_playback_cancelled`, all still grouped under `narration`.
+- `PracticeSessionViewModel` now records playback start before `playScene(...)` begins and records completion or cancellation wall-clock duration after playback returns, preserving the original narration start source for attribution.
+- Targeted `PracticeSessionViewModelTests` passed `3` tests, covering preload telemetry plus playback completion and interruption-driven cancellation telemetry.
+- `docs/verification/runtime-stage-telemetry-verification.md` now records the new playback-wall-clock evidence, and the remaining telemetry gap narrows to durable runtime-stage timeline export rather than missing playback timing itself.

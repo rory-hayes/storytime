@@ -367,6 +367,37 @@ protocol EntitlementPurchaseStateProviding {
     func currentSyncRequest(refreshReason: EntitlementRefreshReason) async throws -> EntitlementSyncRequest
 }
 
+struct ParentManagedPurchaseOption: Equatable, Identifiable {
+    let productID: String
+    let displayName: String
+    let displayPrice: String
+
+    var id: String { productID }
+}
+
+enum ParentManagedPurchaseOutcome: Equatable {
+    case purchased(syncRequest: EntitlementSyncRequest?)
+    case pending
+    case cancelled
+}
+
+enum ParentManagedPurchaseError: Error, Equatable {
+    case unavailable
+    case verificationFailed
+}
+
+protocol ParentManagedPurchaseProviding {
+    func availableOptions() async throws -> [ParentManagedPurchaseOption]
+    func purchase(productID: String) async throws -> ParentManagedPurchaseOutcome
+}
+
+private enum EntitlementProductCatalog {
+    static let plusProductIDs = [
+        "storytime.plus.monthly",
+        "storytime.plus.yearly"
+    ]
+}
+
 #if canImport(StoreKit)
 @available(iOS 17.0, *)
 final class StoreKitEntitlementStateProvider: EntitlementPurchaseStateProviding {
@@ -432,7 +463,59 @@ final class StoreKitEntitlementStateProvider: EntitlementPurchaseStateProviding 
         return .unknown
     }
 }
+
+@available(iOS 17.0, *)
+final class StoreKitParentManagedPurchaseProvider: ParentManagedPurchaseProviding {
+    func availableOptions() async throws -> [ParentManagedPurchaseOption] {
+        let products = try await Product.products(for: EntitlementProductCatalog.plusProductIDs)
+        let productsByID = Dictionary(uniqueKeysWithValues: products.map { ($0.id, $0) })
+
+        return EntitlementProductCatalog.plusProductIDs.compactMap { productID in
+            guard let product = productsByID[productID] else { return nil }
+            return ParentManagedPurchaseOption(
+                productID: productID,
+                displayName: product.displayName,
+                displayPrice: product.displayPrice
+            )
+        }
+    }
+
+    func purchase(productID: String) async throws -> ParentManagedPurchaseOutcome {
+        guard let product = try await Product.products(for: [productID]).first else {
+            throw ParentManagedPurchaseError.unavailable
+        }
+
+        let result = try await product.purchase()
+        switch result {
+        case .pending:
+            return .pending
+        case .userCancelled:
+            return .cancelled
+        case .success(let verification):
+            switch verification {
+            case .verified(let transaction):
+                await transaction.finish()
+                let syncRequest = try await StoreKitEntitlementStateProvider().currentSyncRequest(refreshReason: .purchase)
+                return .purchased(syncRequest: syncRequest)
+            case .unverified:
+                throw ParentManagedPurchaseError.verificationFailed
+            }
+        @unknown default:
+            return .cancelled
+        }
+    }
+}
 #endif
+
+struct UnsupportedParentManagedPurchaseProvider: ParentManagedPurchaseProviding {
+    func availableOptions() async throws -> [ParentManagedPurchaseOption] {
+        []
+    }
+
+    func purchase(productID: String) async throws -> ParentManagedPurchaseOutcome {
+        throw ParentManagedPurchaseError.unavailable
+    }
+}
 
 enum APIClientTraceOperation: String, Equatable, Hashable {
     case healthCheck
@@ -453,6 +536,9 @@ enum RuntimeTelemetryStage: String, Equatable, Hashable {
     case answerOnlyInteraction = "answer_only_interaction"
     case reviseFutureScenes = "revise_future_scenes"
     case ttsGeneration = "tts_generation"
+    case ttsPlaybackStarted = "tts_playback_started"
+    case ttsPlaybackCompleted = "tts_playback_completed"
+    case ttsPlaybackCancelled = "tts_playback_cancelled"
     case continuityRetrieval = "continuity_retrieval"
 }
 
@@ -470,7 +556,7 @@ extension RuntimeTelemetryStage {
             return .interaction
         case .storyGeneration:
             return .generation
-        case .ttsGeneration:
+        case .ttsGeneration, .ttsPlaybackStarted, .ttsPlaybackCompleted, .ttsPlaybackCancelled:
             return .narration
         case .reviseFutureScenes:
             return .revision
@@ -1739,6 +1825,24 @@ final class EntitlementManager: ObservableObject {
         let request = try await purchaseStateProvider.currentSyncRequest(refreshReason: reason)
         _ = try await client.syncEntitlements(request: request)
         snapshot = AppEntitlements.currentSnapshot
+    }
+
+    func purchaseProduct(
+        using client: APIClienting,
+        purchaseProvider: any ParentManagedPurchaseProviding,
+        productID: String
+    ) async throws -> ParentManagedPurchaseOutcome {
+        let outcome = try await purchaseProvider.purchase(productID: productID)
+        switch outcome {
+        case .purchased(let syncRequest):
+            if let syncRequest {
+                _ = try await client.syncEntitlements(request: syncRequest)
+            }
+            snapshot = AppEntitlements.currentSnapshot
+        case .pending, .cancelled:
+            break
+        }
+        return outcome
     }
 
     func invalidate() {

@@ -478,6 +478,9 @@ struct ParentTrustCenterView: View {
     @State private var showDeleteHistoryConfirmation = false
     @State private var isRefreshingPlan = false
     @State private var isRestoringPurchases = false
+    @State private var isLoadingPurchaseOptions = false
+    @State private var isPurchasingUpgrade = false
+    @State private var availablePurchaseOptions: [ParentManagedPurchaseOption] = []
     @State private var planActionMessage: String?
     @State private var planErrorMessage: String?
 
@@ -540,6 +543,34 @@ struct ParentTrustCenterView: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .accessibilityIdentifier("parentPlusPlanSummary")
+                }
+
+                if currentPlanIsPlus {
+                    Text("Plus is already active on this device.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("parentPlusActiveSummary")
+                } else if let purchaseOption = preferredPurchaseOption {
+                    Text("Upgrade to Plus here before starting more remote story launches. The App Store purchase sheet stays inside Parent Controls.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("parentPurchaseSummary")
+
+                    Button(upgradeButtonTitle(for: purchaseOption)) {
+                        Task {
+                            await purchasePlus(using: purchaseOption)
+                        }
+                    }
+                    .disabled(isRefreshingPlan || isRestoringPurchases || isPurchasingUpgrade)
+                    .accessibilityIdentifier("parentUpgradeToPlusButton")
+                } else if isLoadingPurchaseOptions {
+                    ProgressView("Checking Plus purchase options...")
+                        .accessibilityIdentifier("parentPurchaseLoadingIndicator")
+                } else {
+                    Text("Plus purchase isn't available on this device right now. Restore and plan review still stay here in Parent Controls.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("parentPurchaseUnavailableSummary")
                 }
 
                 if let planActionMessage {
@@ -748,6 +779,9 @@ struct ParentTrustCenterView: View {
         .onAppear {
             entitlementManager.reloadFromCache()
             ClientLaunchTelemetry.recordParentPlanPresented(snapshot: entitlementManager.snapshot)
+            Task {
+                await loadPurchaseOptionsIfNeeded()
+            }
         }
         .sheet(isPresented: $showProfileEditor) {
             NavigationStack {
@@ -816,6 +850,14 @@ struct ParentTrustCenterView: View {
 
     private var restorePurchasesButtonTitle: String {
         isRestoringPurchases ? "Restoring Purchases..." : "Restore Purchases"
+    }
+
+    private var currentPlanIsPlus: Bool {
+        entitlementManager.snapshot?.tier == .plus
+    }
+
+    private var preferredPurchaseOption: ParentManagedPurchaseOption? {
+        availablePurchaseOptions.first
     }
 
     private func storyStartsSummary(for snapshot: EntitlementSnapshot) -> String {
@@ -890,6 +932,7 @@ struct ParentTrustCenterView: View {
 
         do {
             try await entitlementManager.refreshFromBootstrap(using: APIClient())
+            await loadPurchaseOptionsIfNeeded(force: true)
             planActionMessage = "Plan status refreshed for this device."
             ClientLaunchTelemetry.recordParentPlanRefresh(outcome: .completed, snapshot: entitlementManager.snapshot)
         } catch {
@@ -915,6 +958,7 @@ struct ParentTrustCenterView: View {
                     purchaseStateProvider: StoreKitEntitlementStateProvider(),
                     reason: .restore
                 )
+                await loadPurchaseOptionsIfNeeded(force: true)
                 planActionMessage = "Restore check finished. StoryTime refreshed the plan for this device."
                 ClientLaunchTelemetry.recordRestorePurchases(outcome: .completed, snapshot: entitlementManager.snapshot)
             } catch {
@@ -929,6 +973,84 @@ struct ParentTrustCenterView: View {
         planErrorMessage = "Restore purchases is not available on this device right now."
         ClientLaunchTelemetry.recordRestorePurchases(outcome: .failed, snapshot: entitlementManager.snapshot)
 #endif
+    }
+
+    @MainActor
+    private func purchasePlus(using purchaseOption: ParentManagedPurchaseOption) async {
+        planActionMessage = nil
+        planErrorMessage = nil
+        isPurchasingUpgrade = true
+        defer { isPurchasingUpgrade = false }
+
+        do {
+            let outcome = try await entitlementManager.purchaseProduct(
+                using: APIClient(),
+                purchaseProvider: resolvedPurchaseProvider(),
+                productID: purchaseOption.productID
+            )
+            await loadPurchaseOptionsIfNeeded(force: true)
+
+            switch outcome {
+            case .purchased:
+                planActionMessage = currentPlanIsPlus
+                    ? "Plus is now ready on this device."
+                    : "Purchase finished. StoryTime refreshed the plan for this device."
+            case .pending:
+                planActionMessage = "Purchase is pending approval. The current plan stays active until the App Store confirms it."
+            case .cancelled:
+                planActionMessage = "Purchase wasn't completed. The current plan stays the same on this device."
+            }
+        } catch ParentManagedPurchaseError.unavailable {
+            planErrorMessage = "Plus purchase isn't available on this device right now."
+        } catch ParentManagedPurchaseError.verificationFailed {
+            planErrorMessage = "I couldn't verify that purchase right now. Ask a grown-up to try again."
+        } catch {
+            planErrorMessage = "I couldn't upgrade this device right now. Ask a grown-up to try again."
+        }
+    }
+
+    @MainActor
+    private func loadPurchaseOptionsIfNeeded(force: Bool = false) async {
+        if currentPlanIsPlus {
+            availablePurchaseOptions = []
+            isLoadingPurchaseOptions = false
+            return
+        }
+
+        if !force && (!availablePurchaseOptions.isEmpty || isLoadingPurchaseOptions) {
+            return
+        }
+
+        isLoadingPurchaseOptions = true
+        defer { isLoadingPurchaseOptions = false }
+
+        do {
+            availablePurchaseOptions = try await resolvedPurchaseProvider().availableOptions()
+        } catch {
+            availablePurchaseOptions = []
+        }
+    }
+
+    private func upgradeButtonTitle(for purchaseOption: ParentManagedPurchaseOption) -> String {
+        if isPurchasingUpgrade {
+            return "Upgrading to Plus..."
+        }
+
+        return "Upgrade to Plus - \(purchaseOption.displayPrice)"
+    }
+
+    private func resolvedPurchaseProvider() -> any ParentManagedPurchaseProviding {
+        if let uiTestProvider = UITestSeed.parentManagedPurchaseProviderIfNeeded() {
+            return uiTestProvider
+        }
+
+#if canImport(StoreKit)
+        if #available(iOS 17.0, *) {
+            return StoreKitParentManagedPurchaseProvider()
+        }
+#endif
+
+        return UnsupportedParentManagedPurchaseProvider()
     }
 
     private var activeAgeBinding: Binding<Int> {

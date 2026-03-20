@@ -116,7 +116,7 @@ Coverage intent:
 ## Intentionally Excluded From The Default Pack
 
 - `PARTIALLY VERIFIED`: live `WKWebView` or real WebRTC peer-connection callback ordering. The repo still has no browser-level acceptance harness.
-- `PARTIALLY VERIFIED`: full playback wall-clock narration telemetry. The pack pins TTS preparation telemetry, not full device-audio completion variance.
+- `PARTIALLY VERIFIED`: full playback wall-clock narration telemetry inside the default pack. Targeted coordinator tests now cover playback start, completion, and cancellation timing, but the default hybrid pack still pins TTS preparation telemetry more directly than full device-audio completion variance.
 - `PARTIALLY VERIFIED`: the broader revised-story happy path and reload-persistence acceptance cases remain outside the default pack because the current revision-index logging noise is not yet stable enough for this gate.
 - `PARTIALLY VERIFIED`: broader repeat-history and revision-queue cases outside the selected high-signal hybrid tests. These remain outside the default gate until they are either stabilized or explicitly re-scoped.
 - `PARTIALLY VERIFIED`: broader UX, parent-flow, and product-surface regression coverage. Those belong to later milestones, not the runtime acceptance gate.

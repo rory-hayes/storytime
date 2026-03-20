@@ -88,13 +88,6 @@ Observed result:
 
 ## Remaining Gaps
 
-- PARTIALLY VERIFIED: narration telemetry still reflects TTS preparation more strongly than full playback wall-clock timing, consistent with `docs/verification/runtime-stage-telemetry-verification.md`.
-- UNVERIFIED: centralized historical aggregation across multiple devices or backend deployments; the new joined report is durable enough for repo verification, but it is not a broader ops warehouse or dashboard.
-
-## Recommended Next Milestone
-
-`M9.12 - Narration wall-clock telemetry hardening`
-
-Reason:
-- `M9.11` removes the durability and joined-report gap that previously blocked confident review of launch telemetry.
-- The main remaining telemetry-quality gap is narration playback wall-clock fidelity rather than launch gating, entitlement enforcement, or joined-report availability.
+- VERIFIED BY TEST and VERIFIED BY CODE INSPECTION: narration playback wall-clock timing is now covered through the targeted coordinator evidence recorded in `docs/verification/runtime-stage-telemetry-verification.md`.
+- UNVERIFIED: centralized historical aggregation across multiple devices or backend deployments; the joined report is durable enough for repo verification, but it is not a broader ops warehouse or dashboard.
+- PARTIALLY VERIFIED: the joined launch report remains launch-review oriented and still does not export full per-scene runtime-stage timelines alongside the durable launch counters.

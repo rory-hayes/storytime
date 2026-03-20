@@ -136,6 +136,21 @@ enum UITestSeed {
             )
         case "block_new_story":
             guard case .new = plan.mode else { return nil }
+            if AppEntitlements.currentSnapshot?.tier == .plus {
+                return EntitlementPreflightResponse(
+                    action: .newStory,
+                    allowed: true,
+                    blockReason: nil,
+                    recommendedUpgradeSurface: nil,
+                    snapshot: allowedSnapshot(
+                        tier: .plus,
+                        childProfileCount: childProfileCount,
+                        remainingStoryStarts: 1,
+                        remainingContinuations: 1,
+                        environment: environment
+                    )
+                )
+            }
             return EntitlementPreflightResponse(
                 action: .newStory,
                 allowed: false,
@@ -152,6 +167,21 @@ enum UITestSeed {
             )
         case "block_continue_story":
             guard case .extend = plan.mode else { return nil }
+            if AppEntitlements.currentSnapshot?.tier == .plus {
+                return EntitlementPreflightResponse(
+                    action: .continueStory,
+                    allowed: true,
+                    blockReason: nil,
+                    recommendedUpgradeSurface: nil,
+                    snapshot: allowedSnapshot(
+                        tier: .plus,
+                        childProfileCount: childProfileCount,
+                        remainingStoryStarts: 1,
+                        remainingContinuations: 1,
+                        environment: environment
+                    )
+                )
+            }
             return EntitlementPreflightResponse(
                 action: .continueStory,
                 allowed: false,
@@ -173,6 +203,15 @@ enum UITestSeed {
             }
             return defaultPreflightResponse(for: request, snapshot: snapshot)
         }
+    }
+
+    static func parentManagedPurchaseProviderIfNeeded() -> (any ParentManagedPurchaseProviding)? {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["STORYTIME_UI_TEST_MODE"] == "1" else {
+            return nil
+        }
+
+        return UITestParentManagedPurchaseProvider(environment: environment)
     }
 
     private static func defaultPreflightResponse(
@@ -265,7 +304,7 @@ enum UITestSeed {
         )
     }
 
-    private static func seededEntitlementEnvelope(childProfileCount: Int, environment: [String: String]) -> EntitlementBootstrapEnvelope {
+    fileprivate static func seededEntitlementEnvelope(childProfileCount: Int, environment: [String: String]) -> EntitlementBootstrapEnvelope {
         let now = Date()
         let tier = seededTier(environment: environment)
         let snapshot = EntitlementSnapshot(
@@ -361,5 +400,49 @@ enum UITestSeed {
         }
 
         return value
+    }
+}
+
+private struct UITestParentManagedPurchaseProvider: ParentManagedPurchaseProviding {
+    let environment: [String: String]
+
+    func availableOptions() async throws -> [ParentManagedPurchaseOption] {
+        guard AppEntitlements.currentSnapshot?.tier != .plus else { return [] }
+
+        return [
+            ParentManagedPurchaseOption(
+                productID: "storytime.plus.monthly",
+                displayName: "Plus Monthly",
+                displayPrice: "$4.99"
+            )
+        ]
+    }
+
+    func purchase(productID: String) async throws -> ParentManagedPurchaseOutcome {
+        switch environment["STORYTIME_UI_TEST_PURCHASE_RESULT"]?.lowercased() {
+        case "cancelled":
+            return .cancelled
+        case "pending":
+            return .pending
+        default:
+            var plusEnvironment = environment
+            plusEnvironment["STORYTIME_UI_TEST_ENTITLEMENT_TIER"] = "plus"
+            let envelope = UITestSeed.seededEntitlementEnvelope(
+                childProfileCount: seededChildProfileCount(),
+                environment: plusEnvironment
+            )
+            AppEntitlements.store(envelope: envelope)
+            return .purchased(syncRequest: nil)
+        }
+    }
+
+    private func seededChildProfileCount() -> Int {
+        let defaults = UserDefaults.standard
+        guard let data = defaults.data(forKey: "storytime.child.profiles.v1"),
+              let profiles = try? JSONDecoder().decode([ChildProfile].self, from: data) else {
+            return 1
+        }
+
+        return max(profiles.count, 1)
     }
 }

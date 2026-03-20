@@ -176,6 +176,74 @@ describe("v1 API", () => {
     expect(response.body.entitlements.token).toBeTruthy();
   });
 
+  it("allows blocked new-story preflight after purchase refresh updates the entitlement token", async () => {
+    const app = createApp({ env: makeTestEnv(), services: mockServices() });
+    const bootstrap = await request(app)
+      .post("/v1/session/identity")
+      .set("x-storytime-install-id", "install-123")
+      .send({});
+
+    const blocked = await request(app)
+      .post("/v1/entitlements/preflight")
+      .set("x-storytime-install-id", "install-123")
+      .set("x-storytime-session", bootstrap.headers["x-storytime-session"])
+      .set("x-storytime-entitlement", bootstrap.body.entitlements.token)
+      .send({
+        action: "new_story",
+        child_profile_id: "fbeafe23-42d5-4ea7-8035-5680419504e9",
+        child_profile_count: 2,
+        requested_length_minutes: 4
+      });
+
+    const refreshed = await request(app)
+      .post("/v1/entitlements/sync")
+      .set("x-storytime-install-id", "install-123")
+      .set("x-storytime-session", bootstrap.headers["x-storytime-session"])
+      .send({
+        refresh_reason: "purchase",
+        active_product_ids: [],
+        transactions: [
+          {
+            product_id: "storytime.plus.monthly",
+            original_transaction_id: "original-1",
+            latest_transaction_id: "latest-1",
+            purchased_at: Math.floor(Date.now() / 1000) - 120,
+            expires_at: Math.floor(Date.now() / 1000) + 3_600,
+            revoked_at: null,
+            ownership_type: "purchased",
+            environment: "sandbox",
+            verification_state: "verified",
+            is_active: true
+          }
+        ]
+      });
+
+    const allowed = await request(app)
+      .post("/v1/entitlements/preflight")
+      .set("x-storytime-install-id", "install-123")
+      .set("x-storytime-session", bootstrap.headers["x-storytime-session"])
+      .set("x-storytime-entitlement", refreshed.body.entitlements.token)
+      .send({
+        action: "new_story",
+        child_profile_id: "fbeafe23-42d5-4ea7-8035-5680419504e9",
+        child_profile_count: 2,
+        requested_length_minutes: 4
+      });
+
+    expect(blocked.status).toBe(200);
+    expect(blocked.body.allowed).toBe(false);
+    expect(blocked.body.block_reason).toBe("child_profile_limit");
+
+    expect(refreshed.status).toBe(200);
+    expect(refreshed.body.entitlements.snapshot.tier).toBe("plus");
+    expect(refreshed.body.entitlements.token).toBeTruthy();
+
+    expect(allowed.status).toBe(200);
+    expect(allowed.body.allowed).toBe(true);
+    expect(allowed.body.block_reason).toBeNull();
+    expect(allowed.body.snapshot.tier).toBe("plus");
+  });
+
   it("rejects invalid entitlement sync payloads", async () => {
     const app = createApp({ env: makeTestEnv(), services: mockServices() });
     const bootstrap = await request(app)

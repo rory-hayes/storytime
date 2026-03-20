@@ -32,9 +32,11 @@ The current goal is to use the accepted hybrid runtime plus the finished M8 plan
 - finalize cost, usage, and latency telemetry needed for commercial confidence and launch decisions
 - define and run an evidence-based launch-candidate QA pass
 
+The launch-gap assessment in `docs/verification/launch-readiness-gap-assessment.md` remained the planning source of truth through Sprint 10. The final commercial-closure sprint is now complete, the repo-owned MVP launch blockers are closed, and the current repo-grounded recommendation is `READY FOR MVP LAUNCH`. Remaining non-blocking gaps stay deferred unless a new blocker is reproduced.
+
 ## Current Phase
 
-Phase 8 - Launch Readiness, Monetization, And Acceptance
+Phase 8 - Launch Readiness, Monetization, And Acceptance (Launch-Ready Candidate)
 
 ## Overall Status Snapshot
 
@@ -52,7 +54,7 @@ Phase 8 - Launch Readiness, Monetization, And Acceptance
 - The current test baseline is strongest around startup, coordinator determinism, interruption/revision, hybrid narration transport, persistence, child isolation, and backend contract handling.
 - `docs/verification/hybrid-runtime-end-to-end-report.md` now records the first explicit post-migration end-to-end verification pass, using the required evidence labels and the current stable validation command results.
 - `docs/verification/realtime-voice-determinism-report.md` now refreshes the narrower interaction-path audit for the active hybrid runtime, including the TTS-to-realtime boundary and explicit no-reconnect semantics.
-- `docs/verification/runtime-stage-telemetry-verification.md` now records the current stage-based telemetry evidence, including explicit grouped stages for `interaction`, `generation`, `narration`, and `revision` plus supporting-stage treatment for `continuity_retrieval`.
+- `docs/verification/runtime-stage-telemetry-verification.md` now records the current stage-based telemetry evidence, including explicit grouped stages for `interaction`, `generation`, `narration`, and `revision`, supporting-stage treatment for `continuity_retrieval`, and coordinator-owned narration playback start/completion/cancellation wall-clock timing.
 - `docs/verification/hybrid-runtime-validation.md` now defines the explicit hybrid-runtime acceptance regression pack, including the exact command, required covered scenarios, and intentionally excluded cases.
 - `docs/verification/parent-child-storytelling-ux-audit.md` now records the first post-verification UX audit for the active parent/child storytelling flow, separating parent trust-boundary issues from child storytelling-loop issues and turning them into small follow-up milestones.
 - `docs/productization-user-journey-alignment.md` now maps the active parent/child journeys, value moments, trust moments, friction points, and candidate upgrade moments for the productization phase.
@@ -67,7 +69,7 @@ Phase 8 - Launch Readiness, Monetization, And Acceptance
 - `StorySeriesDetailView` now leads with continuation actions, frames continuity as next-episode memory, and keeps parent-only history management separate from replay and new-episode intent.
 - Parent trust and privacy communication is now more cohesive across `HomeView`, the lightweight parent gate, `ParentTrustCenterView`, `NewStoryJourneyView`, and `VoiceSessionView`, with clearer distinctions between what stays on device, what goes live during a session, and what the `PARENT` check does not claim to be.
 - `ContentView` now routes fresh installs through a dedicated `FirstRunOnboardingView` before the normal `HomeView` surface appears, and the first-run flow now bridges directly into `NewStoryJourneyView` when the parent chooses to start the first story immediately.
-- The active repo now has a backend-issued entitlement bootstrap snapshot, a StoreKit-facing purchase normalization seam, a backend entitlement refresh route, and a shared entitlement preflight contract. `NewStoryJourneyView` and `StorySeriesDetailView` now consume that contract before cost-bearing launch, with parent-managed blocked-launch review paths for new stories and saved-series continuation. `ParentTrustCenterView` now exposes the durable plan-state, restore entry, and upgrade framing needed outside the live child session, live bootstrap/sync snapshots carry config-backed Starter and Plus defaults, and preflight now depletes backend-owned remaining counts through an install-scoped rolling usage ledger. The repo still has no purchase flow, and parent-managed plan messaging now matches the enforced limits.
+- The active repo now has a backend-issued entitlement bootstrap snapshot, a StoreKit-facing purchase normalization seam, a backend entitlement refresh route, and a shared entitlement preflight contract. `NewStoryJourneyView` and `StorySeriesDetailView` now consume that contract before cost-bearing launch, with parent-managed blocked-launch review paths for new stories and saved-series continuation. `ParentTrustCenterView` now exposes the durable plan-state, restore entry, and upgrade framing needed outside the live child session, live bootstrap/sync snapshots carry config-backed Starter and Plus defaults, preflight now depletes backend-owned remaining counts through an install-scoped rolling usage ledger, and the smallest parent-managed StoreKit purchase path now lives inside Parent Controls. Parent-managed plan messaging continues to match the enforced limits, and child-facing runtime surfaces remain purchase-free.
 - `ParentTrustCenterView` now acts as the durable plan-management surface for the locked MVP hierarchy, and blocked launch review sheets route there without introducing live-session upgrade UI or child-facing purchase prompts.
 - The active launch acceptance pack in `docs/verification/hybrid-runtime-validation.md` is still runtime-focused; it does not yet cover onboarding, purchase and restore flows, plan enforcement, or a launch-candidate go/no-go checklist.
 
@@ -157,7 +159,7 @@ Phase 8 - Launch Readiness, Monetization, And Acceptance
 - Phase 1 voice-session reliability hardening, Phase 2 data integrity/isolation hardening, Phase 3 transport/privacy hardening, and the main hybrid migration milestones are complete for the current plan; the next major risk is making UX/productization decisions without outrunning the known runtime exclusions.
 - The stable hybrid validation slice is green through `M5.1`, and no live blocker remains from the earlier revision-index mismatch because that issue was regression-fixture drift, not a runtime defect.
 - The main remaining runtime risk is still partial verification depth at the bridge layer: the live interaction path lacks a real WebRTC acceptance harness even after the narrower `M6.2` audit.
-- Stage-level telemetry is now explicit, but narration is still measured primarily at TTS preparation time rather than full playback wall-clock, and commercialization thresholds remain undecided.
+- Stage-level telemetry is now explicit, narration now carries coordinator-owned playback wall-clock timing in addition to TTS preparation timing, and commercialization thresholds are now repo-owned, but runtime-stage export is still less durable than the joined launch telemetry report.
 - Story lifecycle writes and retention pruning no longer rewrite the full library snapshot, but some profile/privacy mutations still use snapshot writes.
 - Legacy library/profile/privacy blobs are now migration-source only and the legacy continuity blob is retired after import, but install/session bootstrap keys still remain in `UserDefaults` by design.
 - Child-profile story visibility, child-delete cascade behavior, and continuity cleanup are now scoped and reload-safe for owned rows, but some profile/privacy mutations still use snapshot writes.
@@ -166,12 +168,14 @@ Phase 8 - Launch Readiness, Monetization, And Acceptance
 - `saveRawAudio` exists in the persisted privacy schema but has no active UI or storage behavior, so the privacy-copy pass must resolve whether it stays as compatibility-only state or is removed later.
 - `saveRawAudio` still exists as compatibility-only persisted state even though the UI now states the active product behavior directly.
 - Parent controls now require a local confirmation gate, but this remains lightweight friction rather than full parent authentication.
-- The acceptance pack is now explicit and green, but it still intentionally excludes a live bridge/WebRTC harness, full playback wall-clock narration telemetry, and the broader revised-story persistence acceptance path while revision-index logging noise remains unresolved.
+- The acceptance pack is now explicit and green, but it still intentionally excludes a live bridge/WebRTC harness, the new narration playback wall-clock telemetry tests from its default command, and the broader revised-story persistence acceptance path while revision-index logging noise remains unresolved.
 - Saved-story deletion now lives behind the parent trust boundary and the global clear-history scope is explicit, but the parent gate remains lightweight friction rather than strong authentication.
-- The launch plan, live session, saved-story detail, first-run onboarding, and parent controls now explain the hybrid loop and upgrade boundary more clearly, `M8.1` through `M8.4` define the launch-ready product direction, `M9.2` now turns the first-run guidance into active code, `M9.3.1` through `M9.3.3` establish a real entitlement snapshot, refresh path, and preflight contract, `M9.4.1` through `M9.4.3` keep blocked launches parent-managed while exposing durable plan state and restore from `ParentTrustCenterView`, `M9.5.1` through `M9.5.3` now complete config-backed limits, backend-owned depletion, and truthful client plan messaging plus launch-path verification, `M9.8` records the first explicit launch-candidate QA pass, `M9.9` reruns that launch pack after remediation, `M9.10.1` clears the previous coordinator revision-resume blockers, `M9.10.2` reruns the full launch pack with explicit threshold treatment, `M9.10.3` clears the paused-narration interaction-handoff blockers in the launch-product unit suite, `M9.10.4` now turns cost plus latency thresholds into explicit numeric pass criteria and records a clean final launch rerun, and `M9.11` now hardens telemetry durability plus joined launch reporting. The main remaining post-launch telemetry gap is narration playback wall-clock fidelity rather than blocked product behavior, deferred commercial thresholds, or transient reporting surfaces.
+- The launch plan, live session, saved-story detail, first-run onboarding, and parent controls now explain the hybrid loop and upgrade boundary more clearly, `M8.1` through `M8.4` define the launch-ready product direction, `M9.2` now turns the first-run guidance into active code, `M9.3.1` through `M9.3.3` establish a real entitlement snapshot, refresh path, and preflight contract, `M9.4.1` through `M9.4.3` keep blocked launches parent-managed while exposing durable plan state and restore from `ParentTrustCenterView`, `M9.5.1` through `M9.5.3` now complete config-backed limits, backend-owned depletion, and truthful client plan messaging plus launch-path verification, `M9.8` records the first explicit launch-candidate QA pass, `M9.9` reruns that launch pack after remediation, `M9.10.1` clears the previous coordinator revision-resume blockers, `M9.10.2` reruns the full launch pack with explicit threshold treatment, `M9.10.3` clears the paused-narration interaction-handoff blockers in the launch-product unit suite, `M9.10.4` now turns cost plus latency thresholds into explicit numeric pass criteria and records a clean final launch rerun, `M9.11` now hardens telemetry durability plus joined launch reporting, and `M9.12` now adds coordinator-owned narration playback wall-clock telemetry. The remaining post-launch telemetry gap is durable per-scene runtime-stage export rather than blocked product behavior, deferred commercial thresholds, or missing playback timing.
 - `VoiceSessionView` now closes a finished story with an explicit completion card and child-safe next-step actions for replay, continuation, and return-to-library behavior, and repeat-mode sessions now return to the saved-series surface without interrupting the finished story with upgrade UI.
-- Runtime-stage telemetry exists and `M8.2` now turns it into package-boundary direction, launch-default caps plus backend-owned depletion now exist, `M9.7.1` now adds a backend `/health` telemetry report with session-scoped request, provider-usage, and launch-event summaries, `M9.7.2` now adds client launch-event capture for restore attempts, blocked review presentation, parent-managed plan actions, and entitlement outcomes, `docs/verification/launch-confidence-telemetry-report.md` now records the explicit telemetry evidence, and `M9.11` now makes those launch reports durable enough for post-launch verification by persisting backend analytics to `ANALYTICS_PERSIST_PATH`, persisting client launch telemetry in `UserDefaults`, and exposing one joined `LaunchTelemetryJoinedReport` through `APIClient.fetchLaunchTelemetryReport()`. The main remaining telemetry gap is narration playback wall-clock fidelity rather than durability or cross-runtime joining.
+- Runtime-stage telemetry exists and `M8.2` now turns it into package-boundary direction, launch-default caps plus backend-owned depletion now exist, `M9.7.1` now adds a backend `/health` telemetry report with session-scoped request, provider-usage, and launch-event summaries, `M9.7.2` now adds client launch-event capture for restore attempts, blocked review presentation, parent-managed plan actions, and entitlement outcomes, `docs/verification/launch-confidence-telemetry-report.md` now records the explicit telemetry evidence, `M9.11` now makes those launch reports durable enough for post-launch verification by persisting backend analytics to `ANALYTICS_PERSIST_PATH`, persisting client launch telemetry in `UserDefaults`, and exposing one joined `LaunchTelemetryJoinedReport` through `APIClient.fetchLaunchTelemetryReport()`, and `M9.12` now adds stage-separated narration playback start/completion/cancellation wall-clock evidence at the coordinator boundary. The main remaining telemetry gap is durable runtime-stage timeline export rather than playback fidelity, durability of launch counters, or cross-runtime joining.
 - The repo now has a parent-led first-run flow plus working entitlement bootstrap, refresh, preflight, backend-owned usage counters, client plan-limit alignment, and an explicit launch-candidate acceptance report. After `M9.10.4`, the hybrid baseline, backend launch-contract suite, full launch-product unit suite, and full launch-product UI suite are all green, launch-default caps plus numeric cost and latency thresholds are explicit, and the current MVP candidate is now recorded as `GO`.
+- `docs/verification/launch-readiness-gap-assessment.md` remained the planning source of truth through Sprint 10, and `docs/verification/launch-candidate-acceptance-report.md` now records the March 20, 2026 final rerun outcome: the commercial blockers are closed and StoryTime is `READY FOR MVP LAUNCH` in repo terms.
+- Broader telemetry dashboards, richer parent usage summaries, stronger parent authentication, and per-scene runtime timeline export remain intentionally deferred unless a new launch or post-launch blocker is reproduced.
 - Launch readiness is now the default next workstream; broad hybrid-runtime refactoring is not the next step unless a new reproduced defect is recorded.
 
 ## Open Launch Decisions
@@ -180,15 +184,19 @@ Phase 8 - Launch Readiness, Monetization, And Acceptance
 - VERIFIED BY TEST and VERIFIED BY CODE INSPECTION: cost thresholds now pass for the current candidate. Repo-owned launch exposure is capped at `6` remote-cost-bearing launches per rolling `7` days for Starter and `24` remote-cost-bearing launches per rolling `7` days for Plus, both with a `10` minute story-length cap and replay excluded from fresh-generation consumption.
 - VERIFIED BY TEST and VERIFIED BY CODE INSPECTION: latency thresholds now pass for the current candidate. Launch review now treats `<= 8` seconds for health checks, `<= 12` seconds for session identity and voices, and `<= 20` seconds for entitlement sync, entitlement preflight, realtime session, discovery, generation, revision, and the backend realtime upstream proxy as the numeric launch ceilings for the locked MVP.
 - VERIFIED BY TEST and VERIFIED BY CODE INSPECTION: telemetry durability and joined launch reporting now pass for the current candidate. Backend launch analytics persist through `ANALYTICS_PERSIST_PATH`, client launch telemetry persists through `UserDefaults`, and `APIClient.fetchLaunchTelemetryReport()` now returns one joined backend-plus-client report for verification.
-- PARTIALLY VERIFIED: narration telemetry still emphasizes TTS preparation more than full playback wall-clock timing.
+- VERIFIED BY TEST and VERIFIED BY CODE INSPECTION: narration telemetry now includes stage-separated playback wall-clock timing in addition to TTS preparation timing.
+- VERIFIED BY TEST and VERIFIED BY CODE INSPECTION: the parent-managed commercial happy path is now directly evidenced. `ParentTrustCenterView` hosts the purchase path, blocked new-story and continuation flows now recover after parent-managed purchase, and retry uses refreshed entitlements instead of bypassing preflight.
+- VERIFIED BY TEST and VERIFIED BY CODE INSPECTION: the final `M10.3` launch rerun is complete. The required hybrid, backend, iOS unit, and iOS UI launch suites are green, the repo-owned commercial blockers are closed, and the current repo-grounded launch recommendation is `READY FOR MVP LAUNCH`.
+- PARTIALLY VERIFIED: live App Store purchase-sheet behavior remains dependent on external StoreKit environment validation rather than repo-only automated evidence, but it is no longer a repo-owned launch blocker for the locked MVP.
+- VERIFIED BY CODE INSPECTION: the non-blocking gaps from the launch-gap assessment remain intentionally deferred unless a new blocker is reproduced.
 
 ## Next Recommended Milestone
 
-`M9.12 - Narration wall-clock telemetry hardening`
+None. Sprint 10 is complete.
 
 Reason:
-- `M9.11` completed the telemetry durability and joined-report hardening work without changing the current `GO` launch state.
-- The next narrow telemetry-quality gap is measuring narration playback wall-clock timing more directly than the current preparation-heavy telemetry allows.
+- The final commercial-closure sprint is complete and the launch recommendation is now explicit.
+- Any next work should be an intentional post-launch planning or hardening milestone rather than an implied continuation of Sprint 10.
 
 ## Milestone Status
 
@@ -270,7 +278,11 @@ Reason:
 | M9.10.3 Paused-narration interaction handoff blocker fix | DONE | `PracticeSessionViewModel` now accepts later future-scene revision start indices during paused-narration resume, which restores no-reconnect and transcript-final direct interaction handoff behavior and returns the full launch-product unit slice to green. |
 | M9.10.4 Numeric commercial threshold decision and clean launch rerun | DONE | Cost and latency thresholds now have explicit numeric launch terms, the exact `M9.8` launch pack reran green on March 13, 2026, and `docs/verification/launch-candidate-acceptance-report.md` now records a `GO` launch decision for the current MVP candidate. |
 | M9.11 Telemetry durability and joined launch-report hardening | DONE | Backend analytics now persist to disk, client launch telemetry now persists in `UserDefaults`, and `APIClient.fetchLaunchTelemetryReport()` now exposes one joined backend-plus-client report surface. |
-| M9.12 Narration wall-clock telemetry hardening | TODO | Extend narration telemetry from TTS preparation into playback wall-clock evidence so post-launch review can reason about actual narration latency and completion behavior. |
+| M9.12 Narration wall-clock telemetry hardening | DONE | `PracticeSessionViewModel` now records stage-separated narration playback start, completion, and cancellation wall-clock telemetry while preserving separate TTS preparation timing, and the verification docs now reflect that evidence. |
+| M10.0 Launch-gap assessment review and Sprint 10 approval | DONE | The launch-gap assessment is now the planning source of truth, the final commercial-closure sprint is approved, and the next execution path is narrowed to `M10.1` through `M10.3`. |
+| M10.1 Parent-managed purchase surface closure | DONE | `ParentTrustCenterView` now hosts the smallest truthful StoreKit-backed purchase path, refresh and restore stay parent-managed, and targeted UI and unit tests confirm no purchase UI appears in child-session surfaces. |
+| M10.2 Upgrade unblock happy-path verification | DONE | Blocked new-story and continuation flows now recover after parent-managed purchase, retry uses refreshed entitlement state instead of bypassing preflight, and the evidence is recorded in `docs/verification/commercial-upgrade-happy-path-verification.md`. |
+| M10.3 Commercial launch rerun and blocker closeout | DONE | The full launch-readiness pack reran green on March 20, 2026, the only rerun issue was a tightly related brittle UI assertion fix, and `docs/verification/launch-candidate-acceptance-report.md` now records `READY FOR MVP LAUNCH`. |
 
 ## Completed Work Log
 
@@ -1610,3 +1622,129 @@ Reason:
   - The joined report is durable enough for repo verification, but it is not a broader centralized operational warehouse or dashboard.
   - Purchase UI, paywall UI, and real billing entry remain out of scope for the locked MVP.
 - Next: M9.12 - Narration wall-clock telemetry hardening
+
+### 2026-03-20 - M9.12 Narration wall-clock telemetry hardening
+- Status: DONE
+- Summary: Extended coordinator-owned narration telemetry beyond preload timing so post-launch verification can reason about actual playback behavior. `RuntimeTelemetryStage` now distinguishes `tts_generation` from `tts_playback_started`, `tts_playback_completed`, and `tts_playback_cancelled`, and `PracticeSessionViewModel.startNarration(...)` now records playback start before `playScene(...)` begins plus completion or cancellation wall-clock duration after playback returns. The verification artifacts now reflect that narration is no longer represented primarily by preparation timing, while still calling out the remaining gap around durable runtime-stage timeline export.
+- Files: `ios/StoryTime/Networking/APIClient.swift`, `ios/StoryTime/Features/Story/PracticeSessionViewModel.swift`, `ios/StoryTime/Tests/PracticeSessionViewModelTests.swift`, `docs/verification/runtime-stage-telemetry-verification.md`, `docs/verification/launch-confidence-telemetry-report.md`, `docs/verification/hybrid-runtime-validation.md`, `PLANS.md`, `SPRINT.md`
+- Tests:
+  - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' -only-testing:StoryTimeTests/PracticeSessionViewModelTests/testNarrationPreloadsUpcomingSceneAndUsesPreparedCacheOnBoundaryAdvance -only-testing:StoryTimeTests/PracticeSessionViewModelTests/testNarrationPlaybackTelemetryRecordsWallClockStartAndCompletion -only-testing:StoryTimeTests/PracticeSessionViewModelTests/testNarrationPlaybackTelemetryRecordsCancellationWallClockOnInterruption`, which passed `3` tests.
+- Decisions:
+  - Keep narration preparation and playback as separate detailed narration stages instead of collapsing wall-clock playback into the existing `tts_generation` metric.
+  - Record playback telemetry at the coordinator boundary rather than widening scope into backend analytics, because long-form narration remains client-owned TTS in the active architecture.
+  - Reuse the existing narration start source strings for playback attribution so the new telemetry stays redacted while preserving whether playback began from generation, scene completion, replay, or revision resume.
+- Risks/Notes:
+  - The durable joined launch report still does not export per-scene runtime telemetry, so the new narration playback evidence remains verification-facing coordinator telemetry rather than a broader persisted runtime timeline.
+  - Device audio-route latency below the transport boundary is still not measured directly; the new playback metric reflects transport-observed wall-clock timing.
+  - Purchase UI, paywall UI, and real billing entry remain out of scope for the locked MVP.
+- Next: No remaining ordered milestone in `SPRINT.md`; the next useful follow-up is a new post-launch telemetry export milestone if durable runtime-stage timelines become a priority.
+
+### 2026-03-20 - Sprint queue exhausted, no new milestone selected
+- Status: BLOCKED
+- Summary: Re-read `AGENTS.md`, `PLANS.md`, and `SPRINT.md` for the next required run and confirmed that there is no remaining ordered incomplete milestone in `SPRINT.md`. Per the repo rules, no new implementation milestone was invented and no unrelated code changes were made. The only repo updates in this run record the queue-exhausted state explicitly so the next run requires intentional reprioritization rather than implicit scope creation.
+- Files: `PLANS.md`, `SPRINT.md`
+- Tests:
+  - None run. No code-path milestone remained to implement or verify.
+- Decisions:
+  - Treat the absence of any incomplete `SPRINT.md` milestone as a real blocker rather than skipping ahead or inventing post-launch work outside the queued plan.
+  - Record the queue-exhausted state explicitly in the control files so the next run starts from an intentional reprioritization step.
+- Risks/Notes:
+  - The next workstream is blocked on planning, not on code implementation.
+  - The main documented follow-up remains durable runtime-stage timeline export if product priorities still favor post-launch telemetry hardening.
+- Next: No remaining ordered milestone in `SPRINT.md`; explicit sprint reprioritization is required before the next implementation run.
+
+### 2026-03-20 - Queue exhaustion reconfirmed
+- Status: BLOCKED
+- Summary: Re-checked the repo control files for another implementation run and confirmed the same queue-exhaustion state: `SPRINT.md` still has no ordered incomplete milestone to execute. No code-path work was started, and no new milestone was created implicitly.
+- Files: `PLANS.md`, `SPRINT.md`
+- Tests:
+  - None run. The blocker is planning state, not a code-path defect or missing verification rerun.
+- Decisions:
+  - Keep the sprint blocked until a new ordered milestone is added explicitly.
+  - Avoid creating a speculative post-launch telemetry export milestone inside this run because that would violate the current queue-control rules.
+- Risks/Notes:
+  - Subsequent implementation runs will remain blocked until `SPRINT.md` is reprioritized.
+  - The most obvious follow-up remains durable runtime-stage timeline export, but it is not yet an approved queued milestone.
+- Next: No remaining ordered milestone in `SPRINT.md`; explicit sprint reprioritization is still required.
+
+### 2026-03-20 - Launch-readiness gap assessment and Sprint 10 planning input
+- Status: DONE
+- Summary: Completed a repo-grounded launch-readiness gap assessment instead of another implementation pass. The new report concludes that StoryTime is `CONDITIONALLY READY IF BLOCKERS ARE CLOSED`: the child-facing product loop, entitlement enforcement, repeat-use flow, privacy copy, and hybrid runtime evidence are all materially strong, but the repo still lacks an actual parent-managed purchase completion flow and a verified post-purchase unblock happy path. The assessment keeps those commercial gaps distinct from non-blocking telemetry and polish work, and it proposes a tight next sprint focused on commercial blocker closure rather than reopening the stabilized runtime.
+- Files: `docs/verification/launch-readiness-gap-assessment.md`, `PLANS.md`, `SPRINT.md`
+- Tests:
+  - None run in this planning pass.
+  - Evidence came from current code inspection plus existing iOS UI tests, iOS unit tests, backend integration tests, and recent verification reports already present in the repo.
+- Decisions:
+  - Treat the absence of an implemented parent-managed purchase path as a real launch blocker for a commercial MVP, even though an earlier narrower-scope launch report recorded a `GO` decision.
+  - Keep the next sprint tight: close the parent-managed purchase path, verify the blocked-to-entitled happy path, then rerun launch acceptance.
+  - Do not reopen broad hybrid-runtime rescue work because the runtime remains one of the best-evidenced areas of the repo.
+- Risks/Notes:
+  - The assessment is strongest where March 2026 verification artifacts already exist and weaker where behavior was inspected but not re-executed in this run.
+  - If product leadership explicitly chooses a non-commercial or manually provisioned MVP, the commercial blocker classification would need to be revisited against that narrower scope.
+  - Operational telemetry still lacks a durable per-scene runtime timeline export, but that remains non-blocking for the next sprint recommendation.
+- Next: `M10.0 - Launch-gap assessment review and Sprint 10 approval`
+
+### 2026-03-20 - M10.0 Launch-gap assessment review and Sprint 10 approval
+- Status: DONE
+- Summary: Turned the launch-gap assessment into an approved final sprint queue. `AGENTS.md` now explicitly constrains future runs to commercial-closure work only, `SPRINT.md` now carries actionable `M10.1` through `M10.3` milestones for purchase-path closure, happy-path verification, and final launch rerun, and `PLANS.md` now points directly at `M10.1` as the next recommended milestone. The remaining non-blocking gaps are deliberately deferred unless they become blockers during the final sprint.
+- Files: `AGENTS.md`, `PLANS.md`, `SPRINT.md`
+- Tests:
+  - None run. This was a planning-only control-file update grounded in existing code, test, and verification evidence.
+- Decisions:
+  - Treat Sprint 10 as the final commercial-closure sprint rather than reopening broad launch-readiness scope.
+  - Keep purchase and entitlement work parent-managed and explicitly exclude purchase UI from child-facing runtime surfaces.
+  - Keep broader telemetry, auth, and parent-usage polish deferred unless a Sprint 10 blocker forces a tightly related unblocker.
+- Risks/Notes:
+  - The final launch recommendation still depends on successful implementation and verification of `M10.1` and `M10.2`.
+  - The earlier narrower-scope `GO` report remains part of history, but the launch-gap assessment remains the planning source of truth until the commercial blockers are closed.
+- Next: `M10.1 - Parent-managed purchase surface closure`
+
+### 2026-03-20 - M10.1 Parent-managed purchase surface closure
+- Status: DONE
+- Summary: Added the smallest truthful parent-managed purchase completion path without widening beyond the approved commercial-closure scope. `ParentTrustCenterView` now loads StoreKit-backed Plus purchase options, offers a parent-only upgrade action, completes the purchase through the shared entitlement seam, refreshes the local entitlement snapshot, and keeps refresh plus restore in the same parent-managed plan surface. Child-facing runtime surfaces remain purchase-free, and the blocked commercial flow can now close through Parent Controls instead of stopping at review copy.
+- Files: `ios/StoryTime/Networking/APIClient.swift`, `ios/StoryTime/App/UITestSeed.swift`, `ios/StoryTime/Features/Story/HomeView.swift`, `ios/StoryTime/Tests/SmokeTests.swift`, `ios/StoryTime/UITests/StoryTimeUITests.swift`, `PLANS.md`, `SPRINT.md`
+- Tests:
+  - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' -only-testing:StoryTimeTests/SmokeTests/testEntitlementManagerPurchasesAndStoresSyncedSnapshot -only-testing:StoryTimeTests/SmokeTests/testEntitlementManagerDoesNotSyncCancelledPurchase -only-testing:StoryTimeUITests/StoryTimeUITests/testParentControlsShowCurrentPlanAndRestoreEntry -only-testing:StoryTimeUITests/StoryTimeUITests/testParentControlsCanCompleteParentManagedPlusPurchase -only-testing:StoryTimeUITests/StoryTimeUITests/testVoiceSessionShowsStorytellingCueAfterNarrationStarts`, which passed with `5` tests.
+- Decisions:
+  - Keep purchase initiation and completion inside `ParentTrustCenterView` instead of widening into `JourneyUpgradeReviewView`, `SeriesDetailUpgradeReviewView`, or any child-session runtime surface.
+  - Reuse the existing entitlement sync seam after a verified StoreKit purchase instead of creating a second entitlement refresh path.
+  - Use a dedicated UI-test purchase provider so the parent-managed purchase flow remains directly testable without weakening the production trust boundary.
+- Risks/Notes:
+  - `M10.1` closes the purchase-path blocker but not the commercial happy-path blocker; the repo still needs direct blocked-to-upgraded-to-unblocked retry coverage in `M10.2`.
+  - The production purchase path currently depends on StoreKit product availability for the configured Plus product IDs; launch verification still needs to prove the blocked review surfaces recover end to end after purchase or entitlement refresh.
+- Next: `M10.2 - Upgrade unblock happy-path verification`
+
+### 2026-03-20 - M10.2 Upgrade unblock happy-path verification
+- Status: DONE
+- Summary: Closed the remaining commercial happy-path verification gap with the smallest tightly related unblocker. `NewStoryJourneyView` and `StorySeriesDetailView` now clear stale blocked state when parent-managed plan work materially changes the entitlement snapshot or token, which lets the original start buttons retry through normal preflight instead of bypassing gating. The repo now has direct automated evidence for blocked new-story recovery, blocked continuation recovery, refreshed entitlement-token reuse on retry, and the backend blocked-to-purchased-to-allowed contract, all recorded in a dedicated verification report.
+- Files: `ios/StoryTime/App/UITestSeed.swift`, `ios/StoryTime/Features/Story/NewStoryJourneyView.swift`, `ios/StoryTime/Features/Story/StorySeriesDetailView.swift`, `ios/StoryTime/Tests/APIClientTests.swift`, `ios/StoryTime/UITests/StoryTimeUITests.swift`, `backend/src/tests/app.integration.test.ts`, `docs/verification/commercial-upgrade-happy-path-verification.md`, `PLANS.md`, `SPRINT.md`
+- Tests:
+  - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' -only-testing:StoryTimeTests/APIClientTests/testPreflightUsesRefreshedEntitlementTokenAfterPurchaseSync -only-testing:StoryTimeUITests/StoryTimeUITests/testJourneyBlockedStartCanRecoverAfterParentManagedPurchase -only-testing:StoryTimeUITests/StoryTimeUITests/testSeriesDetailBlockedContinuationCanRecoverAfterParentManagedPurchase -only-testing:StoryTimeUITests/StoryTimeUITests/testJourneyBlocksNewStoryStartAndRoutesToParentManagedReview -only-testing:StoryTimeUITests/StoryTimeUITests/testSeriesDetailBlockedContinuationRoutesToParentManagedReview`, which passed with `5` tests.
+  - `npm test -- --run src/tests/app.integration.test.ts`, which passed with `33` tests.
+- Decisions:
+  - Keep retry inside the existing blocked surfaces by clearing stale block state only after the entitlement snapshot or token changes, instead of adding purchase or recovery UI to child-session surfaces.
+  - Reuse the existing preflight path for retry so the same gating contract continues to decide whether launch is allowed after purchase or entitlement refresh.
+  - Record the commercial happy-path evidence in a focused verification artifact rather than widening the broader launch report before `M10.3`.
+- Risks/Notes:
+  - The seeded UI provider verifies the recovery flow deterministically, but the live App Store purchase sheet is still only code-inspected until the final launch rerun.
+  - `M10.2` closes the remaining commercial flow blocker, but StoryTime still needs the final launch-readiness rerun and explicit recommendation update in `M10.3`.
+- Next: `M10.3 - Commercial launch rerun and blocker closeout`
+
+### 2026-03-20 - M10.3 Commercial launch rerun and blocker closeout
+- Status: DONE
+- Summary: Closed the final commercial-closure sprint with a full March 20, 2026 launch rerun. The hybrid validation baseline, backend launch-contract suite, iOS launch-product unit suite, and full iOS UI launch suite are all green after `M10.1` and `M10.2`. The only issue found during the rerun was a tightly related brittle UI assertion in `testJourneyReviewLinksToDurableParentPlanSurface`; aligning it to the existing `scrollToElement(...)` pattern produced a clean targeted rerun and a clean full-suite rerun. `docs/verification/launch-candidate-acceptance-report.md` now records the final repo-grounded recommendation as `READY FOR MVP LAUNCH`.
+- Files: `ios/StoryTime/UITests/StoryTimeUITests.swift`, `docs/verification/launch-candidate-acceptance-report.md`, `PLANS.md`, `SPRINT.md`
+- Tests:
+  - `/Users/rory/Documents/StoryTime/scripts/run_hybrid_runtime_validation.sh`, which passed with backend `51` tests, iOS unit `34` tests, and iOS UI `2` tests.
+  - `cd /Users/rory/Documents/StoryTime/backend && npm test -- --run src/tests/app.integration.test.ts src/tests/auth-security.test.ts src/tests/model-services.test.ts src/tests/request-retry-rate.test.ts`, which passed with `56` tests.
+  - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' -only-testing:StoryTimeTests/APIClientTests -only-testing:StoryTimeTests/PracticeSessionViewModelTests -only-testing:StoryTimeTests/StoryLibraryStoreTests`, which passed with `131` tests.
+  - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' -only-testing:StoryTimeUITests/StoryTimeUITests/testJourneyReviewLinksToDurableParentPlanSurface`, which passed with `1` test after the tightly related test-only unblocker.
+  - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' -only-testing:StoryTimeUITests`, which passed with `38` tests.
+- Decisions:
+  - Treat the first UI-suite failure as a tightly related test-only unblocker because the product surface was already present and another existing parent-controls test used the correct scroll-to-element access pattern.
+  - Record the final launch recommendation as `READY FOR MVP LAUNCH` in repo terms because the repo-owned commercial blockers are closed and the full launch command pack is green.
+  - Keep the remaining App Store environment gap and broader post-launch telemetry/auth/dashboard work documented as non-blocking rather than reopening Sprint 10 scope.
+- Risks/Notes:
+  - Live App Store purchase-sheet behavior remains external-environment dependent and is still not directly exercised in the repo rerun.
+  - Broader operational dashboards, stronger parent authentication, and durable per-scene runtime-stage export remain deferred post-launch work.
+- Next: No remaining approved sprint milestone. If follow-up work is scheduled, start with an explicit post-launch planning milestone.

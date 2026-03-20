@@ -253,6 +253,66 @@ final class SmokeTests: XCTestCase {
     }
 
     @MainActor
+    func testEntitlementManagerPurchasesAndStoresSyncedSnapshot() async throws {
+        let client = StubEntitlementSyncClient()
+        let manager = EntitlementManager(snapshot: nil)
+        let provider = StubParentManagedPurchaseProvider(
+            outcome: .purchased(
+                syncRequest: EntitlementSyncRequest(
+                    refreshReason: .purchase,
+                    transactions: [
+                        EntitlementSyncTransaction(
+                            productID: "storytime.plus.monthly",
+                            originalTransactionID: "original-1",
+                            latestTransactionID: "latest-1",
+                            purchasedAt: Int(Date().addingTimeInterval(-600).timeIntervalSince1970),
+                            expiresAt: Int(Date().addingTimeInterval(3_600).timeIntervalSince1970),
+                            revokedAt: nil,
+                            ownershipType: .purchased,
+                            environment: .sandbox,
+                            verificationState: .verified,
+                            isActive: true
+                        )
+                    ]
+                )
+            )
+        )
+
+        let outcome = try await manager.purchaseProduct(
+            using: client,
+            purchaseProvider: provider,
+            productID: "storytime.plus.monthly"
+        )
+
+        XCTAssertEqual(outcome, provider.outcome)
+        XCTAssertEqual(provider.purchasedProductID, "storytime.plus.monthly")
+        XCTAssertEqual(client.lastSyncRequest?.refreshReason, .purchase)
+        XCTAssertEqual(client.lastSyncRequest?.activeProductIDs, ["storytime.plus.monthly"])
+        XCTAssertEqual(manager.snapshot?.tier, .plus)
+        XCTAssertEqual(manager.snapshot?.source, .storekitVerified)
+
+        AppEntitlements.clear()
+    }
+
+    @MainActor
+    func testEntitlementManagerDoesNotSyncCancelledPurchase() async throws {
+        let client = StubEntitlementSyncClient()
+        let manager = EntitlementManager(snapshot: nil)
+        let provider = StubParentManagedPurchaseProvider(outcome: .cancelled)
+
+        let outcome = try await manager.purchaseProduct(
+            using: client,
+            purchaseProvider: provider,
+            productID: "storytime.plus.monthly"
+        )
+
+        XCTAssertEqual(outcome, .cancelled)
+        XCTAssertEqual(provider.purchasedProductID, "storytime.plus.monthly")
+        XCTAssertNil(client.lastSyncRequest)
+        XCTAssertNil(manager.snapshot)
+    }
+
+    @MainActor
     func testEntitlementManagerPreflightsAgainstBackendContract() async throws {
         let client = StubEntitlementSyncClient()
         let manager = EntitlementManager(snapshot: nil)
@@ -280,6 +340,30 @@ private struct StubEntitlementPurchaseStateProvider: EntitlementPurchaseStatePro
     func currentSyncRequest(refreshReason: EntitlementRefreshReason) async throws -> EntitlementSyncRequest {
         XCTAssertEqual(refreshReason, request.refreshReason)
         return request
+    }
+}
+
+private final class StubParentManagedPurchaseProvider: ParentManagedPurchaseProviding {
+    let outcome: ParentManagedPurchaseOutcome
+    private(set) var purchasedProductID: String?
+
+    init(outcome: ParentManagedPurchaseOutcome) {
+        self.outcome = outcome
+    }
+
+    func availableOptions() async throws -> [ParentManagedPurchaseOption] {
+        [
+            ParentManagedPurchaseOption(
+                productID: "storytime.plus.monthly",
+                displayName: "Plus Monthly",
+                displayPrice: "$4.99"
+            )
+        ]
+    }
+
+    func purchase(productID: String) async throws -> ParentManagedPurchaseOutcome {
+        purchasedProductID = productID
+        return outcome
     }
 }
 

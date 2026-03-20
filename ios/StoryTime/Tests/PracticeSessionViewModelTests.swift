@@ -885,6 +885,147 @@ final class PracticeSessionViewModelTests: XCTestCase {
         )
     }
 
+    func testNarrationPlaybackTelemetryRecordsWallClockStartAndCompletion() async throws {
+        let api = MockAPIClient()
+        api.discoveryResponses = [
+            DiscoveryEnvelope(
+                blocked: false,
+                safeMessage: nil,
+                data: DiscoveryData(
+                    slotState: DiscoverySlotState(
+                        theme: "a moonlight picnic",
+                        characters: ["Bunny", "Fox"],
+                        setting: "the moonlit park",
+                        tone: "cozy",
+                        episodeIntent: "a happy standalone adventure"
+                    ),
+                    questionCount: 1,
+                    readyToGenerate: true,
+                    assistantMessage: "I have enough details now.",
+                    transcript: "Tell a moonlight picnic story"
+                )
+            )
+        ]
+        api.generateStoryResult = makeGeneratedEnvelope(title: "Moonlight Picnic", sceneCount: 2)
+
+        let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [1])
+        let narrationTransport = MockNarrationTransport(scriptedResults: [true, true], playDelayNanoseconds: 120_000_000)
+        let store = StoryLibraryStore()
+        let plan = makePlan(childProfileId: try XCTUnwrap(store.activeProfile?.id))
+        let viewModel = PracticeSessionViewModel(
+            plan: plan,
+            sourceSeries: nil,
+            store: store,
+            api: api,
+            voiceCore: voice,
+            narrationTransport: narrationTransport,
+            forceMockVoiceCore: false
+        )
+
+        await viewModel.startSession()
+        voice.emitTranscriptFinal("Tell a moonlight picnic story")
+
+        await waitUntil { viewModel.phase == .completed }
+
+        let playbackStartEvents = viewModel.runtimeTelemetryEvents.filter {
+            $0.stage == .ttsPlaybackStarted &&
+            $0.stageGroup == .narration &&
+            $0.costDriver == .localSpeech
+        }
+        XCTAssertTrue(
+            playbackStartEvents.contains { $0.source == "startNarrationFromGenerationResolved" && $0.durationMs == 0 }
+        )
+        XCTAssertTrue(
+            playbackStartEvents.contains { $0.source == "startNarrationFromSceneCompletion" && $0.durationMs == 0 }
+        )
+
+        let playbackCompletionEvents = viewModel.runtimeTelemetryEvents.filter {
+            $0.stage == .ttsPlaybackCompleted &&
+            $0.stageGroup == .narration &&
+            $0.costDriver == .localSpeech
+        }
+        XCTAssertEqual(playbackCompletionEvents.count, 2)
+        XCTAssertTrue(playbackCompletionEvents.allSatisfy { $0.durationMs >= 100 })
+        XCTAssertFalse(
+            viewModel.runtimeTelemetryEvents.contains { $0.stage == .ttsPlaybackCancelled }
+        )
+    }
+
+    func testNarrationPlaybackTelemetryRecordsCancellationWallClockOnInterruption() async throws {
+        let api = MockAPIClient()
+        api.discoveryResponses = [
+            DiscoveryEnvelope(
+                blocked: false,
+                safeMessage: nil,
+                data: DiscoveryData(
+                    slotState: DiscoverySlotState(
+                        theme: "a lantern picnic",
+                        characters: ["Bunny", "Fox"],
+                        setting: "the moonlit park",
+                        tone: "cozy",
+                        episodeIntent: "a happy standalone adventure"
+                    ),
+                    questionCount: 1,
+                    readyToGenerate: true,
+                    assistantMessage: "I have enough details now.",
+                    transcript: "Tell a lantern picnic story"
+                )
+            )
+        ]
+        api.generateStoryResult = makeGeneratedEnvelope(title: "Lantern Picnic", sceneCount: 2)
+
+        let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [1])
+        let narrationTransport = MockNarrationTransport(scriptedResults: [true, true, true], playDelayNanoseconds: 250_000_000)
+        let store = StoryLibraryStore()
+        let plan = makePlan(childProfileId: try XCTUnwrap(store.activeProfile?.id))
+        let viewModel = PracticeSessionViewModel(
+            plan: plan,
+            sourceSeries: nil,
+            store: store,
+            api: api,
+            voiceCore: voice,
+            narrationTransport: narrationTransport,
+            forceMockVoiceCore: false
+        )
+
+        await viewModel.startSession()
+        voice.emitTranscriptFinal("Tell a lantern picnic story")
+
+        await waitUntil {
+            if case .narrating(sceneIndex: 0) = viewModel.sessionState {
+                return narrationTransport.playedUtteranceIDs.count == 1
+            }
+            return false
+        }
+
+        voice.emitTranscriptFinal("Why is Bunny carrying the lantern?")
+
+        await waitUntil {
+            viewModel.runtimeTelemetryEvents.contains {
+                $0.stage == .ttsPlaybackCancelled &&
+                $0.stageGroup == .narration &&
+                $0.costDriver == .localSpeech &&
+                $0.source == "startNarrationFromGenerationResolved"
+            }
+        }
+
+        let cancelledEvent = try XCTUnwrap(
+            viewModel.runtimeTelemetryEvents.first {
+                $0.stage == .ttsPlaybackCancelled &&
+                $0.stageGroup == .narration &&
+                $0.costDriver == .localSpeech &&
+                $0.source == "startNarrationFromGenerationResolved"
+            }
+        )
+        XCTAssertGreaterThanOrEqual(cancelledEvent.durationMs, 10)
+        XCTAssertTrue(
+            viewModel.runtimeTelemetryEvents.contains {
+                $0.stage == .ttsPlaybackStarted &&
+                $0.source == "startNarrationFromGenerationResolved"
+            }
+        )
+    }
+
     func testRepeatOrClarifyReplaysCurrentSceneBoundaryWithoutRevision() async throws {
         let api = MockAPIClient()
         api.discoveryResponses = [
