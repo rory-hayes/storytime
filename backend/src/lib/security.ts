@@ -23,7 +23,7 @@ type SessionTokenPayload = {
 };
 
 export type EntitlementTier = "starter" | "plus";
-export type EntitlementSource = "none" | "storekit_verified" | "debug_seed";
+export type EntitlementSource = "none" | "storekit_verified" | "promo_grant" | "debug_seed";
 export type EntitlementOwner =
   | {
       kind: "install";

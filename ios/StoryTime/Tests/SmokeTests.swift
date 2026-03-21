@@ -74,6 +74,50 @@ final class SmokeTests: XCTestCase {
         XCTAssertFalse(reloadedStore.needsOnboarding)
     }
 
+    func testFirstRunActivationGateBlocksAccountStepUntilParentIsSignedIn() {
+        let gateState = FirstRunActivationGateState(
+            currentStep: .account,
+            isParentSignedIn: false,
+            selectedPlanChoice: nil
+        )
+
+        XCTAssertFalse(gateState.canAdvance)
+        XCTAssertFalse(gateState.canFinish)
+    }
+
+    func testFirstRunActivationGateBlocksCompletionUntilPlanIsChosen() {
+        let gateState = FirstRunActivationGateState(
+            currentStep: .completion,
+            isParentSignedIn: true,
+            selectedPlanChoice: nil
+        )
+
+        XCTAssertFalse(gateState.canAdvance)
+        XCTAssertFalse(gateState.canFinish)
+    }
+
+    func testFirstRunActivationGateAllowsCompletionOnceAccountAndPlanAreReady() {
+        let gateState = FirstRunActivationGateState(
+            currentStep: .completion,
+            isParentSignedIn: true,
+            selectedPlanChoice: .starter
+        )
+
+        XCTAssertTrue(gateState.canAdvance)
+        XCTAssertTrue(gateState.canFinish)
+    }
+
+    func testFirstRunActivationGateAllowsCompletionForAuthenticatedPlusPlan() {
+        let gateState = FirstRunActivationGateState(
+            currentStep: .completion,
+            isParentSignedIn: true,
+            selectedPlanChoice: .plus
+        )
+
+        XCTAssertTrue(gateState.canAdvance)
+        XCTAssertTrue(gateState.canFinish)
+    }
+
     @MainActor
     func testEntitlementManagerLoadsBootstrapSnapshotFromCache() {
         AppEntitlements.store(
@@ -441,6 +485,32 @@ private final class StubEntitlementSyncClient: APIClienting {
             ),
             token: "stub-plus-token",
             expiresAt: Date().addingTimeInterval(300).timeIntervalSince1970
+        )
+        AppEntitlements.store(envelope: envelope)
+        return envelope
+    }
+
+    func redeemPromoCode(request body: PromoCodeRedemptionRequest) async throws -> EntitlementBootstrapEnvelope {
+        let envelope = EntitlementBootstrapEnvelope(
+            snapshot: EntitlementSnapshot(
+                tier: .plus,
+                source: .promoGrant,
+                maxChildProfiles: 3,
+                maxStoryStartsPerPeriod: nil,
+                maxContinuationsPerPeriod: nil,
+                maxStoryLengthMinutes: nil,
+                canReplaySavedStories: true,
+                canStartNewStories: true,
+                canContinueSavedSeries: true,
+                effectiveAt: Date().timeIntervalSince1970,
+                expiresAt: Date().addingTimeInterval(300).timeIntervalSince1970,
+                usageWindow: EntitlementUsageWindow(kind: .rollingPeriod, durationSeconds: nil, resetsAt: nil),
+                remainingStoryStarts: nil,
+                remainingContinuations: nil
+            ),
+            token: "stub-promo-token",
+            expiresAt: Date().addingTimeInterval(300).timeIntervalSince1970,
+            owner: EntitlementOwner(kind: .parentUser, parentUserID: "promo-parent", authProvider: .firebase)
         )
         AppEntitlements.store(envelope: envelope)
         return envelope

@@ -189,6 +189,12 @@ export const EntitlementsSyncRequestSchema = z.object({
 
 export type EntitlementsSyncRequest = z.infer<typeof EntitlementsSyncRequestSchema>;
 
+export const PromoCodeRedemptionRequestSchema = z.object({
+  code: z.string().trim().min(4).max(64)
+});
+
+export type PromoCodeRedemptionRequest = z.infer<typeof PromoCodeRedemptionRequestSchema>;
+
 export const EntitlementPreflightActionSchema = z.enum(["new_story", "continue_story"]);
 
 export const EntitlementPreflightBlockReasonSchema = z.enum([

@@ -1,8 +1,14 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  configureEntitlementPersistence,
   evaluatePreflight,
   evaluatePreflightForRequest,
+  issueBootstrapEntitlements,
   issueSyncedEntitlements,
+  redeemPromoCodeEntitlements,
   resetEntitlementUsageLedger,
   resolveActiveProductIDs
 } from "../lib/entitlements.js";
@@ -209,6 +215,362 @@ describe("entitlements sync", () => {
         makeTestEnv()
       )
     ).toThrowError(/authenticated parent account/i);
+  });
+
+  it("rejects restore-linked plus sync when this device was already restored for a different parent", () => {
+    const env = makeTestEnv();
+
+    issueSyncedEntitlements(
+      {
+        refresh_reason: "restore",
+        active_product_ids: ["storytime.plus.yearly"],
+        transactions: [
+          {
+            product_id: "storytime.plus.yearly",
+            original_transaction_id: "restore-original-1",
+            latest_transaction_id: "restore-latest-1",
+            purchased_at: Math.floor(Date.now() / 1000) - 600,
+            expires_at: Math.floor(Date.now() / 1000) + 3_600,
+            revoked_at: null,
+            ownership_type: "family_shared",
+            environment: "sandbox",
+            verification_state: "verified",
+            is_active: true
+          }
+        ]
+      },
+      makeRequestContext({
+        installId: "install-restore-claim",
+        parentIdentity: {
+          uid: "parent-alpha",
+          provider: "firebase"
+        }
+      }),
+      env
+    );
+
+    expect(() =>
+      issueSyncedEntitlements(
+        {
+          refresh_reason: "restore",
+          active_product_ids: ["storytime.plus.yearly"],
+          transactions: [
+            {
+              product_id: "storytime.plus.yearly",
+              original_transaction_id: "restore-original-2",
+              latest_transaction_id: "restore-latest-2",
+              purchased_at: Math.floor(Date.now() / 1000) - 600,
+              expires_at: Math.floor(Date.now() / 1000) + 3_600,
+              revoked_at: null,
+              ownership_type: "family_shared",
+              environment: "sandbox",
+              verification_state: "verified",
+              is_active: true
+            }
+          ]
+        },
+        makeRequestContext({
+          installId: "install-restore-claim",
+          parentIdentity: {
+            uid: "parent-beta",
+            provider: "firebase"
+          }
+        }),
+        env
+      )
+    ).toThrowError(/restore claim belongs to a different parent account on this device/i);
+  });
+
+  it("redeems a configured promo code into a parent-owned plus entitlement", () => {
+    const env = makeTestEnv({
+      PROMO_CODE_GRANTS: [
+        {
+          code: "FRIENDS-PLUS-2026",
+          tier: "plus",
+          expires_at: Math.floor(Date.now() / 1_000) + 3_600
+        }
+      ]
+    });
+    const context = makeRequestContext({
+      parentIdentity: {
+        uid: "parent-promo-1",
+        provider: "firebase"
+      }
+    });
+
+    const envelope = redeemPromoCodeEntitlements(
+      {
+        code: " friends-plus-2026 "
+      },
+      context,
+      env
+    );
+
+    expect(envelope.snapshot.tier).toBe("plus");
+    expect(envelope.snapshot.source).toBe("promo_grant");
+    expect(envelope.owner).toEqual({
+      kind: "parent_user",
+      parent_user_id: "parent-promo-1",
+      auth_provider: "firebase"
+    });
+  });
+
+  it("rejects promo redemption for invalid codes", () => {
+    expect(() =>
+      redeemPromoCodeEntitlements(
+        {
+          code: "missing-code"
+        },
+        makeRequestContext({
+          parentIdentity: {
+            uid: "parent-promo-1",
+            provider: "firebase"
+          }
+        }),
+        makeTestEnv()
+      )
+    ).toThrowError(/promo code was not found/i);
+  });
+
+  it("rejects promo redemption for already-redeemed codes", () => {
+    const env = makeTestEnv({
+      PROMO_CODE_GRANTS: [
+        {
+          code: "ONE-TIME-PLUS",
+          tier: "plus",
+          expires_at: Math.floor(Date.now() / 1_000) + 3_600
+        }
+      ]
+    });
+
+    redeemPromoCodeEntitlements(
+      {
+        code: "ONE-TIME-PLUS"
+      },
+      makeRequestContext({
+        parentIdentity: {
+          uid: "parent-promo-1",
+          provider: "firebase"
+        }
+      }),
+      env
+    );
+
+    expect(() =>
+      redeemPromoCodeEntitlements(
+        {
+          code: "ONE-TIME-PLUS"
+        },
+        makeRequestContext({
+          parentIdentity: {
+            uid: "parent-promo-2",
+            provider: "firebase"
+          }
+        }),
+        env
+      )
+    ).toThrowError(/already redeemed/i);
+  });
+
+  it("rejects promo redemption for expired codes", () => {
+    const env = makeTestEnv({
+      PROMO_CODE_GRANTS: [
+        {
+          code: "EXPIRED-PLUS",
+          tier: "plus",
+          expires_at: Math.floor(Date.now() / 1_000) - 1
+        }
+      ]
+    });
+
+    expect(() =>
+      redeemPromoCodeEntitlements(
+        {
+          code: "EXPIRED-PLUS"
+        },
+        makeRequestContext({
+          parentIdentity: {
+            uid: "parent-promo-1",
+            provider: "firebase"
+          }
+        }),
+        env
+      )
+    ).toThrowError(/expired/i);
+  });
+
+  it("reloads persisted parent-owned entitlements after an in-memory reset", () => {
+    const persistencePath = path.join(os.tmpdir(), `storytime-entitlements-${Date.now()}.json`);
+    const env = makeTestEnv({
+      ENTITLEMENTS_PERSIST_PATH: persistencePath
+    });
+    configureEntitlementPersistence(persistencePath);
+
+    issueSyncedEntitlements(
+      {
+        refresh_reason: "purchase",
+        active_product_ids: ["storytime.plus.monthly"],
+        transactions: []
+      },
+      makeRequestContext({
+        parentIdentity: {
+          uid: "parent-persist-1",
+          provider: "firebase"
+        }
+      }),
+      env
+    );
+
+    resetEntitlementUsageLedger({ clearPersistence: false });
+    configureEntitlementPersistence(persistencePath);
+
+    const reloaded = issueBootstrapEntitlements(
+      makeRequest(),
+      makeRequestContext({
+        parentIdentity: {
+          uid: "parent-persist-1",
+          provider: "firebase"
+        }
+      }),
+      env
+    );
+
+    expect(reloaded.snapshot.tier).toBe("plus");
+    expect(reloaded.snapshot.source).toBe("storekit_verified");
+    expect(reloaded.owner).toEqual({
+      kind: "parent_user",
+      parent_user_id: "parent-persist-1",
+      auth_provider: "firebase"
+    });
+
+    if (fs.existsSync(persistencePath)) {
+      fs.unlinkSync(persistencePath);
+    }
+  });
+
+  it("reloads persisted promo redemptions after an in-memory reset", () => {
+    const persistencePath = path.join(os.tmpdir(), `storytime-promo-redemptions-${Date.now()}.json`);
+    const env = makeTestEnv({
+      ENTITLEMENTS_PERSIST_PATH: persistencePath,
+      PROMO_CODE_GRANTS: [
+        {
+          code: "RELOAD-PLUS-2026",
+          tier: "plus",
+          expires_at: Math.floor(Date.now() / 1_000) + 3_600
+        }
+      ]
+    });
+    configureEntitlementPersistence(persistencePath);
+
+    redeemPromoCodeEntitlements(
+      {
+        code: "RELOAD-PLUS-2026"
+      },
+      makeRequestContext({
+        parentIdentity: {
+          uid: "parent-persist-alpha",
+          provider: "firebase"
+        }
+      }),
+      env
+    );
+
+    resetEntitlementUsageLedger({ clearPersistence: false });
+    configureEntitlementPersistence(persistencePath);
+
+    expect(() =>
+      redeemPromoCodeEntitlements(
+        {
+          code: "RELOAD-PLUS-2026"
+        },
+        makeRequestContext({
+          parentIdentity: {
+            uid: "parent-persist-beta",
+            provider: "firebase"
+          }
+        }),
+        env
+      )
+    ).toThrowError(/already redeemed/i);
+
+    if (fs.existsSync(persistencePath)) {
+      fs.unlinkSync(persistencePath);
+    }
+  });
+
+  it("reloads persisted restore claims after an in-memory reset", () => {
+    const persistencePath = path.join(os.tmpdir(), `storytime-restore-claims-${Date.now()}.json`);
+    const env = makeTestEnv({
+      ENTITLEMENTS_PERSIST_PATH: persistencePath
+    });
+    configureEntitlementPersistence(persistencePath);
+
+    issueSyncedEntitlements(
+      {
+        refresh_reason: "restore",
+        active_product_ids: ["storytime.plus.yearly"],
+        transactions: [
+          {
+            product_id: "storytime.plus.yearly",
+            original_transaction_id: "restore-original-1",
+            latest_transaction_id: "restore-latest-1",
+            purchased_at: Math.floor(Date.now() / 1000) - 600,
+            expires_at: Math.floor(Date.now() / 1000) + 3_600,
+            revoked_at: null,
+            ownership_type: "family_shared",
+            environment: "sandbox",
+            verification_state: "verified",
+            is_active: true
+          }
+        ]
+      },
+      makeRequestContext({
+        installId: "install-reload-restore-claim",
+        parentIdentity: {
+          uid: "parent-persist-alpha",
+          provider: "firebase"
+        }
+      }),
+      env
+    );
+
+    resetEntitlementUsageLedger({ clearPersistence: false });
+    configureEntitlementPersistence(persistencePath);
+
+    expect(() =>
+      issueSyncedEntitlements(
+        {
+          refresh_reason: "restore",
+          active_product_ids: ["storytime.plus.yearly"],
+          transactions: [
+            {
+              product_id: "storytime.plus.yearly",
+              original_transaction_id: "restore-original-2",
+              latest_transaction_id: "restore-latest-2",
+              purchased_at: Math.floor(Date.now() / 1000) - 600,
+              expires_at: Math.floor(Date.now() / 1000) + 3_600,
+              revoked_at: null,
+              ownership_type: "family_shared",
+              environment: "sandbox",
+              verification_state: "verified",
+              is_active: true
+            }
+          ]
+        },
+        makeRequestContext({
+          installId: "install-reload-restore-claim",
+          parentIdentity: {
+            uid: "parent-persist-beta",
+            provider: "firebase"
+          }
+        }),
+        env
+      )
+    ).toThrowError(/restore claim belongs to a different parent account on this device/i);
+
+    if (fs.existsSync(persistencePath)) {
+      fs.unlinkSync(persistencePath);
+    }
   });
 
   it("allows starter preflight when launch intent is within current capability bounds", () => {

@@ -289,6 +289,80 @@ describe("v1 API", () => {
     });
   });
 
+  it("rejects restore when this device was already restored for a different parent account", async () => {
+    const app = createApp({
+      env: makeTestEnv({ FIREBASE_PROJECT_ID: "storytime-test" }),
+      services: mockServices(),
+      parentIdentityVerifier: new StubParentIdentityVerifier()
+    });
+    const alphaBootstrap = await request(app)
+      .post("/v1/session/identity")
+      .set("x-storytime-install-id", "install-restore-conflict-123")
+      .set("x-storytime-parent-auth", "parent-token-alpha")
+      .send({});
+
+    const firstRestore = await request(app)
+      .post("/v1/entitlements/sync")
+      .set("x-storytime-install-id", "install-restore-conflict-123")
+      .set("x-storytime-session", alphaBootstrap.headers["x-storytime-session"])
+      .set("x-storytime-parent-auth", "parent-token-alpha")
+      .send({
+        refresh_reason: "restore",
+        active_product_ids: [],
+        transactions: [
+          {
+            product_id: "storytime.plus.yearly",
+            original_transaction_id: "restore-original-1",
+            latest_transaction_id: "restore-latest-1",
+            purchased_at: Math.floor(Date.now() / 1000) - 120,
+            expires_at: Math.floor(Date.now() / 1000) + 3_600,
+            revoked_at: null,
+            ownership_type: "family_shared",
+            environment: "sandbox",
+            verification_state: "verified",
+            is_active: true
+          }
+        ]
+      });
+
+    const betaBootstrap = await request(app)
+      .post("/v1/session/identity")
+      .set("x-storytime-install-id", "install-restore-conflict-123")
+      .set("x-storytime-parent-auth", "parent-token-beta")
+      .send({});
+
+    const secondRestore = await request(app)
+      .post("/v1/entitlements/sync")
+      .set("x-storytime-install-id", "install-restore-conflict-123")
+      .set("x-storytime-session", betaBootstrap.headers["x-storytime-session"])
+      .set("x-storytime-parent-auth", "parent-token-beta")
+      .send({
+        refresh_reason: "restore",
+        active_product_ids: [],
+        transactions: [
+          {
+            product_id: "storytime.plus.yearly",
+            original_transaction_id: "restore-original-2",
+            latest_transaction_id: "restore-latest-2",
+            purchased_at: Math.floor(Date.now() / 1000) - 120,
+            expires_at: Math.floor(Date.now() / 1000) + 3_600,
+            revoked_at: null,
+            ownership_type: "family_shared",
+            environment: "sandbox",
+            verification_state: "verified",
+            is_active: true
+          }
+        ]
+      });
+
+    expect(firstRestore.status).toBe(200);
+    expect(secondRestore.status).toBe(409);
+    expect(secondRestore.body.error).toBe("restore_parent_mismatch");
+    expect(secondRestore.body.message).toBe(
+      "This device already restored Plus for a different parent account. Sign back into that parent account to restore here again. StoryTime won't move restored access between parent accounts on the same device."
+    );
+  });
+
   it("rejects restore sync without an authenticated parent account", async () => {
     const app = createApp({ env: makeTestEnv(), services: mockServices() });
     const bootstrap = await request(app)
@@ -322,6 +396,156 @@ describe("v1 API", () => {
     expect(response.status).toBe(401);
     expect(response.body.error).toBe("parent_auth_required");
     expect(response.body.message).toBe("Sign in to a parent account before restoring Plus.");
+  });
+
+  it("redeems a configured promo code for the signed-in parent account", async () => {
+    const app = createApp({
+      env: makeTestEnv({
+        FIREBASE_PROJECT_ID: "storytime-test",
+        PROMO_CODE_GRANTS: [
+          {
+            code: "FRIENDS-PLUS-2026",
+            tier: "plus",
+            expires_at: Math.floor(Date.now() / 1_000) + 3_600
+          }
+        ]
+      }),
+      services: mockServices(),
+      parentIdentityVerifier: new StubParentIdentityVerifier()
+    });
+    const bootstrap = await request(app)
+      .post("/v1/session/identity")
+      .set("x-storytime-install-id", "install-promo-123")
+      .set("x-storytime-parent-auth", "parent-token-alpha")
+      .send({});
+
+    const response = await request(app)
+      .post("/v1/entitlements/promo/redeem")
+      .set("x-storytime-install-id", "install-promo-123")
+      .set("x-storytime-session", bootstrap.headers["x-storytime-session"])
+      .set("x-storytime-parent-auth", "parent-token-alpha")
+      .send({
+        code: "friends-plus-2026"
+      });
+
+    expect(response.status).toBe(200);
+    expect(response.body.entitlements.snapshot.tier).toBe("plus");
+    expect(response.body.entitlements.snapshot.source).toBe("promo_grant");
+    expect(response.body.entitlements.owner).toEqual({
+      kind: "parent_user",
+      parent_user_id: "parent-alpha",
+      auth_provider: "firebase"
+    });
+  });
+
+  it("rejects invalid promo codes", async () => {
+    const app = createApp({
+      env: makeTestEnv({ FIREBASE_PROJECT_ID: "storytime-test" }),
+      services: mockServices(),
+      parentIdentityVerifier: new StubParentIdentityVerifier()
+    });
+    const bootstrap = await request(app)
+      .post("/v1/session/identity")
+      .set("x-storytime-install-id", "install-promo-123")
+      .set("x-storytime-parent-auth", "parent-token-alpha")
+      .send({});
+
+    const response = await request(app)
+      .post("/v1/entitlements/promo/redeem")
+      .set("x-storytime-install-id", "install-promo-123")
+      .set("x-storytime-session", bootstrap.headers["x-storytime-session"])
+      .set("x-storytime-parent-auth", "parent-token-alpha")
+      .send({
+        code: "missing-code"
+      });
+
+    expect(response.status).toBe(404);
+    expect(response.body.error).toBe("promo_code_invalid");
+  });
+
+  it("rejects already-used promo codes", async () => {
+    const app = createApp({
+      env: makeTestEnv({
+        FIREBASE_PROJECT_ID: "storytime-test",
+        PROMO_CODE_GRANTS: [
+          {
+            code: "ONE-TIME-PLUS",
+            tier: "plus",
+            expires_at: Math.floor(Date.now() / 1_000) + 3_600
+          }
+        ]
+      }),
+      services: mockServices(),
+      parentIdentityVerifier: new StubParentIdentityVerifier()
+    });
+    const alphaBootstrap = await request(app)
+      .post("/v1/session/identity")
+      .set("x-storytime-install-id", "install-promo-alpha")
+      .set("x-storytime-parent-auth", "parent-token-alpha")
+      .send({});
+
+    const firstResponse = await request(app)
+      .post("/v1/entitlements/promo/redeem")
+      .set("x-storytime-install-id", "install-promo-alpha")
+      .set("x-storytime-session", alphaBootstrap.headers["x-storytime-session"])
+      .set("x-storytime-parent-auth", "parent-token-alpha")
+      .send({
+        code: "ONE-TIME-PLUS"
+      });
+
+    expect(firstResponse.status).toBe(200);
+
+    const betaBootstrap = await request(app)
+      .post("/v1/session/identity")
+      .set("x-storytime-install-id", "install-promo-beta")
+      .set("x-storytime-parent-auth", "parent-token-beta")
+      .send({});
+
+    const secondResponse = await request(app)
+      .post("/v1/entitlements/promo/redeem")
+      .set("x-storytime-install-id", "install-promo-beta")
+      .set("x-storytime-session", betaBootstrap.headers["x-storytime-session"])
+      .set("x-storytime-parent-auth", "parent-token-beta")
+      .send({
+        code: "ONE-TIME-PLUS"
+      });
+
+    expect(secondResponse.status).toBe(409);
+    expect(secondResponse.body.error).toBe("promo_code_already_redeemed");
+  });
+
+  it("rejects expired promo codes", async () => {
+    const app = createApp({
+      env: makeTestEnv({
+        FIREBASE_PROJECT_ID: "storytime-test",
+        PROMO_CODE_GRANTS: [
+          {
+            code: "EXPIRED-PLUS",
+            tier: "plus",
+            expires_at: Math.floor(Date.now() / 1_000) - 1
+          }
+        ]
+      }),
+      services: mockServices(),
+      parentIdentityVerifier: new StubParentIdentityVerifier()
+    });
+    const bootstrap = await request(app)
+      .post("/v1/session/identity")
+      .set("x-storytime-install-id", "install-promo-123")
+      .set("x-storytime-parent-auth", "parent-token-alpha")
+      .send({});
+
+    const response = await request(app)
+      .post("/v1/entitlements/promo/redeem")
+      .set("x-storytime-install-id", "install-promo-123")
+      .set("x-storytime-session", bootstrap.headers["x-storytime-session"])
+      .set("x-storytime-parent-auth", "parent-token-alpha")
+      .send({
+        code: "EXPIRED-PLUS"
+      });
+
+    expect(response.status).toBe(410);
+    expect(response.body.error).toBe("promo_code_expired");
   });
 
   it("persists authenticated parent-owned entitlements across installs for the same parent account", async () => {
@@ -389,6 +613,219 @@ describe("v1 API", () => {
       parent_user_id: "parent-alpha",
       auth_provider: "firebase"
     });
+  });
+
+  it("reloads persisted parent-owned entitlements after backend recreation", async () => {
+    const persistencePath = path.join(os.tmpdir(), `storytime-entitlements-reload-${Date.now()}.json`);
+    const env = makeTestEnv({
+      FIREBASE_PROJECT_ID: "storytime-test",
+      ENTITLEMENTS_PERSIST_PATH: persistencePath
+    });
+    const firstApp = createApp({
+      env,
+      services: mockServices(),
+      parentIdentityVerifier: new StubParentIdentityVerifier()
+    });
+
+    const firstBootstrap = await request(firstApp)
+      .post("/v1/session/identity")
+      .set("x-storytime-install-id", "install-persist-alpha")
+      .set("x-storytime-parent-auth", "parent-token-alpha")
+      .send({});
+
+    const synced = await request(firstApp)
+      .post("/v1/entitlements/sync")
+      .set("x-storytime-install-id", "install-persist-alpha")
+      .set("x-storytime-session", firstBootstrap.headers["x-storytime-session"])
+      .set("x-storytime-parent-auth", "parent-token-alpha")
+      .send({
+        refresh_reason: "purchase",
+        active_product_ids: ["storytime.plus.monthly"],
+        transactions: []
+      });
+
+    resetEntitlementUsageLedger({ clearPersistence: false });
+
+    const reloadedApp = createApp({
+      env,
+      services: mockServices(),
+      parentIdentityVerifier: new StubParentIdentityVerifier()
+    });
+
+    const secondBootstrap = await request(reloadedApp)
+      .post("/v1/session/identity")
+      .set("x-storytime-install-id", "install-persist-beta")
+      .set("x-storytime-parent-auth", "parent-token-alpha")
+      .send({});
+
+    expect(synced.status).toBe(200);
+    expect(secondBootstrap.status).toBe(200);
+    expect(secondBootstrap.body.entitlements.snapshot.tier).toBe("plus");
+    expect(secondBootstrap.body.entitlements.snapshot.source).toBe("storekit_verified");
+    expect(secondBootstrap.body.entitlements.owner).toEqual({
+      kind: "parent_user",
+      parent_user_id: "parent-alpha",
+      auth_provider: "firebase"
+    });
+
+    if (fs.existsSync(persistencePath)) {
+      fs.unlinkSync(persistencePath);
+    }
+  });
+
+  it("reloads persisted promo redemptions after backend recreation", async () => {
+    const persistencePath = path.join(os.tmpdir(), `storytime-promo-reload-${Date.now()}.json`);
+    const env = makeTestEnv({
+      FIREBASE_PROJECT_ID: "storytime-test",
+      ENTITLEMENTS_PERSIST_PATH: persistencePath,
+      PROMO_CODE_GRANTS: [
+        {
+          code: "PERSIST-ONCE-PLUS",
+          tier: "plus",
+          expires_at: Math.floor(Date.now() / 1_000) + 3_600
+        }
+      ]
+    });
+    const firstApp = createApp({
+      env,
+      services: mockServices(),
+      parentIdentityVerifier: new StubParentIdentityVerifier()
+    });
+
+    const alphaBootstrap = await request(firstApp)
+      .post("/v1/session/identity")
+      .set("x-storytime-install-id", "install-persist-promo-alpha")
+      .set("x-storytime-parent-auth", "parent-token-alpha")
+      .send({});
+
+    const redeemed = await request(firstApp)
+      .post("/v1/entitlements/promo/redeem")
+      .set("x-storytime-install-id", "install-persist-promo-alpha")
+      .set("x-storytime-session", alphaBootstrap.headers["x-storytime-session"])
+      .set("x-storytime-parent-auth", "parent-token-alpha")
+      .send({
+        code: "PERSIST-ONCE-PLUS"
+      });
+
+    resetEntitlementUsageLedger({ clearPersistence: false });
+
+    const reloadedApp = createApp({
+      env,
+      services: mockServices(),
+      parentIdentityVerifier: new StubParentIdentityVerifier()
+    });
+
+    const betaBootstrap = await request(reloadedApp)
+      .post("/v1/session/identity")
+      .set("x-storytime-install-id", "install-persist-promo-beta")
+      .set("x-storytime-parent-auth", "parent-token-beta")
+      .send({});
+
+    const secondAttempt = await request(reloadedApp)
+      .post("/v1/entitlements/promo/redeem")
+      .set("x-storytime-install-id", "install-persist-promo-beta")
+      .set("x-storytime-session", betaBootstrap.headers["x-storytime-session"])
+      .set("x-storytime-parent-auth", "parent-token-beta")
+      .send({
+        code: "PERSIST-ONCE-PLUS"
+      });
+
+    expect(redeemed.status).toBe(200);
+    expect(secondAttempt.status).toBe(409);
+    expect(secondAttempt.body.error).toBe("promo_code_already_redeemed");
+
+    if (fs.existsSync(persistencePath)) {
+      fs.unlinkSync(persistencePath);
+    }
+  });
+
+  it("reloads persisted restore claims after backend recreation", async () => {
+    const persistencePath = path.join(os.tmpdir(), `storytime-restore-claim-reload-${Date.now()}.json`);
+    const env = makeTestEnv({
+      FIREBASE_PROJECT_ID: "storytime-test",
+      ENTITLEMENTS_PERSIST_PATH: persistencePath
+    });
+    const firstApp = createApp({
+      env,
+      services: mockServices(),
+      parentIdentityVerifier: new StubParentIdentityVerifier()
+    });
+
+    const alphaBootstrap = await request(firstApp)
+      .post("/v1/session/identity")
+      .set("x-storytime-install-id", "install-persist-restore-claim")
+      .set("x-storytime-parent-auth", "parent-token-alpha")
+      .send({});
+
+    const restored = await request(firstApp)
+      .post("/v1/entitlements/sync")
+      .set("x-storytime-install-id", "install-persist-restore-claim")
+      .set("x-storytime-session", alphaBootstrap.headers["x-storytime-session"])
+      .set("x-storytime-parent-auth", "parent-token-alpha")
+      .send({
+        refresh_reason: "restore",
+        active_product_ids: ["storytime.plus.yearly"],
+        transactions: [
+          {
+            product_id: "storytime.plus.yearly",
+            original_transaction_id: "restore-original-1",
+            latest_transaction_id: "restore-latest-1",
+            purchased_at: Math.floor(Date.now() / 1000) - 120,
+            expires_at: Math.floor(Date.now() / 1000) + 3_600,
+            revoked_at: null,
+            ownership_type: "family_shared",
+            environment: "sandbox",
+            verification_state: "verified",
+            is_active: true
+          }
+        ]
+      });
+
+    resetEntitlementUsageLedger({ clearPersistence: false });
+
+    const reloadedApp = createApp({
+      env,
+      services: mockServices(),
+      parentIdentityVerifier: new StubParentIdentityVerifier()
+    });
+
+    const betaBootstrap = await request(reloadedApp)
+      .post("/v1/session/identity")
+      .set("x-storytime-install-id", "install-persist-restore-claim")
+      .set("x-storytime-parent-auth", "parent-token-beta")
+      .send({});
+
+    const conflictingRestore = await request(reloadedApp)
+      .post("/v1/entitlements/sync")
+      .set("x-storytime-install-id", "install-persist-restore-claim")
+      .set("x-storytime-session", betaBootstrap.headers["x-storytime-session"])
+      .set("x-storytime-parent-auth", "parent-token-beta")
+      .send({
+        refresh_reason: "restore",
+        active_product_ids: ["storytime.plus.yearly"],
+        transactions: [
+          {
+            product_id: "storytime.plus.yearly",
+            original_transaction_id: "restore-original-2",
+            latest_transaction_id: "restore-latest-2",
+            purchased_at: Math.floor(Date.now() / 1000) - 120,
+            expires_at: Math.floor(Date.now() / 1000) + 3_600,
+            revoked_at: null,
+            ownership_type: "family_shared",
+            environment: "sandbox",
+            verification_state: "verified",
+            is_active: true
+          }
+        ]
+      });
+
+    expect(restored.status).toBe(200);
+    expect(conflictingRestore.status).toBe(409);
+    expect(conflictingRestore.body.error).toBe("restore_parent_mismatch");
+
+    if (fs.existsSync(persistencePath)) {
+      fs.unlinkSync(persistencePath);
+    }
   });
 
   it("rejects invalid parent auth tokens on account-owned entitlement routes", async () => {
@@ -538,6 +975,76 @@ describe("v1 API", () => {
     expect(refreshed.status).toBe(200);
     expect(refreshed.body.entitlements.snapshot.tier).toBe("plus");
     expect(refreshed.body.entitlements.token).toBeTruthy();
+
+    expect(allowed.status).toBe(200);
+    expect(allowed.body.allowed).toBe(true);
+    expect(allowed.body.block_reason).toBeNull();
+    expect(allowed.body.snapshot.tier).toBe("plus");
+  });
+
+  it("allows blocked new-story preflight after promo redemption updates the entitlement token", async () => {
+    const app = createApp({
+      env: makeTestEnv({
+        FIREBASE_PROJECT_ID: "storytime-test",
+        PROMO_CODE_GRANTS: [
+          {
+            code: "FAMILY-PLUS-2026",
+            tier: "plus",
+            expires_at: null
+          }
+        ]
+      }),
+      services: mockServices(),
+      parentIdentityVerifier: new StubParentIdentityVerifier()
+    });
+    const bootstrap = await request(app)
+      .post("/v1/session/identity")
+      .set("x-storytime-install-id", "install-promo-retry-123")
+      .set("x-storytime-parent-auth", "parent-token-alpha")
+      .send({});
+
+    const blocked = await request(app)
+      .post("/v1/entitlements/preflight")
+      .set("x-storytime-install-id", "install-promo-retry-123")
+      .set("x-storytime-session", bootstrap.headers["x-storytime-session"])
+      .set("x-storytime-entitlement", bootstrap.body.entitlements.token)
+      .send({
+        action: "new_story",
+        child_profile_id: "fbeafe23-42d5-4ea7-8035-5680419504e9",
+        child_profile_count: 2,
+        requested_length_minutes: 4
+      });
+
+    const redeemed = await request(app)
+      .post("/v1/entitlements/promo/redeem")
+      .set("x-storytime-install-id", "install-promo-retry-123")
+      .set("x-storytime-session", bootstrap.headers["x-storytime-session"])
+      .set("x-storytime-parent-auth", "parent-token-alpha")
+      .send({
+        code: "FAMILY-PLUS-2026"
+      });
+
+    const allowed = await request(app)
+      .post("/v1/entitlements/preflight")
+      .set("x-storytime-install-id", "install-promo-retry-123")
+      .set("x-storytime-session", bootstrap.headers["x-storytime-session"])
+      .set("x-storytime-entitlement", redeemed.body.entitlements.token)
+      .set("x-storytime-parent-auth", "parent-token-alpha")
+      .send({
+        action: "new_story",
+        child_profile_id: "fbeafe23-42d5-4ea7-8035-5680419504e9",
+        child_profile_count: 2,
+        requested_length_minutes: 4
+      });
+
+    expect(blocked.status).toBe(200);
+    expect(blocked.body.allowed).toBe(false);
+    expect(blocked.body.block_reason).toBe("child_profile_limit");
+
+    expect(redeemed.status).toBe(200);
+    expect(redeemed.body.entitlements.snapshot.tier).toBe("plus");
+    expect(redeemed.body.entitlements.snapshot.source).toBe("promo_grant");
+    expect(redeemed.body.entitlements.token).toBeTruthy();
 
     expect(allowed.status).toBe(200);
     expect(allowed.body.allowed).toBe(true);

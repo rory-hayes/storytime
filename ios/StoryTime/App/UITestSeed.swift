@@ -257,6 +257,55 @@ enum UITestSeed {
         return commerceEnvelopeIfNeeded(rawTier: rawTier, environment: environment)
     }
 
+    static func restoreConflictMessageIfNeeded(currentUser: ParentAuthUser?) -> String? {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["STORYTIME_UI_TEST_MODE"] == "1" else {
+            return nil
+        }
+
+        let expectedEmail = environment["STORYTIME_UI_TEST_RESTORE_CONFLICT_EMAIL"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let expectedUID = environment["STORYTIME_UI_TEST_RESTORE_CONFLICT_PARENT_UID"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        let hasExpectedEmail = expectedEmail?.isEmpty == false
+        let hasExpectedUID = expectedUID?.isEmpty == false
+        guard hasExpectedEmail || hasExpectedUID else {
+            return nil
+        }
+
+        let currentEmail = currentUser?.email?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let currentUID = currentUser?.uid.lowercased()
+        let emailMatches = !hasExpectedEmail || currentEmail == expectedEmail
+        let uidMatches = !hasExpectedUID || currentUID == expectedUID
+
+        guard !(emailMatches && uidMatches) else {
+            return nil
+        }
+
+        return "This device already restored Plus for a different parent account. Sign back into that parent account to restore here again. StoryTime won't move restored access between parent accounts on the same device."
+    }
+
+    static func redeemedPromoEntitlementEnvelopeIfNeeded(code: String) -> EntitlementBootstrapEnvelope? {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["STORYTIME_UI_TEST_MODE"] == "1" else {
+            return nil
+        }
+
+        guard let expectedCode = environment["STORYTIME_UI_TEST_PROMO_CODE"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .uppercased(),
+              !expectedCode.isEmpty,
+              expectedCode == code.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() else {
+            return nil
+        }
+
+        let rawTier = environment["STORYTIME_UI_TEST_PROMO_ENTITLEMENT_TIER"]?.lowercased() ?? "plus"
+        return commerceEnvelopeIfNeeded(rawTier: rawTier, environment: environment, source: .promoGrant)
+    }
+
     private static func defaultPreflightResponse(
         for request: EntitlementPreflightRequest,
         snapshot: EntitlementSnapshot
@@ -350,13 +399,14 @@ enum UITestSeed {
     fileprivate static func seededEntitlementEnvelope(
         childProfileCount: Int,
         environment: [String: String],
-        owner: EntitlementOwner? = nil
+        owner: EntitlementOwner? = nil,
+        source: EntitlementSource = .debugSeed
     ) -> EntitlementBootstrapEnvelope {
         let now = Date()
         let tier = seededTier(environment: environment)
         let snapshot = EntitlementSnapshot(
             tier: tier,
-            source: .debugSeed,
+            source: source,
             maxChildProfiles: resolvedMaxChildProfiles(for: tier, childProfileCount: childProfileCount, environment: environment),
             maxStoryStartsPerPeriod: resolvedLimit(
                 environment["STORYTIME_UI_TEST_MAX_STORY_STARTS"],
@@ -452,7 +502,8 @@ enum UITestSeed {
 
     private static func commerceEnvelopeIfNeeded(
         rawTier: String,
-        environment: [String: String]
+        environment: [String: String],
+        source: EntitlementSource = .debugSeed
     ) -> EntitlementBootstrapEnvelope? {
         guard rawTier == "plus" || rawTier == "starter" else {
             return nil
@@ -464,7 +515,8 @@ enum UITestSeed {
         return seededEntitlementEnvelope(
             childProfileCount: seededChildProfileCount(),
             environment: resolvedEnvironment,
-            owner: owner
+            owner: owner,
+            source: source
         )
     }
 

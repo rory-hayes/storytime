@@ -479,12 +479,14 @@ struct ParentTrustCenterView: View {
     @State private var showDeleteHistoryConfirmation = false
     @State private var isRefreshingPlan = false
     @State private var isRestoringPurchases = false
+    @State private var isRedeemingPromo = false
     @State private var isLoadingPurchaseOptions = false
     @State private var isPurchasingUpgrade = false
     @State private var availablePurchaseOptions: [ParentManagedPurchaseOption] = []
     @State private var planActionMessage: String?
     @State private var planErrorMessage: String?
     @State private var showingParentAccountSheet = false
+    @State private var promoCode = ""
 
     var body: some View {
         Form {
@@ -536,7 +538,7 @@ struct ParentTrustCenterView: View {
                     }
                     .accessibilityIdentifier("parentAccountEntryButton")
 
-                    Text("Parent account sign-in is optional before the first story, but purchase, restore, and promo work stay here in parent-managed surfaces.")
+                    Text("First-run activation now happens during onboarding. Use Parent Controls later to manage this device's parent account, purchases, restore, and promo access.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .accessibilityIdentifier("parentAccountEntrySummary")
@@ -559,6 +561,7 @@ struct ParentTrustCenterView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     Text(currentPlanTitle)
                         .font(.system(size: 24, weight: .black, design: .rounded))
+                        .id(planStateIdentity)
                         .accessibilityIdentifier("parentPlanTitle")
 
                     Text(currentPlanSummary)
@@ -598,7 +601,7 @@ struct ParentTrustCenterView: View {
                     .accessibilityIdentifier("parentUpgradeToPlusButton")
                 }
 
-                if let snapshot = entitlementManager.snapshot {
+                if let snapshot = displayedSnapshot {
                     Text("Child profiles saved on this device: \(store.childProfiles.count) of \(snapshot.maxChildProfiles) allowed")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
@@ -625,6 +628,7 @@ struct ParentTrustCenterView: View {
                         Text(ownershipSummary)
                             .font(.footnote)
                             .foregroundStyle(.secondary)
+                            .id("\(planStateIdentity)-ownership")
                             .accessibilityIdentifier("parentPlanOwnershipSummary")
                     }
                 } else {
@@ -689,7 +693,45 @@ struct ParentTrustCenterView: View {
                 .disabled(isRefreshingPlan || isRestoringPurchases)
                 .accessibilityIdentifier("parentRestorePurchasesButton")
 
-                Text("Current plan review, restore, and future upgrades stay here in Parent Controls. Live child sessions stay free of purchase UI.")
+                Text(restoreOwnershipSummary)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("parentRestoreOwnershipSummary")
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(promoSummary)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("parentPromoSummary")
+
+                    if !parentAuthManager.isSignedIn {
+                        Text(promoAccountRequirementSummary)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .accessibilityIdentifier("parentPromoAccountRequiredSummary")
+                    }
+
+                    TextField("Promo code", text: $promoCode)
+                        .textInputAutocapitalization(.characters)
+                        .autocorrectionDisabled()
+                        .accessibilityIdentifier("parentPromoCodeField")
+
+                    Button(redeemPromoButtonTitle) {
+                        Task {
+                            await redeemPromoCode()
+                        }
+                    }
+                    .disabled(
+                        isRefreshingPlan ||
+                            isRestoringPurchases ||
+                            isPurchasingUpgrade ||
+                            isRedeemingPromo ||
+                            trimmedPromoCode.isEmpty
+                    )
+                    .accessibilityIdentifier("parentRedeemPromoButton")
+                }
+
+                Text("Current plan review, restore, promo codes, and future upgrades stay here in Parent Controls. Live child sessions stay free of purchase UI.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("parentPlanFootnote")
@@ -891,7 +933,7 @@ struct ParentTrustCenterView: View {
             }
         }) {
             NavigationStack {
-                ParentAccountSheetView()
+                ParentAccountSheetView(entryContext: .parentControlsManagement)
             }
         }
         .alert("Delete saved story history?", isPresented: $showDeleteHistoryConfirmation) {
@@ -935,7 +977,7 @@ struct ParentTrustCenterView: View {
     }
 
     private var currentPlanTitle: String {
-        if let snapshot = entitlementManager.snapshot {
+        if let snapshot = displayedSnapshot {
             return snapshot.tier == .plus ? "Plus" : "Starter"
         }
 
@@ -943,7 +985,7 @@ struct ParentTrustCenterView: View {
     }
 
     private var currentPlanSummary: String {
-        guard let snapshot = entitlementManager.snapshot else {
+        guard let snapshot = displayedSnapshot else {
             return "Use Refresh Plan Status or Restore Purchases here when a parent needs the latest plan details on this device."
         }
 
@@ -959,7 +1001,7 @@ struct ParentTrustCenterView: View {
     }
 
     private var currentPlanIsPlus: Bool {
-        entitlementManager.snapshot?.tier == .plus
+        displayedSnapshot?.tier == .plus
     }
 
     private var preferredPurchaseOption: ParentManagedPurchaseOption? {
@@ -1008,7 +1050,7 @@ struct ParentTrustCenterView: View {
     }
 
     private var effectiveChildProfileLimit: Int {
-        entitlementManager.snapshot?.maxChildProfiles ?? parentControlsDefaultMaxChildProfiles
+        displayedSnapshot?.maxChildProfiles ?? parentControlsDefaultMaxChildProfiles
     }
 
     private var canAddProfilesUnderCurrentPlan: Bool {
@@ -1083,6 +1125,12 @@ struct ParentTrustCenterView: View {
             return
         }
 
+        if let uiTestConflictMessage = UITestSeed.restoreConflictMessageIfNeeded(currentUser: parentAuthManager.currentUser) {
+            planErrorMessage = uiTestConflictMessage
+            ClientLaunchTelemetry.recordRestorePurchases(outcome: .failed, snapshot: entitlementManager.snapshot)
+            return
+        }
+
         if let uiTestEnvelope = UITestSeed.restoredEntitlementEnvelopeIfNeeded() {
             AppEntitlements.store(envelope: uiTestEnvelope)
             entitlementManager.reloadFromCache()
@@ -1104,6 +1152,9 @@ struct ParentTrustCenterView: View {
                 await loadPurchaseOptionsIfNeeded(force: true)
                 planActionMessage = "Restore check finished. StoryTime refreshed the plan for this device."
                 ClientLaunchTelemetry.recordRestorePurchases(outcome: .completed, snapshot: entitlementManager.snapshot)
+            } catch let error as APIError {
+                planErrorMessage = restorePurchasesMessage(for: error)
+                ClientLaunchTelemetry.recordRestorePurchases(outcome: .failed, snapshot: entitlementManager.snapshot)
             } catch {
                 planErrorMessage = "I couldn't restore purchases right now. Ask a grown-up to try again."
                 ClientLaunchTelemetry.recordRestorePurchases(outcome: .failed, snapshot: entitlementManager.snapshot)
@@ -1116,6 +1167,52 @@ struct ParentTrustCenterView: View {
         planErrorMessage = "Restore purchases is not available on this device right now."
         ClientLaunchTelemetry.recordRestorePurchases(outcome: .failed, snapshot: entitlementManager.snapshot)
 #endif
+    }
+
+    @MainActor
+    private func redeemPromoCode() async {
+        planActionMessage = nil
+        planErrorMessage = nil
+        ClientLaunchTelemetry.recordPromoRedemption(outcome: .started, snapshot: entitlementManager.snapshot)
+        isRedeemingPromo = true
+        defer { isRedeemingPromo = false }
+
+        guard parentAuthManager.isSignedIn else {
+            showingParentAccountSheet = true
+            planErrorMessage = "Sign in to a parent account before redeeming a promo code so the premium grant belongs to that parent."
+            ClientLaunchTelemetry.recordPromoRedemption(outcome: .failed, snapshot: entitlementManager.snapshot)
+            return
+        }
+
+        if let uiTestEnvelope = UITestSeed.redeemedPromoEntitlementEnvelopeIfNeeded(code: trimmedPromoCode) {
+            AppEntitlements.store(envelope: uiTestEnvelope)
+            entitlementManager.reloadFromCache()
+            promoCode = ""
+            await loadPurchaseOptionsIfNeeded(force: true)
+            planActionMessage = "Promo code redeemed. Plus is now ready for \(purchaseOwnershipIdentity) on this device."
+            ClientLaunchTelemetry.recordPromoRedemption(outcome: .completed, snapshot: entitlementManager.snapshot)
+            return
+        }
+
+        do {
+            let envelope = try await APIClient().redeemPromoCode(request: PromoCodeRedemptionRequest(code: trimmedPromoCode))
+            entitlementManager.reloadFromCache()
+            promoCode = ""
+            await loadPurchaseOptionsIfNeeded(force: true)
+            planActionMessage = envelope.snapshot.tier == .plus
+                ? "Promo code redeemed. Plus is now ready for \(purchaseOwnershipIdentity) on this device."
+                : "Promo code redeemed. StoryTime refreshed the plan for this device."
+            ClientLaunchTelemetry.recordPromoRedemption(outcome: .completed, snapshot: entitlementManager.snapshot)
+        } catch let error as APIError {
+            if error.serverCode == "parent_auth_required" {
+                showingParentAccountSheet = true
+            }
+            planErrorMessage = promoRedemptionMessage(for: error)
+            ClientLaunchTelemetry.recordPromoRedemption(outcome: .failed, snapshot: entitlementManager.snapshot)
+        } catch {
+            planErrorMessage = "I couldn't redeem that promo code right now. Ask a grown-up to try again."
+            ClientLaunchTelemetry.recordPromoRedemption(outcome: .failed, snapshot: entitlementManager.snapshot)
+        }
     }
 
     @MainActor
@@ -1195,6 +1292,32 @@ struct ParentTrustCenterView: View {
         }
     }
 
+    private func promoRedemptionMessage(for error: APIError) -> String {
+        switch error.serverCode {
+        case "promo_code_invalid":
+            return "That promo code isn't valid anymore. Ask a grown-up to check the code and try again."
+        case "promo_code_already_redeemed":
+            return "That promo code has already been used."
+        case "promo_code_expired":
+            return "That promo code has expired. Ask a grown-up to check the code and try again."
+        case "parent_auth_required":
+            return "Sign in to a parent account before redeeming a promo code so the premium grant belongs to that parent."
+        default:
+            return "I couldn't redeem that promo code right now. Ask a grown-up to try again."
+        }
+    }
+
+    private func restorePurchasesMessage(for error: APIError) -> String {
+        switch error.serverCode {
+        case "parent_auth_required":
+            return "Sign in to a parent account before restoring Plus so the restored plan belongs to that parent."
+        case "restore_parent_mismatch":
+            return "This device already restored Plus for a different parent account. Sign back into that parent account to restore here again. StoryTime won't move restored access between parent accounts on the same device."
+        default:
+            return "I couldn't restore purchases right now. Ask a grown-up to try again."
+        }
+    }
+
     private func upgradeButtonTitle(for purchaseOption: ParentManagedPurchaseOption) -> String {
         if isPurchasingUpgrade {
             return "Upgrading to Plus..."
@@ -1216,7 +1339,27 @@ struct ParentTrustCenterView: View {
     }
 
     private var restoreAccountRequirementSummary: String {
-        "A parent account is required before restoring Plus so the refreshed entitlement belongs to that parent instead of staying tied only to this device."
+        "A parent account is required before restoring Plus so the refreshed entitlement belongs to that parent. StoryTime won't move a restored plan between different parent accounts on this device."
+    }
+
+    private var restoreOwnershipSummary: String {
+        "Restore stays linked to the parent account that restores Plus on this device. If another parent signs in later, StoryTime keeps that parent's current plan instead of transferring the restored access."
+    }
+
+    private var promoAccountRequirementSummary: String {
+        "A parent account is required before redeeming a promo code so the premium grant belongs to that parent instead of staying tied only to this device."
+    }
+
+    private var promoSummary: String {
+        "Redeem a one-time parent promo code here. Valid codes grant Plus without using the App Store purchase flow."
+    }
+
+    private var trimmedPromoCode: String {
+        promoCode.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+    }
+
+    private var redeemPromoButtonTitle: String {
+        isRedeemingPromo ? "Redeeming Promo..." : "Redeem Promo Code"
     }
 
     private var purchaseOwnershipIdentity: String {
@@ -1228,7 +1371,11 @@ struct ParentTrustCenterView: View {
     }
 
     private var currentPlusSummary: String {
-        if entitlementManager.owner?.kind == .parentUser {
+        if displayedSnapshot?.source == .promoGrant, displayedOwner?.kind == .parentUser {
+            return "Plus is active for \(purchaseOwnershipIdentity) on this device through a parent promo code."
+        }
+
+        if displayedOwner?.kind == .parentUser {
             return "Plus is active for \(purchaseOwnershipIdentity) on this device."
         }
 
@@ -1236,20 +1383,42 @@ struct ParentTrustCenterView: View {
     }
 
     private var planOwnershipSummary: String? {
-        guard let owner = entitlementManager.owner else {
+        guard let owner = displayedOwner else {
             return nil
         }
 
         switch owner.kind {
         case .parentUser:
+            if displayedSnapshot?.source == .promoGrant {
+                return "This entitlement snapshot is linked to \(purchaseOwnershipIdentity) through a promo grant."
+            }
             return "This entitlement snapshot is linked to \(purchaseOwnershipIdentity)."
         case .install:
             if parentAuthManager.isSignedIn {
-                return "This entitlement snapshot is still local to this device. New purchases made while signed in will be linked to \(purchaseOwnershipIdentity)."
+                return "This entitlement snapshot is still local to this device. New purchases made while signed in will be linked to \(purchaseOwnershipIdentity), but restored Plus won't move over if another parent already restored it here."
             }
 
-            return "This entitlement snapshot currently belongs to this device."
+            return "This entitlement snapshot currently belongs to this device. Signing out from a parent account returns the app to this local fallback plan."
         }
+    }
+
+    private var planStateIdentity: String {
+        let tier = displayedSnapshot?.tier.rawValue ?? "unavailable"
+        let ownerKind = displayedOwner?.kind.rawValue ?? "none"
+        let ownerID = displayedOwner?.parentUserID ?? "device"
+        return "plan-\(tier)-\(ownerKind)-\(ownerID)"
+    }
+
+    private var displayedEnvelope: EntitlementBootstrapEnvelope? {
+        AppEntitlements.currentEnvelope ?? entitlementManager.envelope
+    }
+
+    private var displayedSnapshot: EntitlementSnapshot? {
+        displayedEnvelope?.snapshot ?? entitlementManager.snapshot
+    }
+
+    private var displayedOwner: EntitlementOwner? {
+        displayedEnvelope?.owner ?? entitlementManager.owner
     }
 
     private func resolvedPurchaseProvider() -> any ParentManagedPurchaseProviding {
@@ -1381,14 +1550,24 @@ struct FirstRunOnboardingView: View {
     @EnvironmentObject private var parentAuthManager: ParentAuthManager
 
     @ObservedObject var store: StoryLibraryStore
-    let onFinish: (Bool) -> Void
+    let onFinish: () -> Void
 
     @State private var stepIndex = 0
-    @State private var showingParentControls = false
     @State private var showingChildEditor = false
     @State private var showingParentAccountSheet = false
+    @State private var parentAccountSheetMode: ParentAccountSheetView.Mode = .createAccount
+    @State private var selectedPlanChoice: FirstRunActivationPlanChoice?
+    @StateObject private var entitlementManager = EntitlementManager()
+    @State private var isRestoringPurchases = false
+    @State private var isRedeemingPromo = false
+    @State private var isLoadingPurchaseOptions = false
+    @State private var isPurchasingUpgrade = false
+    @State private var availablePurchaseOptions: [ParentManagedPurchaseOption] = []
+    @State private var planActionMessage: String?
+    @State private var planErrorMessage: String?
+    @State private var promoCode = ""
 
-    private let steps = OnboardingStep.allCases
+    private let steps = FirstRunActivationStep.allCases
 
     var body: some View {
         ZStack {
@@ -1407,19 +1586,33 @@ struct FirstRunOnboardingView: View {
             .padding(20)
         }
         .interactiveDismissDisabled()
-        .sheet(isPresented: $showingParentControls) {
-            NavigationStack {
-                ParentTrustCenterView(store: store)
-            }
-        }
         .sheet(isPresented: $showingChildEditor) {
             NavigationStack {
                 ChildProfileEditorView(store: store, profile: store.activeProfile)
             }
         }
-        .sheet(isPresented: $showingParentAccountSheet) {
+        .sheet(isPresented: $showingParentAccountSheet, onDismiss: {
+            Task {
+                await refreshAfterParentAccountChange()
+            }
+        }) {
             NavigationStack {
-                ParentAccountSheetView()
+                ParentAccountSheetView(
+                    initialMode: parentAccountSheetMode,
+                    entryContext: .onboardingActivation
+                )
+            }
+        }
+        .onAppear {
+            entitlementManager.reloadFromCache()
+            syncPlanSelectionFromEntitlements()
+            Task {
+                await loadPurchaseOptionsIfNeeded()
+            }
+        }
+        .onChange(of: parentAuthManager.currentUser?.uid) { _, _ in
+            Task {
+                await refreshAfterParentAccountChange()
             }
         }
     }
@@ -1450,30 +1643,36 @@ struct FirstRunOnboardingView: View {
 
     @ViewBuilder
     private var stepCard: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text(currentStep.title)
-                .font(.system(size: 28, weight: .black, design: .rounded))
-                .accessibilityIdentifier("onboardingStepTitle")
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text(currentStep.title)
+                    .font(.system(size: 28, weight: .black, design: .rounded))
+                    .accessibilityIdentifier("onboardingStepTitle")
 
-            Text(currentStep.summary)
-                .font(.system(size: 15, weight: .medium, design: .rounded))
-                .foregroundStyle(.secondary)
-                .accessibilityIdentifier("onboardingStepSummary")
+                Text(currentStep.summary)
+                    .font(.system(size: 15, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("onboardingStepSummary")
 
-            switch currentStep {
-            case .welcome:
-                welcomeStep
-            case .trust:
-                trustStep
-            case .childSetup:
-                childSetupStep
-            case .expectations:
-                expectationsStep
-            case .handoff:
-                handoffStep
+                switch currentStep {
+                case .welcome:
+                    welcomeStep
+                case .howItWorks:
+                    howItWorksStep
+                case .childSetup:
+                    childSetupStep
+                case .trust:
+                    trustStep
+                case .account:
+                    accountStep
+                case .plan:
+                    planStep
+                case .completion:
+                    completionStep
+                }
             }
+            .frame(maxWidth: .infinity, alignment: .topLeading)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .padding(20)
         .background(
             RoundedRectangle(cornerRadius: 28, style: .continuous)
@@ -1497,23 +1696,19 @@ struct FirstRunOnboardingView: View {
 
             Spacer()
 
-            if currentStep == .handoff {
-                Button("Finish Later") {
-                    onFinish(false)
-                }
-                .buttonStyle(.bordered)
-                .accessibilityIdentifier("onboardingFinishLaterButton")
-
-                Button("Start First Story") {
-                    onFinish(true)
+            if currentStep == .completion {
+                Button("Open StoryTime") {
+                    onFinish()
                 }
                 .buttonStyle(.borderedProminent)
-                .accessibilityIdentifier("onboardingStartFirstStoryButton")
+                .disabled(!gateState.canFinish)
+                .accessibilityIdentifier("onboardingFinishSetupButton")
             } else {
-                Button(stepIndex == 2 ? childStepContinueLabel : "Continue") {
+                Button(continueButtonTitle) {
                     stepIndex = min(stepIndex + 1, steps.count - 1)
                 }
                 .buttonStyle(.borderedProminent)
+                .disabled(!gateState.canAdvance)
                 .accessibilityIdentifier("onboardingContinueButton")
             }
         }
@@ -1529,15 +1724,43 @@ struct FirstRunOnboardingView: View {
             )
 
             onboardingHighlight(
-                title: "Narration stays scene-based",
-                summary: "After the live questions, StoryTime tells the adventure one scene at a time and still listens for interruptions.",
+                title: "Voice-first, not passive",
+                summary: "StoryTime reacts while the child is speaking, then keeps the story moving scene by scene so the experience still feels live.",
                 identifier: "onboardingWelcomeNarrationCard"
             )
 
             onboardingHighlight(
                 title: "Parent setup comes first",
-                summary: "Before the first story starts, confirm privacy defaults and make sure the child profile is ready.",
+                summary: "Before the first story opens, finish child setup, sign in the parent account, and choose the plan from this onboarding journey.",
                 identifier: "onboardingWelcomeParentCard"
+            )
+        }
+    }
+
+    private var howItWorksStep: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            onboardingHighlight(
+                title: "Parents set up the device first",
+                summary: "A parent confirms the child profile, privacy expectations, account identity, and plan before the child starts a story session.",
+                identifier: "onboardingHowItWorksParentCard"
+            )
+
+            onboardingHighlight(
+                title: "Children get adaptive stories",
+                summary: "The child can answer live prompts, ask questions during narration, and help shape what happens next.",
+                identifier: "onboardingHowItWorksAdaptiveCard"
+            )
+
+            onboardingHighlight(
+                title: "Stories can continue over time",
+                summary: "Saved stories and continuity can stay on this device so the next episode can pick up where the last one ended.",
+                identifier: "onboardingHowItWorksContinuityCard"
+            )
+
+            onboardingHighlight(
+                title: "Parents keep the controls",
+                summary: "Parent Controls stay available after onboarding for account management, plan review, restore, promo redemption, retention, and privacy settings.",
+                identifier: "onboardingHowItWorksControlCard"
             )
         }
     }
@@ -1545,28 +1768,28 @@ struct FirstRunOnboardingView: View {
     private var trustStep: some View {
         VStack(alignment: .leading, spacing: 14) {
             onboardingHighlight(
+                title: "Live story processing happens during each session",
+                summary: "Microphone audio, spoken prompts, story generation, and revisions are processed while the story session is happening.",
+                identifier: "onboardingTrustLiveCard"
+            )
+
+            onboardingHighlight(
                 title: "Raw audio is not saved",
                 summary: "StoryTime listens live during the session, but it does not keep raw microphone recordings afterward.",
                 identifier: "onboardingTrustAudioCard"
             )
 
             onboardingHighlight(
-                title: "Some processing happens live",
-                summary: "Live questions, story prompts, and generated scenes are sent for live processing while the session is happening.",
-                identifier: "onboardingTrustLiveCard"
-            )
-
-            onboardingHighlight(
-                title: "Saved stories stay on this device",
-                summary: "When history is on, saved stories and continuity stay local after the session ends.",
+                title: "Saved history stays local in this sprint",
+                summary: "When story history is on, saved stories and continuity stay on this device after the session ends.",
                 identifier: "onboardingTrustLocalCard"
             )
 
-            Button("Review Parent Controls") {
-                showingParentControls = true
-            }
-            .buttonStyle(.bordered)
-            .accessibilityIdentifier("onboardingReviewParentControlsButton")
+            onboardingHighlight(
+                title: "Parent Controls manage settings later",
+                summary: "After onboarding, Parent Controls remain the place to manage privacy, retention, child profiles, restore, upgrades, and promo access on this device.",
+                identifier: "onboardingTrustParentControlsCard"
+            )
         }
     }
 
@@ -1590,6 +1813,12 @@ struct FirstRunOnboardingView: View {
                     .accessibilityIdentifier("onboardingChildSetupSummary")
             }
 
+            onboardingHighlight(
+                title: "Minimal setup for first run",
+                summary: "This starter profile captures the child name, age range, and default story mode. You can refine more settings later in Parent Controls.",
+                identifier: "onboardingChildFamilySetupCard"
+            )
+
             Button("Edit Child Setup") {
                 showingChildEditor = true
             }
@@ -1598,60 +1827,164 @@ struct FirstRunOnboardingView: View {
         }
     }
 
-    private var expectationsStep: some View {
+    private var accountStep: some View {
         VStack(alignment: .leading, spacing: 14) {
-            onboardingExpectation(
-                title: "Live follow-up first",
-                summary: "StoryTime asks up to 3 live questions before it builds the story."
+            onboardingHighlight(
+                title: "A parent account is required now",
+                summary: "First-run activation stays parent-managed. Sign in here so identity, purchases, restore, and promo grants belong to the parent account instead of staying hidden behind Parent Controls later.",
+                identifier: "onboardingAccountRequiredSummary"
             )
-            .accessibilityIdentifier("onboardingExpectationLive")
 
-            onboardingExpectation(
-                title: "Scene-by-scene narration",
-                summary: "After the live questions, StoryTime narrates the adventure one scene at a time."
-            )
-            .accessibilityIdentifier("onboardingExpectationNarration")
+            if parentAuthManager.isSignedIn {
+                onboardingHighlight(
+                    title: parentAuthManager.accountStatusTitle,
+                    summary: "Parent account ready. Continue to choose the plan for this device before StoryTime opens the main app.",
+                    identifier: "onboardingAccountSignedInSummary"
+                )
+            } else {
+                Button("Create Parent Account") {
+                    parentAccountSheetMode = .createAccount
+                    showingParentAccountSheet = true
+                }
+                .buttonStyle(.borderedProminent)
+                .accessibilityIdentifier("onboardingCreateAccountButton")
 
-            onboardingExpectation(
-                title: "Interruptions stay live",
-                summary: "During narration, the child can still ask a question, ask for repetition, or change what happens next."
-            )
-            .accessibilityIdentifier("onboardingExpectationInterruptions")
+                Button("Sign In to Existing Account") {
+                    parentAccountSheetMode = .signIn
+                    showingParentAccountSheet = true
+                }
+                .buttonStyle(.bordered)
+                .accessibilityIdentifier("onboardingSignInButton")
+
+                Text("Email/password and Sign in with Apple both stay inside the parent account sheet. The child story runtime stays free of sign-in prompts.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("onboardingAccountSheetSummary")
+            }
         }
     }
 
-    private var handoffStep: some View {
+    private var planStep: some View {
         VStack(alignment: .leading, spacing: 14) {
             onboardingHighlight(
-                title: "Parent setup is done",
-                summary: handoffSummary,
-                identifier: "onboardingHandoffSummary"
+                title: currentPlanStepTitle,
+                summary: currentPlanStepSummary,
+                identifier: "onboardingPlanSelectionStatus"
+            )
+
+            onboardingHighlight(
+                title: "Starter",
+                summary: "Starter keeps the smaller launch allowance on this device. Pick this if the family is starting on the free plan for now.",
+                identifier: "onboardingStarterPlanCard"
+            )
+
+            Button("Choose Starter for Now") {
+                selectedPlanChoice = .starter
+                planActionMessage = "Starter selected for this parent account."
+                planErrorMessage = nil
+            }
+            .buttonStyle(.bordered)
+            .accessibilityIdentifier("onboardingChooseStarterButton")
+
+            onboardingHighlight(
+                title: "Plus",
+                summary: plusPlanSummary,
+                identifier: "onboardingPlusPlanCard"
+            )
+
+            Button(upgradeButtonTitle) {
+                Task {
+                    await beginPlusPurchase()
+                }
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(isRestoringPurchases || isPurchasingUpgrade)
+            .accessibilityIdentifier("onboardingUpgradeToPlusButton")
+
+            Button(restorePurchasesButtonTitle) {
+                Task {
+                    await restorePurchases()
+                }
+            }
+            .buttonStyle(.bordered)
+            .disabled(isRestoringPurchases || isPurchasingUpgrade)
+            .accessibilityIdentifier("onboardingRestorePurchasesButton")
+
+            Text(restoreOwnershipSummary)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("onboardingRestoreOwnershipSummary")
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Promo code")
+                    .font(.system(size: 16, weight: .bold, design: .rounded))
+
+                Text("Enter a parent promo code here if Plus should be granted without using the App Store purchase flow.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("onboardingPromoSummary")
+
+                TextField("Promo code", text: $promoCode)
+                    .textInputAutocapitalization(.characters)
+                    .autocorrectionDisabled()
+                    .accessibilityIdentifier("onboardingPromoCodeField")
+
+                Button(redeemPromoButtonTitle) {
+                    Task {
+                        await redeemPromoCode()
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(
+                    isRestoringPurchases ||
+                        isPurchasingUpgrade ||
+                        isRedeemingPromo ||
+                        trimmedPromoCode.isEmpty
+                )
+                .accessibilityIdentifier("onboardingRedeemPromoButton")
+            }
+
+            if let planActionMessage {
+                Text(planActionMessage)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("onboardingPlanActionStatus")
+            }
+
+            if let planErrorMessage {
+                Text(planErrorMessage)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("onboardingPlanActionError")
+            }
+        }
+    }
+
+    private var completionStep: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            onboardingHighlight(
+                title: completionTitle,
+                summary: completionSummary,
+                identifier: "onboardingCompletionSummary"
             )
 
             onboardingHighlight(
                 title: parentAuthManager.accountStatusTitle,
                 summary: parentAuthManager.accountStatusSummary,
-                identifier: "onboardingAccountStatusCard"
+                identifier: "onboardingCompletionAccountCard"
             )
 
             onboardingHighlight(
-                title: "Next screen",
-                summary: "StoryTime will open the normal story setup flow so the parent can choose story path and length before handing the device to the child.",
-                identifier: "onboardingHandoffNextScreen"
+                title: completionPlanTitle,
+                summary: completionPlanSummary,
+                identifier: "onboardingCompletionPlanCard"
             )
 
-            if !parentAuthManager.isSignedIn {
-                Button("Create or Sign In") {
-                    showingParentAccountSheet = true
-                }
-                .buttonStyle(.bordered)
-                .accessibilityIdentifier("onboardingParentAccountButton")
-
-                Text("This is optional right now. The first story can still start without parent sign-in.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("onboardingParentAccountSummary")
-            }
+            onboardingHighlight(
+                title: "What happens next",
+                summary: "After this final step, StoryTime opens the main app. Child story setup, starting a new story, and continuing a saved series all stay behind this completed parent activation flow.",
+                identifier: "onboardingCompletionNextStepCard"
+            )
         }
     }
 
@@ -1672,88 +2005,405 @@ struct FirstRunOnboardingView: View {
         .accessibilityIdentifier(identifier)
     }
 
-    private func onboardingExpectation(title: String, summary: String) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .font(.system(size: 16, weight: .bold, design: .rounded))
-            Text(summary)
-                .font(.system(size: 14, weight: .medium, design: .rounded))
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(14)
-        .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(Color.white)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .strokeBorder(Color.black.opacity(0.06), lineWidth: 1)
-        )
-    }
-
-    private var currentStep: OnboardingStep {
+    private var currentStep: FirstRunActivationStep {
         steps[stepIndex]
     }
 
-    private var childStepContinueLabel: String {
-        if let activeProfile = store.activeProfile, activeProfile.displayName == "Story Explorer" {
-            return "Use Story Explorer For Now"
+    private var gateState: FirstRunActivationGateState {
+        FirstRunActivationGateState(
+            currentStep: currentStep,
+            isParentSignedIn: parentAuthManager.isSignedIn,
+            selectedPlanChoice: selectedPlanChoice
+        )
+    }
+
+    private var continueButtonTitle: String {
+        switch currentStep {
+        case .account:
+            return "Continue to Plan"
+        case .plan:
+            return "Review Setup"
+        default:
+            return "Continue"
         }
-        return "Continue"
     }
 
     private func childSetupSummary(for profile: ChildProfile) -> String {
         if profile.displayName == "Story Explorer" {
-            return "Story Explorer is the fallback child profile. You can keep it for now or edit it before the first story starts."
+            return "Story Explorer is the fallback child profile. You can keep it for now or edit it before first-run activation finishes."
         }
 
-        return "\(profile.displayName) is ready for the first story. You can still update name, age, sensitivity, or default mode before launch."
+        return "\(profile.displayName) is ready for onboarding. You can still update name, age, sensitivity, or default mode before StoryTime opens the main app."
     }
 
-    private var handoffSummary: String {
+    private var preferredPurchaseOption: ParentManagedPurchaseOption? {
+        availablePurchaseOptions.first
+    }
+
+    private var currentPlanIsPlus: Bool {
+        displayedSnapshot?.tier == .plus
+    }
+
+    private var currentPlanStepTitle: String {
+        if currentPlanIsPlus {
+            return "Plus is already active"
+        }
+
+        if selectedPlanChoice == .starter {
+            return "Starter is selected"
+        }
+
+        return "Choose how this family starts"
+    }
+
+    private var currentPlanStepSummary: String {
+        if currentPlanIsPlus {
+            return plusOwnershipSummary
+        }
+
+        if selectedPlanChoice == .starter {
+            return "Starter is selected for this parent account. You can continue onboarding now and still manage upgrades, restore, or promo redemption later in Parent Controls."
+        }
+
+        return "Pick Starter to continue on the free plan, or unlock Plus here before the app reaches the main story surfaces."
+    }
+
+    private var plusPlanSummary: String {
+        if let purchaseOption = preferredPurchaseOption {
+            return "Plus expands child-profile room and story allowance. Upgrade here for \(purchaseOption.displayPrice), or use restore or promo if the family already has access."
+        }
+
+        return "Plus expands child-profile room and story allowance. Upgrade here, restore purchases, or redeem a parent promo code before opening the main app."
+    }
+
+    private var upgradeButtonTitle: String {
+        if let purchaseOption = preferredPurchaseOption {
+            return isPurchasingUpgrade ? "Upgrading to Plus..." : "Upgrade to Plus - \(purchaseOption.displayPrice)"
+        }
+
+        return isLoadingPurchaseOptions ? "Checking Plus..." : "Upgrade to Plus"
+    }
+
+    private var restorePurchasesButtonTitle: String {
+        isRestoringPurchases ? "Restoring Purchases..." : "Restore Purchases"
+    }
+
+    private var redeemPromoButtonTitle: String {
+        isRedeemingPromo ? "Redeeming Promo..." : "Redeem Promo Code"
+    }
+
+    private var completionTitle: String {
         if let activeProfile = store.activeProfile {
-            return "StoryTime is ready to set up \(activeProfile.displayName)'s first story. Finish here, then hand the device to the child for the live questions."
+            return "\(activeProfile.displayName)'s setup is ready"
         }
 
-        return "StoryTime is ready for the first story. Finish here, then hand the device to the child for the live questions."
+        return "StoryTime setup is ready"
     }
-}
 
-private enum OnboardingStep: CaseIterable {
-    case welcome
-    case trust
-    case childSetup
-    case expectations
-    case handoff
+    private var completionSummary: String {
+        if let activeProfile = store.activeProfile {
+            return "The child profile, parent account, and plan are in place for \(activeProfile.displayName). Finish here to land in the main app, then a parent can decide when to start the first story."
+        }
 
-    var title: String {
-        switch self {
-        case .welcome:
-            return "Kids shape the story while it is happening."
-        case .trust:
-            return "Start with trust and privacy"
-        case .childSetup:
-            return "Make sure the child profile is ready"
-        case .expectations:
-            return "Explain what the child will experience"
-        case .handoff:
-            return "Hand off into the first story"
+        return "The child profile, parent account, and plan are in place. Finish here to land in the main app, then a parent can decide when to start the first story."
+    }
+
+    private var completionPlanTitle: String {
+        switch selectedPlanChoice {
+        case .starter:
+            return "Starter selected"
+        case .plus:
+            return "Plus selected"
+        case .none:
+            return currentPlanIsPlus ? "Plus selected" : "Plan not selected yet"
         }
     }
 
-    var summary: String {
-        switch self {
-        case .welcome:
-            return "StoryTime is a live storytelling app, not a passive audiobook library. A few guided questions come first, then narration begins."
-        case .trust:
-            return "Before the first story starts, make the live-processing and on-device history rules clear."
-        case .childSetup:
-            return "Confirm who the story is for and make any changes to name, age, sensitivity, or default mode now."
-        case .expectations:
-            return "The first session should feel predictable before the child starts speaking."
-        case .handoff:
-            return "Finish setup here, then move into the normal story launch flow."
+    private var completionPlanSummary: String {
+        switch selectedPlanChoice {
+        case .starter:
+            return "Starter will stay active for this parent account and device. Upgrades, restore, and promo redemption remain available later in Parent Controls."
+        case .plus:
+            return plusOwnershipSummary
+        case .none where currentPlanIsPlus:
+            return plusOwnershipSummary
+        case .none:
+            return "Choose a plan before finishing onboarding."
         }
+    }
+
+    private var purchaseOwnershipIdentity: String {
+        if let email = parentAuthManager.currentUser?.email, !email.isEmpty {
+            return email
+        }
+
+        return "this parent account"
+    }
+
+    private var plusOwnershipSummary: String {
+        if displayedSnapshot?.source == .promoGrant, displayedOwner?.kind == .parentUser {
+            return "Plus is active for \(purchaseOwnershipIdentity) on this device through a parent promo code."
+        }
+
+        if displayedOwner?.kind == .parentUser {
+            return "Plus is active for \(purchaseOwnershipIdentity) on this device."
+        }
+
+        return "Plus is active on this device."
+    }
+
+    private var trimmedPromoCode: String {
+        promoCode.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+    }
+
+    private var displayedEnvelope: EntitlementBootstrapEnvelope? {
+        AppEntitlements.currentEnvelope ?? entitlementManager.envelope
+    }
+
+    private var displayedSnapshot: EntitlementSnapshot? {
+        displayedEnvelope?.snapshot ?? entitlementManager.snapshot
+    }
+
+    private var displayedOwner: EntitlementOwner? {
+        displayedEnvelope?.owner ?? entitlementManager.owner
+    }
+
+    @MainActor
+    private func refreshAfterParentAccountChange() async {
+        do {
+            try await entitlementManager.refreshFromBootstrap(using: APIClient())
+        } catch {
+            entitlementManager.reloadFromCache()
+        }
+        await loadPurchaseOptionsIfNeeded(force: true)
+        syncPlanSelectionFromEntitlements()
+    }
+
+    @MainActor
+    private func restorePurchases() async {
+        planActionMessage = nil
+        planErrorMessage = nil
+        isRestoringPurchases = true
+        defer { isRestoringPurchases = false }
+
+        guard parentAuthManager.isSignedIn else {
+            parentAccountSheetMode = .signIn
+            showingParentAccountSheet = true
+            planErrorMessage = "Sign in to a parent account before restoring Plus so the restored plan belongs to that parent."
+            return
+        }
+
+        if let uiTestConflictMessage = UITestSeed.restoreConflictMessageIfNeeded(currentUser: parentAuthManager.currentUser) {
+            planErrorMessage = uiTestConflictMessage
+            return
+        }
+
+        if let uiTestEnvelope = UITestSeed.restoredEntitlementEnvelopeIfNeeded() {
+            AppEntitlements.store(envelope: uiTestEnvelope)
+            entitlementManager.reloadFromCache()
+            await loadPurchaseOptionsIfNeeded(force: true)
+            syncPlanSelectionFromEntitlements()
+            planActionMessage = "Restore check finished. StoryTime refreshed the plan for this parent account."
+            return
+        }
+
+#if canImport(StoreKit)
+        if #available(iOS 17.0, *) {
+            do {
+                try await AppStore.sync()
+                try await entitlementManager.refreshFromPurchaseState(
+                    using: APIClient(),
+                    purchaseStateProvider: StoreKitEntitlementStateProvider(),
+                    reason: .restore
+                )
+                await loadPurchaseOptionsIfNeeded(force: true)
+                syncPlanSelectionFromEntitlements()
+                planActionMessage = "Restore check finished. StoryTime refreshed the plan for this parent account."
+            } catch let error as APIError {
+                planErrorMessage = restorePurchasesMessage(for: error)
+            } catch {
+                planErrorMessage = "I couldn't restore purchases right now. Ask a grown-up to try again."
+            }
+        } else {
+            planErrorMessage = "Restore purchases is not available on this device right now."
+        }
+#else
+        planErrorMessage = "Restore purchases is not available on this device right now."
+#endif
+    }
+
+    @MainActor
+    private func redeemPromoCode() async {
+        planActionMessage = nil
+        planErrorMessage = nil
+        isRedeemingPromo = true
+        defer { isRedeemingPromo = false }
+
+        guard parentAuthManager.isSignedIn else {
+            parentAccountSheetMode = .signIn
+            showingParentAccountSheet = true
+            planErrorMessage = "Sign in to a parent account before redeeming a promo code so the premium grant belongs to that parent."
+            return
+        }
+
+        if let uiTestEnvelope = UITestSeed.redeemedPromoEntitlementEnvelopeIfNeeded(code: trimmedPromoCode) {
+            AppEntitlements.store(envelope: uiTestEnvelope)
+            entitlementManager.reloadFromCache()
+            promoCode = ""
+            await loadPurchaseOptionsIfNeeded(force: true)
+            syncPlanSelectionFromEntitlements()
+            planActionMessage = "Promo code redeemed. Plus is now ready for \(purchaseOwnershipIdentity) on this device."
+            return
+        }
+
+        do {
+            _ = try await APIClient().redeemPromoCode(request: PromoCodeRedemptionRequest(code: trimmedPromoCode))
+            entitlementManager.reloadFromCache()
+            promoCode = ""
+            await loadPurchaseOptionsIfNeeded(force: true)
+            syncPlanSelectionFromEntitlements()
+            planActionMessage = currentPlanIsPlus
+                ? "Promo code redeemed. Plus is now ready for \(purchaseOwnershipIdentity) on this device."
+                : "Promo code redeemed. StoryTime refreshed the plan for this parent account."
+        } catch let error as APIError {
+            if error.serverCode == "parent_auth_required" {
+                parentAccountSheetMode = .signIn
+                showingParentAccountSheet = true
+            }
+            planErrorMessage = promoRedemptionMessage(for: error)
+        } catch {
+            planErrorMessage = "I couldn't redeem that promo code right now. Ask a grown-up to try again."
+        }
+    }
+
+    @MainActor
+    private func beginPlusPurchase() async {
+        if let purchaseOption = preferredPurchaseOption {
+            await purchasePlus(using: purchaseOption)
+            return
+        }
+
+        await loadPurchaseOptionsIfNeeded(force: true)
+
+        guard let purchaseOption = preferredPurchaseOption else {
+            planErrorMessage = "Plus purchase isn't available on this device right now."
+            return
+        }
+
+        await purchasePlus(using: purchaseOption)
+    }
+
+    @MainActor
+    private func purchasePlus(using purchaseOption: ParentManagedPurchaseOption) async {
+        planActionMessage = nil
+        planErrorMessage = nil
+        isPurchasingUpgrade = true
+        defer { isPurchasingUpgrade = false }
+
+        do {
+            let outcome = try await entitlementManager.purchaseProduct(
+                using: APIClient(),
+                purchaseProvider: resolvedPurchaseProvider(),
+                productID: purchaseOption.productID,
+                parentAccount: parentAuthManager.currentUser
+            )
+            await loadPurchaseOptionsIfNeeded(force: true)
+            syncPlanSelectionFromEntitlements()
+
+            switch outcome {
+            case .purchased:
+                planActionMessage = currentPlanIsPlus
+                    ? "Plus is now ready for \(purchaseOwnershipIdentity) on this device."
+                    : "Purchase finished. StoryTime refreshed the plan for this parent account."
+            case .pending:
+                planActionMessage = "Purchase is pending approval. The current plan stays active until the App Store confirms it."
+            case .cancelled:
+                planActionMessage = "Purchase wasn't completed. The current plan stays the same on this device."
+            }
+        } catch ParentManagedPurchaseError.parentAccountRequired {
+            parentAccountSheetMode = .signIn
+            showingParentAccountSheet = true
+            planErrorMessage = "Sign in to a parent account before buying Plus so the purchase belongs to that parent."
+        } catch ParentManagedPurchaseError.unavailable {
+            planErrorMessage = "Plus purchase isn't available on this device right now."
+        } catch ParentManagedPurchaseError.verificationFailed {
+            planErrorMessage = "I couldn't verify that purchase right now. Ask a grown-up to try again."
+        } catch {
+            planErrorMessage = "I couldn't upgrade this device right now. Ask a grown-up to try again."
+        }
+    }
+
+    @MainActor
+    private func loadPurchaseOptionsIfNeeded(force: Bool = false) async {
+        if currentPlanIsPlus {
+            availablePurchaseOptions = []
+            isLoadingPurchaseOptions = false
+            return
+        }
+
+        if !force && (!availablePurchaseOptions.isEmpty || isLoadingPurchaseOptions) {
+            return
+        }
+
+        isLoadingPurchaseOptions = true
+        defer { isLoadingPurchaseOptions = false }
+
+        do {
+            availablePurchaseOptions = try await resolvedPurchaseProvider().availableOptions()
+        } catch {
+            availablePurchaseOptions = []
+        }
+    }
+
+    private func syncPlanSelectionFromEntitlements() {
+        if currentPlanIsPlus {
+            selectedPlanChoice = .plus
+        } else if selectedPlanChoice == .plus {
+            selectedPlanChoice = nil
+        }
+    }
+
+    private func promoRedemptionMessage(for error: APIError) -> String {
+        switch error.serverCode {
+        case "promo_code_invalid":
+            return "That promo code isn't valid anymore. Ask a grown-up to check the code and try again."
+        case "promo_code_already_redeemed":
+            return "That promo code has already been used."
+        case "promo_code_expired":
+            return "That promo code has expired. Ask a grown-up to check the code and try again."
+        case "parent_auth_required":
+            return "Sign in to a parent account before redeeming a promo code so the premium grant belongs to that parent."
+        default:
+            return "I couldn't redeem that promo code right now. Ask a grown-up to try again."
+        }
+    }
+
+    private func restorePurchasesMessage(for error: APIError) -> String {
+        switch error.serverCode {
+        case "parent_auth_required":
+            return "Sign in to a parent account before restoring Plus so the restored plan belongs to that parent."
+        case "restore_parent_mismatch":
+            return "This device already restored Plus for a different parent account. Sign back into that parent account to restore here again. StoryTime won't move restored access between parent accounts on the same device."
+        default:
+            return "I couldn't restore purchases right now. Ask a grown-up to try again."
+        }
+    }
+
+    private var restoreOwnershipSummary: String {
+        "Restore stays linked to the parent account that restores Plus on this device. If another parent signs in later, StoryTime keeps that parent's current plan instead of transferring the restored access."
+    }
+
+    private func resolvedPurchaseProvider() -> any ParentManagedPurchaseProviding {
+        if let uiTestProvider = UITestSeed.parentManagedPurchaseProviderIfNeeded() {
+            return uiTestProvider
+        }
+
+#if canImport(StoreKit)
+        if #available(iOS 17.0, *) {
+            return StoreKitParentManagedPurchaseProvider()
+        }
+#endif
+
+        return UnsupportedParentManagedPurchaseProvider()
     }
 }

@@ -4352,6 +4352,13 @@ final class MockAPIClient: APIClienting {
         return syncedEntitlementEnvelope
     }
 
+    func redeemPromoCode(request body: PromoCodeRedemptionRequest) async throws -> EntitlementBootstrapEnvelope {
+        let requestId = emitStartedTrace(for: .promoRedemption)
+        AppEntitlements.store(envelope: syncedEntitlementEnvelope)
+        emitCompletedTrace(for: .promoRedemption, requestId: requestId, statusCode: 200)
+        return syncedEntitlementEnvelope
+    }
+
     func preflightEntitlements(request body: EntitlementPreflightRequest) async throws -> EntitlementPreflightResponse {
         let requestId = emitStartedTrace(for: .entitlementPreflight)
         preflightEntitlementsCallCount += 1
@@ -4548,6 +4555,8 @@ final class MockAPIClient: APIClienting {
             return "/v1/session/identity"
         case .entitlementSync:
             return "/v1/entitlements/sync"
+        case .promoRedemption:
+            return "/v1/entitlements/promo/redeem"
         case .entitlementPreflight:
             return "/v1/entitlements/preflight"
         case .voices:

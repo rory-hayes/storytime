@@ -164,6 +164,7 @@ enum EntitlementTier: String, Codable, Equatable, CaseIterable {
 enum EntitlementSource: String, Codable, Equatable {
     case none
     case storekitVerified = "storekit_verified"
+    case promoGrant = "promo_grant"
     case debugSeed = "debug_seed"
 }
 
@@ -299,6 +300,10 @@ struct EntitlementSyncRequest: Codable, Equatable {
         case activeProductIDs = "active_product_ids"
         case transactions
     }
+}
+
+struct PromoCodeRedemptionRequest: Codable, Equatable {
+    let code: String
 }
 
 enum EntitlementPreflightAction: String, Codable, Equatable {
@@ -570,6 +575,7 @@ enum APIClientTraceOperation: String, Equatable, Hashable {
     case healthCheck
     case sessionBootstrap
     case entitlementSync = "entitlement_sync"
+    case promoRedemption = "promo_redemption"
     case entitlementPreflight = "entitlement_preflight"
     case voices
     case realtimeSession
@@ -633,7 +639,7 @@ extension APIClientTraceOperation {
             return .reviseFutureScenes
         case .embeddings:
             return .continuityRetrieval
-        case .healthCheck, .sessionBootstrap, .entitlementSync, .entitlementPreflight, .voices, .realtimeSession:
+        case .healthCheck, .sessionBootstrap, .entitlementSync, .promoRedemption, .entitlementPreflight, .voices, .realtimeSession:
             return nil
         }
     }
@@ -642,7 +648,7 @@ extension APIClientTraceOperation {
         switch self {
         case .storyDiscovery, .storyGeneration, .storyRevision, .embeddings:
             return .remoteModel
-        case .healthCheck, .sessionBootstrap, .entitlementSync, .entitlementPreflight, .voices, .realtimeSession:
+        case .healthCheck, .sessionBootstrap, .entitlementSync, .promoRedemption, .entitlementPreflight, .voices, .realtimeSession:
             return nil
         }
     }
@@ -650,6 +656,7 @@ extension APIClientTraceOperation {
 
 enum ClientLaunchTelemetryEventName: String, Codable, Equatable {
     case entitlementSync = "entitlement_sync"
+    case promoRedeem = "promo_redeem"
     case entitlementPreflight = "entitlement_preflight"
     case blockedReviewPresented = "blocked_review_presented"
     case parentPlanPresented = "parent_plan_presented"
@@ -864,6 +871,20 @@ final class ClientLaunchTelemetry {
                 name: .restorePurchases,
                 outcome: outcome,
                 refreshReason: .restore,
+                surface: .parentTrustCenter,
+                snapshot: snapshot
+            )
+        )
+    }
+
+    static func recordPromoRedemption(
+        outcome: ClientLaunchTelemetryOutcome,
+        snapshot: EntitlementSnapshot?
+    ) {
+        shared.record(
+            event(
+                name: .promoRedeem,
+                outcome: outcome,
                 surface: .parentTrustCenter,
                 snapshot: snapshot
             )
@@ -1086,6 +1107,7 @@ protocol APIClienting: AnyObject {
     func bootstrapSessionIdentity(baseURL: URL) async throws
     func fetchLaunchTelemetryReport() async throws -> LaunchTelemetryJoinedReport
     func syncEntitlements(request body: EntitlementSyncRequest) async throws -> EntitlementBootstrapEnvelope
+    func redeemPromoCode(request body: PromoCodeRedemptionRequest) async throws -> EntitlementBootstrapEnvelope
     func preflightEntitlements(request body: EntitlementPreflightRequest) async throws -> EntitlementPreflightResponse
     func fetchVoices() async throws -> [String]
     func createRealtimeSession(request body: RealtimeSessionRequest) async throws -> RealtimeSessionEnvelope
@@ -1206,6 +1228,31 @@ final class APIClient: APIClienting {
                     )
                     throw error
                 }
+            }
+        }
+    }
+
+    func redeemPromoCode(request body: PromoCodeRedemptionRequest) async throws -> EntitlementBootstrapEnvelope {
+        try await withAvailableBaseURL { [self] baseURL in
+            try await withAuthenticatedSession(baseURL: baseURL) {
+                let endpoint = baseURL
+                    .appending(path: "v1")
+                    .appending(path: "entitlements")
+                    .appending(path: "promo")
+                    .appending(path: "redeem")
+                var request = URLRequest(url: endpoint)
+                request.httpMethod = "POST"
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.httpBody = try JSONEncoder().encode(body)
+                request.timeoutInterval = 20
+                self.applyInstallHeaders(to: &request)
+                await self.applyParentAuthHeaderIfAvailable(to: &request)
+
+                let (data, response) = try await self.perform(request, operation: .promoRedemption)
+                try self.validate(response: response, data: data)
+                let envelope = try JSONDecoder().decode(EntitlementSyncEnvelope.self, from: data).entitlements
+                AppEntitlements.store(envelope: envelope)
+                return envelope
             }
         }
     }
@@ -1496,7 +1543,7 @@ final class APIClient: APIClienting {
                 if let entitlements = envelope.entitlements {
                     AppEntitlements.store(envelope: entitlements)
                 } else {
-                    AppEntitlements.clear()
+                    AppEntitlements.clearCurrentPreservingInstallFallback()
                 }
             }
         } catch let error as APIError {
@@ -1505,7 +1552,7 @@ final class APIClient: APIClienting {
                 // Legacy backends may not expose session bootstrap yet. Continue without a session token
                 // when the route is absent so the app can still use provisional install-based auth.
                 AppSession.clear()
-                AppEntitlements.clear()
+                AppEntitlements.clearCurrentPreservingInstallFallback()
                 return
             default:
                 throw error
@@ -1910,6 +1957,10 @@ enum AppEntitlements {
     static func clear() {
         clearCurrent()
         UserDefaults.standard.removeObject(forKey: installEnvelopeKey)
+    }
+
+    static func clearCurrentPreservingInstallFallback() {
+        clearCurrent()
     }
 
     private static func storeCurrent(envelope: EntitlementBootstrapEnvelope) {

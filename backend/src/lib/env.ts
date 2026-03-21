@@ -3,6 +3,7 @@ import path from "node:path";
 import { z } from "zod";
 
 const RegionSchema = z.enum(["US", "EU"]);
+const EntitlementTierSchema = z.enum(["starter", "plus"]);
 
 const booleanish = z
   .union([z.boolean(), z.string()])
@@ -34,6 +35,26 @@ const stringList = z
       .map((entry) => entry.trim())
       .filter(Boolean)
   );
+
+const PromoCodeGrantSeedSchema = z.object({
+  code: z
+    .string()
+    .trim()
+    .min(4)
+    .max(64)
+    .transform((value) => value.toUpperCase()),
+  tier: EntitlementTierSchema.default("plus"),
+  expires_at: z.number().int().min(0).nullable().optional().default(null)
+});
+
+function parsePromoCodeGrants(rawValue?: string) {
+  if (!rawValue?.trim()) {
+    return [];
+  }
+
+  const parsed = JSON.parse(rawValue);
+  return z.array(PromoCodeGrantSeedSchema).max(100).parse(parsed);
+}
 
 const RawEnvSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
@@ -68,9 +89,11 @@ const RawEnvSchema = z.object({
   ENABLE_USAGE_METERING: booleanish,
   ENABLE_STRUCTURED_ANALYTICS: booleanish,
   ANALYTICS_PERSIST_PATH: z.string().trim().min(1).optional(),
+  ENTITLEMENTS_PERSIST_PATH: z.string().trim().min(1).optional(),
   FIREBASE_PROJECT_ID: z.string().trim().min(1).optional(),
   FIREBASE_CLIENT_EMAIL: z.string().trim().min(1).optional(),
   FIREBASE_PRIVATE_KEY: z.string().trim().min(1).optional(),
+  PROMO_CODE_GRANTS: z.string().trim().optional(),
   STARTER_MAX_CHILD_PROFILES: z.coerce.number().int().min(1).max(12).default(1),
   STARTER_MAX_STORY_STARTS_PER_PERIOD: z.coerce.number().int().min(1).max(100).default(3),
   STARTER_MAX_CONTINUATIONS_PER_PERIOD: z.coerce.number().int().min(1).max(100).default(3),
@@ -98,8 +121,12 @@ const EnvSchema = RawEnvSchema.transform((raw) => {
     API_AUTH_REQUIRED: apiAuthRequired,
     ENABLE_USAGE_METERING: enableUsageMetering,
     ENABLE_STRUCTURED_ANALYTICS: enableStructuredAnalytics,
+    PROMO_CODE_GRANTS: parsePromoCodeGrants(raw.PROMO_CODE_GRANTS),
     ANALYTICS_PERSIST_PATH: path.resolve(
       raw.ANALYTICS_PERSIST_PATH ?? path.join(os.tmpdir(), "storytime-launch-telemetry.json")
+    ),
+    ENTITLEMENTS_PERSIST_PATH: path.resolve(
+      raw.ENTITLEMENTS_PERSIST_PATH ?? path.join(os.tmpdir(), "storytime-entitlements.json")
     )
   };
 });

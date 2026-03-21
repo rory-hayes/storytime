@@ -1,7 +1,10 @@
+import fs from "node:fs";
+import path from "node:path";
 import type { Request } from "express";
 import type { Env } from "./env.js";
 import type { RequestContext } from "./requestContext.js";
 import { AppError } from "./errors.js";
+import { logger } from "./logger.js";
 import {
   createEntitlementToken,
   verifyEntitlementToken,
@@ -10,7 +13,7 @@ import {
   type EntitlementSource,
   type EntitlementTier
 } from "./security.js";
-import type { EntitlementPreflightRequest, EntitlementsSyncRequest } from "../types.js";
+import type { EntitlementPreflightRequest, EntitlementsSyncRequest, PromoCodeRedemptionRequest } from "../types.js";
 
 const PLUS_PRODUCT_IDS = new Set(["storytime.plus.monthly", "storytime.plus.yearly"]);
 export const ENTITLEMENT_HEADER = "x-storytime-entitlement";
@@ -52,8 +55,166 @@ type StoredEntitlementRecord = {
   updated_at: number;
 };
 
+type PromoRedemptionRecord = {
+  parent_user_id: string;
+  redeemed_at: number;
+};
+
+type InstallRestoreClaimRecord = {
+  parent_user_id: string;
+  latest_transaction_id: string | null;
+  ownership_type: "purchased" | "family_shared" | null;
+  restored_at: number;
+};
+
 const entitlementUsageLedger = new Map<string, UsageLedgerState>();
 const entitlementRecordsByParentUserId = new Map<string, StoredEntitlementRecord>();
+const promoRedemptionsByCode = new Map<string, PromoRedemptionRecord>();
+const restoreClaimsByInstallId = new Map<string, InstallRestoreClaimRecord>();
+
+type PersistedEntitlementState = {
+  version: 1;
+  parent_entitlements: Record<string, StoredEntitlementRecord>;
+  promo_redemptions: Record<string, PromoRedemptionRecord>;
+  restore_claims_by_install?: Record<string, InstallRestoreClaimRecord>;
+};
+
+class EntitlementPersistenceSink {
+  private persistencePath?: string;
+
+  configurePersistence(persistencePath?: string) {
+    this.persistencePath = persistencePath;
+    this.loadPersistedState();
+  }
+
+  persistRecord(parentUserId: string, record: StoredEntitlementRecord) {
+    entitlementRecordsByParentUserId.set(parentUserId, record);
+    this.persistState();
+  }
+
+  persistPromoRedemption(code: string, record: PromoRedemptionRecord) {
+    promoRedemptionsByCode.set(code, record);
+    this.persistState();
+  }
+
+  persistRestoreClaim(installId: string, record: InstallRestoreClaimRecord) {
+    restoreClaimsByInstallId.set(installId, record);
+    this.persistState();
+  }
+
+  reset(options?: { clearPersistence?: boolean }) {
+    entitlementRecordsByParentUserId.clear();
+    promoRedemptionsByCode.clear();
+    restoreClaimsByInstallId.clear();
+
+    if (options?.clearPersistence ?? true) {
+      this.clearPersistedState();
+      this.persistencePath = undefined;
+    }
+  }
+
+  private loadPersistedState() {
+    entitlementRecordsByParentUserId.clear();
+    promoRedemptionsByCode.clear();
+    restoreClaimsByInstallId.clear();
+
+    if (!this.persistencePath) {
+      return;
+    }
+
+    try {
+      if (!fs.existsSync(this.persistencePath)) {
+        return;
+      }
+
+      const raw = fs.readFileSync(this.persistencePath, "utf8");
+      const persisted = JSON.parse(raw) as PersistedEntitlementState;
+      if (persisted.version !== 1) {
+        return;
+      }
+
+      Object.entries(persisted.parent_entitlements ?? {}).forEach(([parentUserId, record]) => {
+        if (isStoredEntitlementRecord(record)) {
+          entitlementRecordsByParentUserId.set(parentUserId, record);
+        }
+      });
+
+      Object.entries(persisted.promo_redemptions ?? {}).forEach(([code, record]) => {
+        if (isPromoRedemptionRecord(record)) {
+          promoRedemptionsByCode.set(code, record);
+        }
+      });
+
+      Object.entries(persisted.restore_claims_by_install ?? {}).forEach(([installId, record]) => {
+        if (isInstallRestoreClaimRecord(record)) {
+          restoreClaimsByInstallId.set(installId, record);
+        }
+      });
+    } catch (error) {
+      logger.warn(
+        {
+          event_type: "entitlements_persist_load_failed",
+          persistence_path: this.persistencePath,
+          error_message: error instanceof Error ? error.message : String(error)
+        },
+        "failed to load persisted entitlement state"
+      );
+    }
+  }
+
+  private persistState() {
+    if (!this.persistencePath) {
+      return;
+    }
+
+    try {
+      fs.mkdirSync(path.dirname(this.persistencePath), { recursive: true });
+      const persisted: PersistedEntitlementState = {
+        version: 1,
+        parent_entitlements: Object.fromEntries(entitlementRecordsByParentUserId.entries()),
+        promo_redemptions: Object.fromEntries(promoRedemptionsByCode.entries()),
+        restore_claims_by_install: Object.fromEntries(restoreClaimsByInstallId.entries())
+      };
+      fs.writeFileSync(this.persistencePath, JSON.stringify(persisted), "utf8");
+    } catch (error) {
+      logger.warn(
+        {
+          event_type: "entitlements_persist_write_failed",
+          persistence_path: this.persistencePath,
+          error_message: error instanceof Error ? error.message : String(error)
+        },
+        "failed to persist entitlement state"
+      );
+    }
+  }
+
+  private clearPersistedState() {
+    if (!this.persistencePath) {
+      return;
+    }
+
+    try {
+      if (fs.existsSync(this.persistencePath)) {
+        fs.unlinkSync(this.persistencePath);
+      }
+    } catch (error) {
+      logger.warn(
+        {
+          event_type: "entitlements_persist_clear_failed",
+          persistence_path: this.persistencePath,
+          error_message: error instanceof Error ? error.message : String(error)
+        },
+        "failed to clear persisted entitlement state"
+      );
+    }
+  }
+}
+
+const entitlementPersistence = new EntitlementPersistenceSink();
+
+export function configureEntitlementPersistence(persistencePath?: string): void {
+  entitlementPersistence.configurePersistence(persistencePath);
+}
 
 export function issueBootstrapEntitlements(req: Request, context: RequestContext, env: Env): EntitlementBootstrapEnvelope {
   const owner = resolveEntitlementOwner(context);
@@ -75,17 +236,101 @@ export function issueSyncedEntitlements(
   const activeProductIDs = resolveActiveProductIDs(request);
   const owner = resolveEntitlementOwner(context);
   assertAccountOwnedCommerceSyncHasAuthenticatedParent(request, activeProductIDs, owner);
+  assertRestoreClaimMatchesInstall(request, activeProductIDs, context.installId, owner);
   const tier: EntitlementTier = hasPlusProduct(activeProductIDs) ? "plus" : "starter";
   const source: EntitlementSource = activeProductIDs.size > 0 ? "storekit_verified" : "none";
   const snapshot = baseSnapshotForTier(env, tier, source);
 
   if (owner.kind === "parent_user") {
-    entitlementRecordsByParentUserId.set(owner.parent_user_id, {
+    entitlementPersistence.persistRecord(owner.parent_user_id, {
       owner,
       snapshot,
       updated_at: Math.floor(Date.now() / 1_000)
     });
   }
+
+  persistInstallRestoreClaimIfNeeded(request, activeProductIDs, context.installId, owner);
+
+  return issueCurrentEntitlements(snapshot, owner, context, env);
+}
+
+export function redeemPromoCodeEntitlements(
+  request: PromoCodeRedemptionRequest,
+  context: RequestContext,
+  env: Env
+): EntitlementBootstrapEnvelope {
+  const owner = resolveEntitlementOwner(context);
+  if (owner.kind !== "parent_user") {
+    throw new AppError(
+      "Promo redemption requires an authenticated parent account",
+      401,
+      "parent_auth_required",
+      {
+        route: "/v1/entitlements/promo/redeem"
+      },
+      {
+        publicMessage: "Sign in to a parent account before redeeming a promo code."
+      }
+    );
+  }
+
+  const normalizedCode = request.code.trim().toUpperCase();
+  const promoGrant = env.PROMO_CODE_GRANTS.find((entry) => entry.code === normalizedCode);
+  if (!promoGrant) {
+    throw new AppError(
+      "Promo code was not found",
+      404,
+      "promo_code_invalid",
+      {
+        code: normalizedCode
+      },
+      {
+        publicMessage: "That promo code isn't valid anymore. Ask a grown-up to check the code and try again."
+      }
+    );
+  }
+
+  if (promoGrant.expires_at !== null && promoGrant.expires_at <= Math.floor(Date.now() / 1_000)) {
+    throw new AppError(
+      "Promo code expired",
+      410,
+      "promo_code_expired",
+      {
+        code: normalizedCode,
+        expires_at: promoGrant.expires_at
+      },
+      {
+        publicMessage: "That promo code has expired. Ask a grown-up to check the code and try again."
+      }
+    );
+  }
+
+  const priorRedemption = promoRedemptionsByCode.get(normalizedCode);
+  if (priorRedemption) {
+    throw new AppError(
+      "Promo code already redeemed",
+      409,
+      "promo_code_already_redeemed",
+      {
+        code: normalizedCode,
+        redeemed_by_parent_user_id: priorRedemption.parent_user_id
+      },
+      {
+        publicMessage: "That promo code has already been used."
+      }
+    );
+  }
+
+  const snapshot = baseSnapshotForTier(env, promoGrant.tier, "promo_grant");
+  entitlementPersistence.persistRecord(owner.parent_user_id, {
+    owner,
+    snapshot,
+    updated_at: Math.floor(Date.now() / 1_000)
+  });
+  entitlementPersistence.persistPromoRedemption(normalizedCode, {
+    parent_user_id: owner.parent_user_id,
+    redeemed_at: Math.floor(Date.now() / 1_000)
+  });
 
   return issueCurrentEntitlements(snapshot, owner, context, env);
 }
@@ -124,6 +369,68 @@ function assertAccountOwnedCommerceSyncHasAuthenticatedParent(
       publicMessage
     }
   );
+}
+
+function assertRestoreClaimMatchesInstall(
+  request: EntitlementsSyncRequest,
+  activeProductIDs: Set<string>,
+  installId: string,
+  owner: EntitlementOwner
+): void {
+  if (request.refresh_reason !== "restore" || !hasPlusProduct(activeProductIDs) || owner.kind !== "parent_user") {
+    return;
+  }
+
+  const existingClaim = restoreClaimsByInstallId.get(installId);
+  if (!existingClaim || existingClaim.parent_user_id === owner.parent_user_id) {
+    return;
+  }
+
+  throw new AppError(
+    "Restore claim belongs to a different parent account on this device",
+    409,
+    "restore_parent_mismatch",
+    {
+      install_id: installId,
+      restore_claim_parent_user_id: existingClaim.parent_user_id,
+      attempted_parent_user_id: owner.parent_user_id
+    },
+    {
+      publicMessage:
+        "This device already restored Plus for a different parent account. Sign back into that parent account to restore here again. StoryTime won't move restored access between parent accounts on the same device."
+    }
+  );
+}
+
+function persistInstallRestoreClaimIfNeeded(
+  request: EntitlementsSyncRequest,
+  activeProductIDs: Set<string>,
+  installId: string,
+  owner: EntitlementOwner
+): void {
+  if (request.refresh_reason !== "restore" || !hasPlusProduct(activeProductIDs) || owner.kind !== "parent_user") {
+    return;
+  }
+
+  const matchedTransaction = request.transactions.find((transaction) => {
+    if (
+      transaction.verification_state !== "verified" ||
+      !transaction.is_active ||
+      transaction.revoked_at !== null ||
+      (transaction.expires_at !== null && transaction.expires_at <= Date.now() / 1000)
+    ) {
+      return false;
+    }
+
+    return PLUS_PRODUCT_IDS.has(transaction.product_id.trim());
+  });
+
+  entitlementPersistence.persistRestoreClaim(installId, {
+    parent_user_id: owner.parent_user_id,
+    latest_transaction_id: matchedTransaction?.latest_transaction_id ?? null,
+    ownership_type: matchedTransaction?.ownership_type ?? null,
+    restored_at: Math.floor(Date.now() / 1_000)
+  });
 }
 
 export function resolveEntitlementSnapshot(req: Request, context: RequestContext, env: Env): EntitlementSnapshot {
@@ -193,9 +500,9 @@ export function evaluatePreflightForRequest(
   };
 }
 
-export function resetEntitlementUsageLedger(): void {
+export function resetEntitlementUsageLedger(options?: { clearPersistence?: boolean }): void {
   entitlementUsageLedger.clear();
-  entitlementRecordsByParentUserId.clear();
+  entitlementPersistence.reset(options);
 }
 
 export function evaluatePreflight(
@@ -463,6 +770,57 @@ function entitlementOwnersMatch(left: EntitlementOwner, right: EntitlementOwner)
   }
 
   return false;
+}
+
+function isStoredEntitlementRecord(value: unknown): value is StoredEntitlementRecord {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const record = value as Partial<StoredEntitlementRecord>;
+  return isEntitlementOwner(record.owner) && typeof record.snapshot === "object" && typeof record.updated_at === "number";
+}
+
+function isPromoRedemptionRecord(value: unknown): value is PromoRedemptionRecord {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const record = value as Partial<PromoRedemptionRecord>;
+  return typeof record.parent_user_id === "string" && typeof record.redeemed_at === "number";
+}
+
+function isInstallRestoreClaimRecord(value: unknown): value is InstallRestoreClaimRecord {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const record = value as Partial<InstallRestoreClaimRecord>;
+  return (
+    typeof record.parent_user_id === "string" &&
+    (typeof record.latest_transaction_id === "string" || record.latest_transaction_id === null) &&
+    (record.ownership_type === "purchased" ||
+      record.ownership_type === "family_shared" ||
+      record.ownership_type === null) &&
+    typeof record.restored_at === "number"
+  );
+}
+
+function isEntitlementOwner(value: unknown): value is EntitlementOwner {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const owner = value as Partial<EntitlementOwner>;
+  if (owner.kind === "install") {
+    return true;
+  }
+
+  return (
+    owner.kind === "parent_user" &&
+    typeof owner.parent_user_id === "string" &&
+    owner.auth_provider === "firebase"
+  );
 }
 
 function baseSnapshotForTier(

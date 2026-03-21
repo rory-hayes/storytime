@@ -46,6 +46,8 @@ export function makeTestEnv(overrides: Partial<Env> = {}): Env {
     ENABLE_USAGE_METERING: true,
     ENABLE_STRUCTURED_ANALYTICS: true,
     ANALYTICS_PERSIST_PATH: path.join(os.tmpdir(), "storytime-launch-telemetry-test.json"),
+    ENTITLEMENTS_PERSIST_PATH: path.join(os.tmpdir(), "storytime-entitlements-test.json"),
+    PROMO_CODE_GRANTS: [],
     STARTER_MAX_CHILD_PROFILES: 1,
     STARTER_MAX_STORY_STARTS_PER_PERIOD: 3,
     STARTER_MAX_CONTINUATIONS_PER_PERIOD: 3,

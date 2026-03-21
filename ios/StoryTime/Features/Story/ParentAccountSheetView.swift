@@ -26,15 +26,25 @@ struct ParentAccountSheetView: View {
         }
     }
 
+    enum EntryContext {
+        case onboardingActivation
+        case parentControlsManagement
+    }
+
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var parentAuthManager: ParentAuthManager
 
     @State private var mode: Mode
     @State private var email = ""
     @State private var password = ""
+    private let entryContext: EntryContext
 
-    init(initialMode: Mode = .createAccount) {
+    init(
+        initialMode: Mode = .createAccount,
+        entryContext: EntryContext = .parentControlsManagement
+    ) {
         _mode = State(initialValue: initialMode)
+        self.entryContext = entryContext
     }
 
     var body: some View {
@@ -172,6 +182,11 @@ struct ParentAccountSheetView: View {
         .onChange(of: mode) {
             parentAuthManager.clearAuthError()
         }
+        .onChange(of: parentAuthManager.isSignedIn) { wasSignedIn, isSignedIn in
+            if !wasSignedIn && isSignedIn {
+                dismiss()
+            }
+        }
         .onDisappear {
             parentAuthManager.clearAuthError()
         }
@@ -183,10 +198,20 @@ struct ParentAccountSheetView: View {
 
     private var sheetSummary: String {
         if parentAuthManager.isSignedIn {
-            return "This account is already signed in on this device. Parents can sign out here without adding auth friction to child story flow."
+            switch entryContext {
+            case .onboardingActivation:
+                return "This parent account is already signed in on this device. Finish the remaining onboarding steps before StoryTime opens the main app."
+            case .parentControlsManagement:
+                return "This account is already signed in on this device. Parents can sign out here without adding auth friction to child story flow."
+            }
         }
 
-        return "Create or sign into a parent account here with email/password or Sign in with Apple. Story start stays available without sign-in, but purchase, restore, and promo work remain parent-managed."
+        switch entryContext {
+        case .onboardingActivation:
+            return "Create or sign into a parent account here with email/password or Sign in with Apple. First-run activation now stays parent-managed and must finish before StoryTime opens the main app."
+        case .parentControlsManagement:
+            return "Create or sign into a parent account here with email/password or Sign in with Apple. Story start stays available without sign-in, but purchase, restore, and promo work remain parent-managed."
+        }
     }
 
     private var signedInSummaryText: String {

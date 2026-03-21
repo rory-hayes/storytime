@@ -9,8 +9,10 @@ import { createOpenAI } from "./lib/openaiClient.js";
 import { analytics } from "./lib/analytics.js";
 import { SESSION_HEADER, resolveSessionIdentityWithOptions } from "./lib/auth.js";
 import {
+  configureEntitlementPersistence,
   evaluatePreflightForRequest,
   issueBootstrapEntitlements,
+  redeemPromoCodeEntitlements,
   issueSyncedEntitlements,
 } from "./lib/entitlements.js";
 import {
@@ -34,6 +36,7 @@ import {
   EntitlementsSyncRequestSchema,
   GenerateStoryRequestSchema,
   ModerationCheckRequestSchema,
+  PromoCodeRedemptionRequestSchema,
   RealtimeCallResponseSchema,
   RealtimeCallRequestSchema,
   RealtimeSessionRequestSchema,
@@ -78,6 +81,7 @@ export function createApp(opts?: { env?: Env; services?: AppServices; parentIden
   analytics.configurePersistence(
     env.ENABLE_USAGE_METERING || env.ENABLE_STRUCTURED_ANALYTICS ? env.ANALYTICS_PERSIST_PATH : undefined
   );
+  configureEntitlementPersistence(env.ENTITLEMENTS_PERSIST_PATH);
 
   const app = express();
   app.set("trust proxy", env.TRUST_PROXY ? 1 : false);
@@ -284,6 +288,33 @@ export function createApp(opts?: { env?: Env; services?: AppServices; parentIden
         });
       }
       res.json(decision);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/v1/entitlements/promo/redeem", (req, res, next) => {
+    try {
+      const body = PromoCodeRedemptionRequestSchema.parse(req.body);
+      const context = getRequestContext(req);
+      const entitlements = redeemPromoCodeEntitlements(body, context, env);
+      if (env.ENABLE_STRUCTURED_ANALYTICS || env.ENABLE_USAGE_METERING) {
+        analytics.recordLaunchEvent({
+          requestId: context.requestId,
+          route: context.route,
+          event: "promo_redeem",
+          outcome: "completed",
+          region: context.region,
+          installHash: context.installHash,
+          sessionId: context.sessionId,
+          entitlementTier: entitlements.snapshot.tier,
+          remainingStoryStarts: entitlements.snapshot.remaining_story_starts,
+          remainingContinuations: entitlements.snapshot.remaining_continuations
+        });
+      }
+      res.json({
+        entitlements
+      });
     } catch (error) {
       next(error);
     }

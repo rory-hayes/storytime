@@ -44,7 +44,7 @@ export type SecurityMetrics = {
 export type LaunchEventMetrics = {
   requestId: string;
   route: string;
-  event: "entitlement_bootstrap" | "entitlement_sync" | "entitlement_preflight";
+  event: "entitlement_bootstrap" | "entitlement_sync" | "entitlement_preflight" | "promo_redeem";
   outcome: "issued" | "completed" | "allowed" | "blocked";
   region: Region;
   installHash?: string;

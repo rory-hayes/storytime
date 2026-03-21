@@ -1,6 +1,6 @@
 # Authenticated Restore And Entitlement Refresh Verification
 
-Date: 2026-03-20
+Date: 2026-03-21
 
 ## Scope
 
@@ -17,6 +17,7 @@ Date: 2026-03-20
 - Tests executed:
   - `npm test -- --run src/tests/entitlements.test.ts src/tests/app.integration.test.ts`
   - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' -only-testing:StoryTimeTests/APIClientTests -only-testing:StoryTimeTests/ParentAuthManagerTests`
+  - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' -only-testing:StoryTimeTests/APIClientTests/testBootstrapSessionIdentityWithoutEntitlementsPreservesInstallFallback -only-testing:StoryTimeTests/ParentAuthManagerTests/testSignOutRestoresLastInstallOwnedEntitlementSnapshot`
   - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' -only-testing:StoryTimeUITests/StoryTimeUITests/testJourneyBlockedStartCanRecoverAfterAuthenticatedRestore`
   - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' -only-testing:StoryTimeUITests/StoryTimeUITests/testSeriesDetailBlockedContinuationCanRecoverAfterAuthenticatedPlanRefresh`
   - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' -only-testing:StoryTimeUITests/StoryTimeUITests/testParentControlsCanRestorePlusForSignedInParentAndClearItOnSignOut`
@@ -33,6 +34,7 @@ Date: 2026-03-20
   - Evidence:
     - `StoryTimeTests.APIClientTests.testRestoreSyncStoresAuthenticatedOwnerMetadata`
     - `StoryTimeTests.APIClientTests.testRestoreSyncWithoutParentAuthSurfacesAccountRequirement`
+    - `StoryTimeTests.APIClientTests.testBootstrapSessionIdentityWithoutEntitlementsPreservesInstallFallback`
     - `StoryTimeTests.ParentAuthManagerTests.testSignOutRestoresLastInstallOwnedEntitlementSnapshot`
     - `StoryTimeTests.ParentAuthManagerTests.testSignOutClearsCachedParentOwnedEntitlements`
     - `StoryTimeTests.ParentAuthManagerTests.testSwitchingParentsClearsCachedEntitlementsOwnedByDifferentParent`
@@ -52,12 +54,13 @@ Date: 2026-03-20
     - `HomeView` now requires signed-in parent state before restore, shows parent-account requirement copy in `ParentTrustCenterView`, and uses the existing parent-managed controls instead of adding restore or auth prompts to `NewStoryJourneyView`, `StorySeriesDetailView`, or `VoiceSessionView`.
     - `NewStoryJourneyView` and `StorySeriesDetailView` still reopen their original launch buttons only after entitlement state materially changes.
 
-- PARTIALLY VERIFIED: signing out after a restored parent-owned entitlement should fall back to the last install-owned entitlement snapshot on the device.
+- VERIFIED BY TEST: signing out after a restored parent-owned entitlement falls back to the last install-owned entitlement snapshot on the device.
   - Evidence:
-    - `AppEntitlements` now persists the last install-owned entitlement envelope separately and restores that baseline when a parent-owned entitlement no longer matches the signed-in parent.
+    - `AppEntitlements` persists the last install-owned entitlement envelope separately and restores that baseline when a parent-owned entitlement no longer matches the signed-in parent.
+    - `APIClient.ensureSessionIdentity(baseURL:)` now clears only the current entitlement when bootstrap returns no entitlement envelope, preserving the install-owned fallback instead of wiping it.
+    - `StoryTimeTests.APIClientTests.testBootstrapSessionIdentityWithoutEntitlementsPreservesInstallFallback` passes.
     - `StoryTimeTests.ParentAuthManagerTests.testSignOutRestoresLastInstallOwnedEntitlementSnapshot` passes.
-  - Gap:
-    - `StoryTimeUITests.testParentControlsCanRestorePlusForSignedInParentAndClearItOnSignOut` is still failing because the parent-controls UI does not yet observe the expected `Starter` title after sign-out, even though the cache fallback path is now covered at unit level.
+    - `StoryTimeUITests.testParentControlsCanRestorePlusForSignedInParentAndClearItOnSignOut` passes.
 
 - UNVERIFIED: live App Store restore sheet behavior and production StoreKit/account mismatch semantics.
   - Evidence:
@@ -67,4 +70,4 @@ Date: 2026-03-20
 
 ## Conclusion
 
-`M11.6` is materially advanced but not fully closed. The backend, iOS contract handling, and both blocked-flow recovery paths now have direct automated evidence under authenticated restore or refresh conditions. The remaining repo blocker is one parent-controls UI assertion: after restore and sign-out, the surface still does not visibly settle on the expected `Starter` plan title in UI automation, so the milestone should remain in progress until that last stale-state presentation gap is resolved or intentionally re-scoped.
+`M11.6` is complete in repo terms. The backend, iOS entitlement bootstrap and sign-out handling, and both blocked-flow recovery paths now have direct automated evidence under authenticated restore or refresh conditions, including the parent-controls restore-plus-then-sign-out path. The remaining gaps are environment-dependent only: live App Store restore behavior and final production mismatch semantics between StoreKit ownership, authenticated parent identity, and device-local fallback still require external verification.

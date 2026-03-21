@@ -35,7 +35,7 @@ The current goal is to build the next product layer on top of the accepted hybri
 
 ## Current Phase
 
-Phase 11 - Parent Accounts, Authenticated Entitlements, And Commerce Foundation
+Phase 13 - Authenticated Commerce Hardening
 
 ## Overall Status Snapshot
 
@@ -77,6 +77,10 @@ Phase 11 - Parent Accounts, Authenticated Entitlements, And Commerce Foundation
 - Parent trust and privacy communication is now more cohesive across `HomeView`, the lightweight parent gate, `ParentTrustCenterView`, `NewStoryJourneyView`, and `VoiceSessionView`, with clearer distinctions between what stays on device, what goes live during a session, and what the `PARENT` check does not claim to be.
 - `ContentView` now routes fresh installs through a dedicated `FirstRunOnboardingView` before the normal `HomeView` surface appears, and the first-run flow now bridges directly into `NewStoryJourneyView` when the parent chooses to start the first story immediately.
 - The active repo now has a backend-issued entitlement bootstrap snapshot, a StoreKit-facing purchase normalization seam, a backend entitlement refresh route, and a shared entitlement preflight contract. `NewStoryJourneyView` and `StorySeriesDetailView` now consume that contract before cost-bearing launch, with parent-managed blocked-launch review paths for new stories and saved-series continuation. `ParentTrustCenterView` now exposes the durable plan-state, restore entry, and upgrade framing needed outside the live child session, live bootstrap/sync snapshots carry config-backed Starter and Plus defaults, preflight now depletes backend-owned remaining counts through an install-scoped rolling usage ledger, and the smallest parent-managed StoreKit purchase path now lives inside Parent Controls. Parent-managed plan messaging continues to match the enforced limits, and child-facing runtime surfaces remain purchase-free.
+- `docs/verification/account-payment-promo-happy-path-verification.md` now records direct automated evidence that blocked new-story and saved-series continuation flows recover after parent account creation plus purchase or promo redemption, while authenticated restore remains parent-managed and retry reuses refreshed entitlement state.
+- `docs/verification/sprint-11-parent-account-commerce-summary.md` now closes Sprint 11 with one explicit verified/partial/unverified summary, the full recorded verification command set, and a repo recommendation to stay on authenticated commerce hardening before any cross-device continuity planning.
+- `docs/authenticated-commerce-hardening-plan.md` now converts that recommendation into an approved Phase 13 queue focused on durable entitlement or promo persistence, explicit restore-mismatch rules, and live-environment commerce verification.
+- Authenticated parent-owned entitlement records and promo redemption ledgers now persist through `ENTITLEMENTS_PERSIST_PATH`, reload when the backend boots, and remain distinct from local-only story history and continuity data.
 - `ParentTrustCenterView` now acts as the durable plan-management surface for the locked MVP hierarchy, and blocked launch review sheets route there without introducing live-session upgrade UI or child-facing purchase prompts.
 - The active launch acceptance pack in `docs/verification/hybrid-runtime-validation.md` is still runtime-focused; it does not yet cover onboarding, purchase and restore flows, plan enforcement, or a launch-candidate go/no-go checklist.
 
@@ -193,20 +197,21 @@ Phase 11 - Parent Accounts, Authenticated Entitlements, And Commerce Foundation
 - The authenticated entitlement model is now directionally locked: ownership should be represented separately from source, with backend entitlement ownership tied to the authenticated parent user and `EntitlementSnapshot.source` left to describe grant origin such as `storekit_verified`, `promo_grant`, or `none`.
 - Story history and continuity remain local-only in Sprint 11. Cross-device continuity sync is intentionally deferred and should not be assumed in implementation or product copy.
 - Promo grants are now directionally locked to a bounded one-time redemption default. Reusable codes, renewable promo plans, and wider admin workflows remain deferred unless implementation evidence forces a change.
-- Restore semantics under the new account model are still open. The sprint needs one explicit rule for what happens when StoreKit ownership, the signed-in parent account, and the current device state disagree.
-- Authenticated entitlement records are currently process-local in backend memory so the repo can verify account ownership without widening into durable cloud state yet. Durable persistence still needs to land before production-backed account commerce is fully hardened.
+- Restore semantics under the new account model are now explicit for the current repo scope: restored Plus stays claimed to the parent account that restored it on the current device or install, and a different signed-in parent now gets an explicit restore conflict instead of a silent transfer. Live family-share and broader multi-device restore behavior still need direct verification.
+- Authenticated entitlement ownership and promo redemption are now durable across backend restarts through a repo-fit JSON persistence layer. Later work still needs to define the final backup, migration, or production storage story if the backend grows beyond this smallest hardening layer.
+- The live authenticated-commerce pass is now explicitly split into repo-prep work and physical-device execution work. The repo now has the support rerun plus live checklist, but production Apple auth and App Store behavior still require a human-operated environment to verify directly.
+- `M13.3b` is now explicitly blocked on external execution prerequisites: a paired physical iOS device ready for developer execution, a live-capable build, and real Apple/App Store credentials or environment access.
 - Production Firebase parent-token verification now requires backend environment configuration: `FIREBASE_PROJECT_ID` plus either service-account credentials (`FIREBASE_CLIENT_EMAIL`, `FIREBASE_PRIVATE_KEY`) or application default credentials.
 - Intentionally deferred unless reprioritized: full cloud sync, multi-device story portability, broader family account management, web admin tooling, and a broader auth-provider matrix.
 
 ## Next Recommended Milestone
 
-`M11.6 - Authenticated restore and entitlement refresh verification`
+`M13.3b - Live authenticated-commerce execution and report` once the live-device blocker is cleared
 
 Reason:
-- `M11.5` is now complete: authenticated parent-managed purchase completion works in `ParentTrustCenterView`, blocked new-story and continuation recovery paths both unlock after purchase, and the backend now enforces authenticated purchase ownership with passing targeted tests.
-- `M11.6` is now materially advanced: backend restore ownership enforcement is covered, the iOS client keeps restore ownership explicit, and isolated UI tests now prove blocked new-story recovery after authenticated restore plus blocked continuation recovery after authenticated plan refresh.
-- One repo blocker remains before the milestone can close: `StoryTimeUITests.testParentControlsCanRestorePlusForSignedInParentAndClearItOnSignOut` still does not observe the expected `Starter` title after sign-out from a restored parent-owned entitlement, even though the install-owned fallback path now passes in unit coverage.
-- Restore mismatch handling and that last parent-controls sign-out presentation gap remain the highest-signal Sprint 11 work, so `M11.6` stays the next recommended milestone.
+- `M13.3a` is now complete, so the remaining highest-signal gap is still the actual physical-device execution of production Apple auth, App Store purchase, and App Store restore.
+- The repo already has the deterministic support pack and live checklist, so no further repo-only implementation work is the right next step until the external blocker is cleared.
+- Family-share and real App Store mismatch behavior remain only partially verified until that live pass is actually recorded.
 
 ## Milestone Status
 
@@ -218,10 +223,17 @@ Reason:
 | M11.3b Sign in with Apple on parent-managed account surfaces | DONE | The shared parent account sheet now supports `Sign in with Apple`, `ParentAuthManager` maps Apple-authenticated state explicitly, relaunch persistence is covered in deterministic UI tests, and child story surfaces remain auth-free. |
 | M11.4 Backend authenticated entitlement model alignment | DONE | Backend now verifies Firebase-authenticated parent identity on `/v1/session/identity` and entitlement routes, signed entitlement tokens plus bootstrap/sync/preflight envelopes carry explicit owner metadata, authenticated parent entitlements resolve by parent user while stale install-owned tokens are ignored after sign-in, and story plus realtime routes remain install/session scoped. |
 | M11.5 StoreKit purchase integration in parent-managed surfaces | DONE | Parent-managed purchase initiation now requires a signed-in parent account, purchase ownership is enforced server-side with `parent_auth_required`, `ParentTrustCenterView` truthfully explains account-linked ownership, and focused UI coverage now proves direct purchase completion plus blocked new-story and continuation recovery without adding purchase UI to child-session surfaces. |
-| M11.6 Authenticated restore and entitlement refresh verification | IN PROGRESS | Backend restore ownership, client owner handling, and isolated blocked-flow restore or refresh recovery are now covered in tests, but the parent-controls sign-out UI still does not visibly settle back to the expected Starter title after restored Plus is cleared. |
-| M11.7 Promo-code redemption flow for premium grants | TODO | Add a bounded parent-only promo redemption path that grants premium access through backend entitlement ownership instead of a paid purchase. |
-| M11.8 Account, payment, and promo happy-path verification | TODO | Verify blocked -> sign in or create account -> purchase or promo -> unlock -> retry success for both new stories and continuations, plus the restore path. |
-| M11.9 Post-sprint readiness summary and remaining gaps | TODO | Record the resulting architecture, evidence, unresolved risks, and whether cross-device or account-linked continuity should become the next sprint. |
+| M11.6 Authenticated restore and entitlement refresh verification | DONE | Backend restore ownership, client owner handling, bootstrap-safe install fallback preservation, blocked-flow restore or refresh recovery, and parent-controls sign-out fallback are all covered in tests, with the remaining live App Store mismatch questions called out as environment-dependent gaps. |
+| M11.7 Promo-code redemption flow for premium grants | DONE | Parent Controls now exposes parent-only promo redemption, backend env-backed promo grants redeem through authenticated parent ownership with source `promo_grant`, and targeted backend/iOS tests cover success plus invalid, expired, and already-used promo failures. |
+| M11.8 Account, payment, and promo happy-path verification | DONE | `docs/verification/account-payment-promo-happy-path-verification.md` now records direct automated evidence for purchase-backed and promo-backed blocked recovery, restore-managed recovery, and retry-token reuse without child-surface auth or purchase prompts. |
+| M11.9 Post-sprint readiness summary and remaining gaps | DONE | `docs/verification/sprint-11-parent-account-commerce-summary.md` now records the exact Sprint 11 verification command set, the verified/partial/unverified outcome matrix, and the recommendation to stay on authenticated commerce hardening before continuity planning. |
+| M13.0 Authenticated commerce hardening plan and queue approval | DONE | `docs/authenticated-commerce-hardening-plan.md` now records the approved post-Phase-12 queue and narrows the next workstream to durable entitlement or promo persistence, restore-mismatch rules, and live-environment Apple or StoreKit verification. |
+| M13.1 Durable authenticated entitlement and promo persistence | DONE | Backend authenticated entitlement records and promo redemption ledgers now persist through `ENTITLEMENTS_PERSIST_PATH`, reload across backend recreation, and keep the existing iOS contract unchanged. |
+| M13.2 Restore mismatch and device-fallback product rule | DONE | Restore-linked Plus now stays claimed to the parent account that restored it on the current device, mismatch attempts fail with `restore_parent_mismatch`, and parent-facing copy now makes local fallback explicit in Parent Controls and onboarding. |
+| M13.3a Live authenticated-commerce verification prep and support rerun | DONE | The deterministic support pack was rerun, the live-only execution gap was isolated, and `docs/verification/live-authenticated-commerce-verification-prep.md` now records exact prerequisites, commands, and the physical-device checklist for the real pass. |
+| M13.3b Live authenticated-commerce execution and report | BLOCKED | Record the first live-environment verification pass for production Apple sign-in, App Store purchase, and App Store restore after the prep and support rerun are complete. Blocked on physical-device and live-environment access. |
+| M12.1 First-run activation onboarding flow | DONE | Fresh installs now stay inside a dedicated seven-step onboarding journey until child setup, parent sign-in, and plan choice are complete; account and plan entry moved into onboarding, Parent Controls were reframed as ongoing management, and targeted smoke plus UI coverage now pins the new gate. |
+| M12.2 Onboarding activation verification and hardening | DONE | `docs/verification/onboarding-activation-verification.md` now records fresh-install gating, plan-entry visibility, purchase or restore or promo completion, relaunch persistence, the onboarding-sheet dismiss hardening, and the explicit decision to keep the current onboarding completion key without a version bump. |
 | M1.1 Realtime startup flow audit | DONE | Startup chain documented in `docs/realtime-startup-audit.md`; failing backend realtime error branch identified. |
 | M1.2 `/v1/realtime/call` contract and SDP handling | DONE | Client and backend now agree on endpoint resolution and SDP validation; targeted tests cover absolute, root-relative, and path-relative call targets plus invalid offer/answer handling. |
 | M1.3 Safe startup failure states | DONE | Startup failures are now explicitly categorized, mapped to safe UI copy, and guarded against stale boot callbacks and pre-ready disconnect races. |
@@ -1916,3 +1928,237 @@ Reason:
   - Real App Store restore behavior and StoreKit/account mismatch semantics remain environment-dependent and are still not directly verified in live conditions.
   - Authenticated entitlement storage remains process-local in backend memory and still needs durable persistence in a later sprint step.
 - Next: `M11.6 - Authenticated restore and entitlement refresh verification`
+
+### 2026-03-21 - M11.6 Authenticated restore and entitlement refresh verification
+- Status: DONE
+- Summary: Closed the remaining authenticated restore verification blocker without widening scope. `APIClient` now preserves the install-owned entitlement fallback when `/v1/session/identity` returns no entitlement envelope, so parent-account bootstrap and sheet dismissal no longer wipe the device baseline before restore or sign-out. The focused UI path for restored Plus now returns to `Starter` after parent sign-out, and the verification report now records `M11.6` as complete with only live App Store restore or mismatch semantics still unverified outside the repo.
+- Files: `docs/verification/authenticated-restore-entitlement-refresh-verification.md`, `ios/StoryTime/Features/Story/HomeView.swift`, `ios/StoryTime/Networking/APIClient.swift`, `ios/StoryTime/Tests/APIClientTests.swift`, `ios/StoryTime/UITests/StoryTimeUITests.swift`, `PLANS.md`, `SPRINT.md`
+- Tests:
+  - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' -only-testing:StoryTimeTests/APIClientTests/testBootstrapSessionIdentityWithoutEntitlementsPreservesInstallFallback -only-testing:StoryTimeTests/ParentAuthManagerTests/testSignOutRestoresLastInstallOwnedEntitlementSnapshot`, which passed `2` tests.
+  - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' -only-testing:StoryTimeUITests/StoryTimeUITests/testParentControlsCanRestorePlusForSignedInParentAndClearItOnSignOut`, which passed.
+- Decisions:
+  - Preserve the install-owned entitlement fallback during bootstrap responses that omit entitlements instead of clearing all cached entitlement state.
+  - Keep the parent-controls restore or sign-out verification deterministic in UI automation by scrolling back to the signed-out account section before asserting its copy, rather than weakening the product flow.
+- Risks/Notes:
+  - Live App Store restore behavior, family-share edge cases, and final mismatch semantics between StoreKit ownership, authenticated parent identity, and device-local fallback are still environment-dependent and remain unverified in repo terms.
+  - Authenticated entitlement storage remains process-local in backend memory and still needs durable persistence in a later sprint step.
+- Next: `M11.8 - Account, payment, and promo happy-path verification`
+
+### 2026-03-21 - M11.7 Promo-code redemption flow for premium grants
+- Status: DONE
+- Summary: Completed the bounded parent-only promo redemption milestone without widening into child-facing commerce. The backend now accepts authenticated promo redemption through `POST /v1/entitlements/promo/redeem`, loads the real promo catalog from `PROMO_CODE_GRANTS`, enforces one-time invalid, expired, and already-used failure modes, and issues authenticated parent-owned entitlements with source `promo_grant`. On iOS, `ParentTrustCenterView` now exposes a parent-managed promo entry path, promo-derived plan copy stays distinguishable from paid ownership, API handling stores promo owner metadata, and the repo now documents the real env-backed promo setup separately from the deterministic UI-test seed harness.
+- Files: `backend/src/app.ts`, `backend/src/lib/analytics.ts`, `backend/src/lib/entitlements.ts`, `backend/src/lib/env.ts`, `backend/src/lib/security.ts`, `backend/src/tests/app.integration.test.ts`, `backend/src/tests/entitlements.test.ts`, `backend/src/tests/testHelpers.ts`, `backend/src/types.ts`, `docs/promo-code-redemption-setup.md`, `ios/StoryTime/App/UITestSeed.swift`, `ios/StoryTime/Features/Story/HomeView.swift`, `ios/StoryTime/Features/Voice/VoiceSessionView.swift`, `ios/StoryTime/Networking/APIClient.swift`, `ios/StoryTime/Tests/APIClientTests.swift`, `ios/StoryTime/Tests/PracticeSessionViewModelTests.swift`, `ios/StoryTime/Tests/SmokeTests.swift`, `ios/StoryTime/UITests/StoryTimeUITests.swift`, `PLANS.md`, `SPRINT.md`
+- Tests:
+  - `npm test -- --run src/tests/entitlements.test.ts src/tests/app.integration.test.ts`, which passed `57` tests.
+  - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' -only-testing:StoryTimeTests/APIClientTests/testRedeemPromoCodeStoresPromoGrantOwnerMetadata -only-testing:StoryTimeTests/APIClientTests/testRedeemPromoCodeSurfacesInvalidPromoFailure -only-testing:StoryTimeTests/SmokeTests`, which passed `17` tests.
+  - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' -only-testing:StoryTimeUITests/StoryTimeUITests/testParentControlsShowSignedOutParentAccountStatus -only-testing:StoryTimeUITests/StoryTimeUITests/testParentControlsCanRedeemPromoCodeForSignedInParent`, which passed `2` tests.
+- Decisions:
+  - Keep real promo logic env-backed through `PROMO_CODE_GRANTS` instead of hidden request headers or backend debug-only branches.
+  - Treat promo redemption as authenticated parent-owned entitlement issuance with source `promo_grant`, distinct from paid `storekit_verified` ownership.
+  - Keep the UI-test promo seed path explicit and separate so deterministic parent-controls coverage does not masquerade as the real backend promo catalog.
+- Risks/Notes:
+  - Promo catalogs and redemption ledgers remain backend process-local in repo terms, so one-time promo usage resets on backend restart until durable persistence lands.
+  - Promo admin tooling remains intentionally deferred; repo verification currently assumes environment-managed promo seed setup rather than an operator UI.
+  - Full blocked-to-unlocked verification across purchase, promo, and restore flows is still deferred to `M11.8`.
+- Next: `M11.8 - Account, payment, and promo happy-path verification`
+
+### 2026-03-21 - M11.8 Account, payment, and promo happy-path verification
+- Status: DONE
+- Summary: Closed the Sprint 11 happy-path verification milestone without expanding scope beyond the parent-managed commerce boundary. The repo now has direct automated evidence that blocked new-story and blocked continuation flows recover after parent account creation plus authenticated purchase or promo redemption, that restore remains parent-managed, and that retry reuses refreshed entitlement tokens instead of bypassing gating. The new verification artifact records the exact command set, route assumptions, evidence labels, and remaining live-environment gaps.
+- Files: `docs/verification/account-payment-promo-happy-path-verification.md`, `backend/src/tests/app.integration.test.ts`, `ios/StoryTime/Tests/APIClientTests.swift`, `ios/StoryTime/UITests/StoryTimeUITests.swift`, `PLANS.md`, `SPRINT.md`
+- Tests:
+  - `npm test -- --run src/tests/app.integration.test.ts`, which passed `44` tests.
+  - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' -only-testing:StoryTimeTests/APIClientTests/testPreflightUsesRefreshedEntitlementTokenAfterPurchaseSync -only-testing:StoryTimeTests/APIClientTests/testPreflightUsesRedeemedPromoEntitlementTokenAfterAuthenticatedUnlock`, which passed `2` tests.
+  - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' -only-testing:StoryTimeUITests/StoryTimeUITests/testJourneyBlockedStartCanRecoverAfterParentManagedPurchase -only-testing:StoryTimeUITests/StoryTimeUITests/testSeriesDetailBlockedContinuationCanRecoverAfterParentManagedPurchase -only-testing:StoryTimeUITests/StoryTimeUITests/testJourneyBlockedStartCanRecoverAfterAuthenticatedRestore -only-testing:StoryTimeUITests/StoryTimeUITests/testJourneyBlockedStartCanRecoverAfterPromoRedemption -only-testing:StoryTimeUITests/StoryTimeUITests/testSeriesDetailBlockedContinuationCanRecoverAfterPromoRedemption`, which passed `5` tests.
+- Decisions:
+  - Keep `M11.8` as a verification-only milestone and reuse the existing focused restore evidence for continuation refresh rather than widening into more implementation work.
+  - Treat retry-token reuse as a first-class verification target for both purchase and promo unlock paths so blocked recovery remains explicit and testable.
+  - Keep the child-session trust boundary verified by routing all unlock actions through `ParentTrustCenterView` and confirming `VoiceSessionView` stays auth-free and purchase-free by code inspection.
+- Risks/Notes:
+  - Live App Store purchase and restore sheet behavior, family-share edge cases, and production commerce mismatch semantics remain environment-dependent and still need external verification.
+  - Backend entitlement and promo ledgers remain process-local in repo terms, so durable persistence is still a later hardening concern.
+  - Restore-backed continuation recovery remains covered by the earlier focused `M11.6` verification doc rather than this exact rerun command set.
+- Next: `M11.9 - Post-sprint readiness summary and remaining gaps`
+
+### 2026-03-21 - M11.9 Post-sprint readiness summary and remaining gaps
+- Status: DONE
+- Summary: Closed Sprint 11 in repo terms without widening into a new implementation stream. The new post-sprint summary artifact aggregates the Sprint 11 verification command set, re-inspects the parent-auth, entitlement, purchase, restore, and promo foundations, classifies the resulting state with the required evidence labels, and makes one explicit recommendation: do not move into cross-device continuity planning yet. The repo recommendation is to stay on authenticated commerce hardening first so durable entitlement storage, explicit StoreKit-account mismatch rules, and live-environment Apple or StoreKit verification land before any broader account-linked product promises.
+- Files: `docs/verification/sprint-11-parent-account-commerce-summary.md`, `PLANS.md`, `SPRINT.md`
+- Tests:
+  - No new automated tests were run for `M11.9`.
+  - Verification for this milestone is the repo-grounded summary of the exact Sprint 11 command set already recorded across `M11.2` through `M11.8`, now consolidated in `docs/verification/sprint-11-parent-account-commerce-summary.md`.
+- Decisions:
+  - Treat Sprint 11 as complete in repo terms rather than creating speculative continuity-planning milestones before the remaining commerce-foundation gaps are closed.
+  - Recommend the next workstream stay on authenticated commerce hardening: durable entitlement or promo persistence, explicit restore or purchase mismatch handling, and live-environment Apple or StoreKit verification.
+  - Keep cross-device continuity and account-linked story-history planning deferred because the repo still explicitly promises local-only story history and lacks a durable account-commerce foundation.
+- Risks/Notes:
+  - Live App Store purchase and restore behavior, family-share edge cases, and the final StoreKit-versus-parent-account mismatch rule remain unverified outside deterministic repo automation.
+  - Backend entitlement ownership and promo redemption ledgers remain process-local in repo terms and still need durable persistence before broader account-linked product promises are safe.
+  - Production Sign in with Apple and live StoreKit surfaces remain partially verified because repo automation still depends on deterministic providers for some system UI.
+- Next: No remaining ordered milestone in `SPRINT.md`; the post-sprint recommendation is a new authenticated-commerce hardening planning pass before any continuity-sync planning.
+
+### 2026-03-21 - M12.1 First-run activation onboarding flow
+- Status: DONE
+- Summary: Added the new first-run activation journey so fresh installs no longer fall directly into `HomeView` or bury account activation inside Parent Controls. The app now routes brand-new users through a seven-step placeholder onboarding flow that explains StoryTime, captures child setup, requires parent account sign-in, exposes Starter versus Plus selection plus restore and promo entry, and only then unlocks the main app. Parent Controls remain available for ongoing account and plan management, but the copy now reflects that onboarding owns first-run activation.
+- Files: `ios/StoryTime/App/ContentView.swift`, `ios/StoryTime/Features/Story/HomeView.swift`, `ios/StoryTime/Features/Story/ParentAccountSheetView.swift`, `ios/StoryTime/Tests/SmokeTests.swift`, `ios/StoryTime/UITests/StoryTimeUITests.swift`, `PLANS.md`, `SPRINT.md`
+- Tests:
+  - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' -only-testing:StoryTimeTests/SmokeTests/testFirstRunExperienceStoreDefaultsToIncompleteAndPersistsCompletion -only-testing:StoryTimeTests/SmokeTests/testFirstRunActivationGateBlocksAccountStepUntilParentIsSignedIn -only-testing:StoryTimeTests/SmokeTests/testFirstRunActivationGateBlocksCompletionUntilPlanIsChosen -only-testing:StoryTimeTests/SmokeTests/testFirstRunActivationGateAllowsCompletionOnceAccountAndPlanAreReady`, which passed `4` tests.
+  - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' -only-testing:StoryTimeUITests/StoryTimeUITests/testFreshInstallShowsParentLedOnboardingFlow -only-testing:StoryTimeUITests/StoryTimeUITests/testOnboardingCanEditFallbackChildProfile -only-testing:StoryTimeUITests/StoryTimeUITests/testOnboardingRequiresParentAccountBeforePlanStep -only-testing:StoryTimeUITests/StoryTimeUITests/testChildStorySurfacesRemainFreeOfAccountPrompts`, which passed in the focused onboarding slice.
+  - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' -only-testing:StoryTimeUITests/StoryTimeUITests/testParentControlsShowSignedOutParentAccountStatus`, which passed after the Parent Controls copy change.
+- Decisions:
+  - Create a new `M12.1` milestone because Sprint 11 had no remaining queued work and the first-run activation change did not cleanly fit any closed commerce milestone.
+  - Keep the existing `FirstRunExperienceStore` completion key so already-onboarded installs continue to bypass onboarding instead of forcing a migration during this implementation pass.
+  - Reuse the existing parent-auth sheet and entitlement or promo seams inside onboarding rather than inventing a separate auth or commerce stack for first run.
+  - Land placeholder-first onboarding content now and defer visual polish or a broader plan matrix until the new activation structure is verified more deeply.
+- Risks/Notes:
+  - The new onboarding content is intentionally placeholder-heavy; layout and copy polish are still follow-up work.
+  - The current plan architecture still only exposes Starter and Plus in repo terms, so there is no real family-plan branch to surface yet.
+  - Broader onboarding verification around relaunch persistence and some commerce-backed onboarding variants still needs a dedicated hardening pass because XCUITest relaunch flows remain noisier than the smoke coverage.
+- Next: `M12.2 - Onboarding activation verification and hardening`
+
+### 2026-03-21 - M12.2 Onboarding activation verification and hardening
+- Status: DONE
+- Summary: Hardened the first-run activation verification pass and closed Phase 12 in repo terms. The onboarding suite now has direct evidence for fresh-install routing, parent-managed account entry, plan-step Starter versus purchase versus restore versus promo access, purchase-backed completion, restore-backed completion, promo-backed completion, relaunch persistence, and the Parent Controls ongoing-management regression. I also hardened `ParentAccountSheetView` so successful sign-in dismisses on auth-state transition, which makes onboarding account entry more resilient in the real product flow instead of depending only on a button callback.
+- Files: `ios/StoryTime/Features/Story/ParentAccountSheetView.swift`, `ios/StoryTime/Tests/SmokeTests.swift`, `ios/StoryTime/UITests/StoryTimeUITests.swift`, `docs/verification/onboarding-activation-verification.md`, `PLANS.md`, `SPRINT.md`
+- Tests:
+  - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' -only-testing:StoryTimeTests/SmokeTests/testFirstRunExperienceStoreDefaultsToIncompleteAndPersistsCompletion -only-testing:StoryTimeTests/SmokeTests/testFirstRunActivationGateBlocksAccountStepUntilParentIsSignedIn -only-testing:StoryTimeTests/SmokeTests/testFirstRunActivationGateBlocksCompletionUntilPlanIsChosen -only-testing:StoryTimeTests/SmokeTests/testFirstRunActivationGateAllowsCompletionOnceAccountAndPlanAreReady -only-testing:StoryTimeTests/SmokeTests/testFirstRunActivationGateAllowsCompletionForAuthenticatedPlusPlan`, which passed `5` tests.
+  - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' -only-testing:StoryTimeUITests/StoryTimeUITests/testOnboardingCanCompleteAfterParentManagedPlusPurchase`, which passed.
+  - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' -only-testing:StoryTimeUITests/StoryTimeUITests/testFreshInstallShowsParentLedOnboardingFlow -only-testing:StoryTimeUITests/StoryTimeUITests/testOnboardingShowsPlanRestoreAndPromoEntryPoints -only-testing:StoryTimeUITests/StoryTimeUITests/testOnboardingCanCompleteAfterRestoreRefresh -only-testing:StoryTimeUITests/StoryTimeUITests/testOnboardingCanCompleteAfterPromoRedemption`, which passed `4` tests.
+  - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' -only-testing:StoryTimeUITests/StoryTimeUITests/testOnboardingCompletesIntoHomeAndStaysDismissedAfterRelaunch`, which passed.
+  - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' -only-testing:StoryTimeUITests/StoryTimeUITests/testParentControlsShowSignedOutParentAccountStatus`, which passed.
+- Decisions:
+  - Keep `storytime.first-run.completed.v1` as the onboarding completion key for now so previously onboarded installs continue to bypass onboarding intentionally.
+  - Use the deterministic `Sign in with Apple` UI-test seam for the broader onboarding commerce verification paths after the shared email/password sheet showed XCUITest timing noise in first-run automation.
+  - Treat that noisy email/password onboarding path as a remaining partial-verification note, not as a reason to reopen the first-run gate structure after the broader onboarding flow passed.
+- Risks/Notes:
+  - The exact first-run email/password onboarding happy path is still only partially verified in this pass.
+  - Live system-auth and live App Store purchase or restore behavior remain unverified outside repo automation.
+- Next: No remaining ordered milestone in `SPRINT.md`; any next step should be a newly planned workstream.
+
+### 2026-03-21 - M13.0 Authenticated commerce hardening plan and queue approval
+- Status: DONE
+- Summary: Replaced the post-Phase-12 empty queue with an explicit authenticated-commerce hardening phase. I re-inspected the current entitlement ownership, promo redemption, restore verification, onboarding hardening, and backend storage seams, then converted the repo’s standing recommendation into an approved Phase 13 queue. The new plan keeps scope inside parent identity, payments, entitlements, restore, and promo hardening, and still defers continuity sync, cross-device history, and child-facing commerce.
+- Files: `docs/authenticated-commerce-hardening-plan.md`, `PLANS.md`, `SPRINT.md`
+- Tests:
+  - No new automated tests were run for `M13.0`.
+  - Verification for this milestone is the repo-grounded planning pass captured in `docs/authenticated-commerce-hardening-plan.md`, citing the inspected code paths and existing verification artifacts.
+- Decisions:
+  - Start Phase 13 with durable authenticated entitlement and promo persistence because `backend/src/lib/entitlements.ts` still keeps that state in process-local memory.
+  - Keep restore-mismatch and device-fallback behavior as a separate follow-up milestone after durable persistence lands, so semantics are defined on top of stable account-owned state instead of a transient in-memory model.
+  - Keep live production Apple-auth and App Store verification as the third step, after the underlying durability and mismatch rules are explicit.
+- Risks/Notes:
+  - Backend entitlement ownership and promo redemption still reset on backend restart until `M13.1` lands.
+  - StoreKit-account mismatch, family-share conflict handling, and final device-local fallback copy are still only partially locked in repo terms.
+  - Live production `Sign in with Apple`, App Store purchase, and App Store restore behavior remain unverified outside deterministic repo automation.
+- Next: `M13.1 - Durable authenticated entitlement and promo persistence`
+
+### 2026-03-21 - M13.1 Durable authenticated entitlement and promo persistence
+- Status: DONE
+- Summary: Closed the backend durability gap without widening into cloud sync or client-contract churn. Authenticated parent-owned entitlement records and promo redemption ledgers now persist to disk through `ENTITLEMENTS_PERSIST_PATH`, reload when the backend boots, and preserve the existing signed entitlement envelope and iOS API shape. The targeted test pass now proves both purchased Plus ownership and one-time promo redemption survive backend recreation.
+- Files: `backend/src/app.ts`, `backend/src/lib/entitlements.ts`, `backend/src/lib/env.ts`, `backend/src/tests/app.integration.test.ts`, `backend/src/tests/entitlements.test.ts`, `backend/src/tests/testHelpers.ts`, `PLANS.md`, `SPRINT.md`
+- Tests:
+  - `npm test -- --run src/tests/entitlements.test.ts src/tests/app.integration.test.ts`, which passed `62` tests.
+  - `npm run build`, which passed.
+- Decisions:
+  - Reuse the backend’s existing small JSON persistence pattern instead of introducing a broader database or story-history sync layer.
+  - Persist only authenticated entitlement and promo-redemption state in this milestone; keep usage-ledger depletion and story-history data out of scope.
+  - Keep the iOS entitlement contract unchanged so `M13.1` remains a backend durability milestone rather than a client or backend protocol redesign.
+- Risks/Notes:
+  - Restore mismatch, family-share conflict handling, and explicit device-local fallback behavior are still open and remain the next trust-boundary milestone.
+  - The new persistence layer is repo-fit and durable across backend restart, but it is still a small local-file implementation rather than a broader production data platform.
+  - Live production `Sign in with Apple`, App Store purchase, and App Store restore behavior remain unverified outside deterministic repo automation.
+- Next: `M13.2 - Restore mismatch and device-fallback product rule`
+
+### 2026-03-21 - M13.2 Restore mismatch and device-fallback product rule
+- Status: DONE
+- Summary: Locked the current repo product rule for restore conflicts and local fallback without widening into broader account transfer logic. Restored Plus now stays claimed to the parent account that restored it on the current device or install, backend restore sync rejects different-parent transfer attempts with `restore_parent_mismatch`, and Parent Controls plus onboarding now explain that sign-out falls back to the local device state instead of moving restored access between parent accounts.
+- Files: `backend/src/lib/entitlements.ts`, `backend/src/tests/entitlements.test.ts`, `backend/src/tests/app.integration.test.ts`, `ios/StoryTime/App/UITestSeed.swift`, `ios/StoryTime/Features/Story/HomeView.swift`, `ios/StoryTime/Tests/APIClientTests.swift`, `ios/StoryTime/UITests/StoryTimeUITests.swift`, `docs/verification/restore-mismatch-device-fallback-verification.md`, `PLANS.md`, `SPRINT.md`
+- Tests:
+  - `cd /Users/rory/Documents/StoryTime/backend && npm test -- --run src/tests/entitlements.test.ts src/tests/app.integration.test.ts`, which passed.
+  - `cd /Users/rory/Documents/StoryTime/backend && npm run build`, which passed.
+  - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' -only-testing:StoryTimeTests/APIClientTests/testRestoreSyncSurfacesParentMismatchFailure`, which passed.
+  - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' -only-testing:StoryTimeUITests/StoryTimeUITests/testParentControlsShowSignedOutParentAccountStatus -only-testing:StoryTimeUITests/StoryTimeUITests/testParentControlsCanRestorePlusForSignedInParentAndClearItOnSignOut -only-testing:StoryTimeUITests/StoryTimeUITests/testParentControlsShowRestoreMismatchForDifferentParentOnSameDevice -only-testing:StoryTimeUITests/StoryTimeUITests/testOnboardingShowsPlanRestoreAndPromoEntryPoints`, which passed `4` tests.
+- Decisions:
+  - Treat same-device restored Plus as install-claimed to one parent account instead of silently transferring that ownership when a different parent signs in later.
+  - Keep the restore conflict explicit through the existing entitlement sync route and `restore_parent_mismatch` error code instead of inventing a separate restore-transfer flow.
+  - Make the signed-out fallback rule visible in Parent Controls and onboarding copy so the trust boundary is clear before and after account changes.
+- Risks/Notes:
+  - Live family-share behavior and production App Store restore mismatches remain only partially verified because repo automation cannot exercise a real App Store environment.
+  - The current rule is intentionally scoped to the same device or install; broader cross-device transfer semantics are still deferred.
+  - Live production `Sign in with Apple`, App Store purchase, and App Store restore behavior remain unverified outside deterministic repo automation.
+- Next: `M13.3 - Live authenticated-commerce verification pass`
+
+### 2026-03-21 - M13.3a Live authenticated-commerce verification prep and support rerun
+- Status: DONE
+- Summary: Split the original live verification milestone into prep and execution so the repo no longer pretends Codex can complete physical-device Apple or App Store validation by itself. This prep pass reran the deterministic backend, unit, and focused UI support slices for authenticated commerce, then added an explicit live-execution checklist with prerequisites, evidence capture expectations, and the remaining environment-only gap for the actual physical-device run.
+- Files: `docs/verification/live-authenticated-commerce-verification-prep.md`, `PLANS.md`, `SPRINT.md`
+- Tests:
+  - `cd /Users/rory/Documents/StoryTime/backend && npm test -- --run src/tests/entitlements.test.ts src/tests/app.integration.test.ts`, which passed `66` tests.
+  - `cd /Users/rory/Documents/StoryTime/backend && npm run build`, which passed.
+  - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' -only-testing:StoryTimeTests/ParentAuthManagerTests/testSignOutRestoresLastInstallOwnedEntitlementSnapshot -only-testing:StoryTimeTests/APIClientTests/testBootstrapSessionIdentityWithoutEntitlementsPreservesInstallFallback -only-testing:StoryTimeTests/APIClientTests/testRestoreSyncSurfacesParentMismatchFailure -only-testing:StoryTimeTests/APIClientTests/testRedeemPromoCodeStoresPromoGrantOwnerMetadata -only-testing:StoryTimeTests/APIClientTests/testPreflightUsesRefreshedEntitlementTokenAfterPurchaseSync`, which passed `5` tests.
+  - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' -only-testing:StoryTimeUITests/StoryTimeUITests/testParentControlsCanSignInWithAppleAndPersistAcrossRelaunch -only-testing:StoryTimeUITests/StoryTimeUITests/testParentControlsCanCompleteParentManagedPlusPurchase -only-testing:StoryTimeUITests/StoryTimeUITests/testParentControlsShowRestoreMismatchForDifferentParentOnSameDevice`, which passed `3` tests.
+  - Attempted: `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' -only-testing:StoryTimeUITests/StoryTimeUITests/testParentControlsCanRestorePlusForSignedInParentAndClearItOnSignOut`, which did not complete cleanly because the simulator runner became unstable during the UI prompt path; the earlier passing `M13.2` verification remains the authoritative repo evidence for that restore happy path.
+- Decisions:
+  - Split `M13.3` into prep and execution because the real Apple-auth and App Store validation requires a human-operated physical device and live environment access not available in this repo automation run.
+  - Keep the prep support slice focused on deterministic Apple sign-in, purchase completion, restore-mismatch handling, and backend entitlement coverage instead of pretending the simulator can stand in for the live App Store pass.
+  - Treat the isolated restore-plus-sign-out rerun failure as simulator or UI-runner instability unless a reproducible product defect appears in a later dedicated investigation.
+- Risks/Notes:
+  - Production `Sign in with Apple`, live App Store purchase, and live App Store restore remain unverified until `M13.3b`.
+  - Family-share and broader cross-device restore behavior still need live-environment evidence.
+  - The restore happy-path UI rerun remains sensitive to simulator prompt timing even though direct evidence already exists from `M13.2`.
+- Next: `M13.3b - Live authenticated-commerce execution and report`
+
+### 2026-03-21 - M13.3b Live authenticated-commerce execution and report
+- Status: BLOCKED
+- Summary: I re-checked the next execution milestone against the current repo state and the existing prep artifact. The milestone is blocked for this environment because the remaining work is a real physical-device Apple/App Store verification pass, not additional repo-only implementation. The repo already has the deterministic support rerun, exact prerequisites, and the manual step list in place, so marking the milestone `BLOCKED` is the truthful next state.
+- Files: `PLANS.md`, `SPRINT.md`
+- Tests:
+  - No new automated tests were added or run in this blocker-confirmation pass.
+  - Existing support evidence remains in `docs/verification/live-authenticated-commerce-verification-prep.md`.
+- Decisions:
+  - Do not fabricate or simulate a live Apple or App Store verification result from simulator-only automation.
+  - Keep `M13.3b` as the next milestone, but mark it `BLOCKED` until the external prerequisites are available.
+  - Avoid creating more repo-only sub-milestones here because the blocker is environmental rather than a missing preparation step inside the repo.
+- Risks/Notes:
+  - Production `Sign in with Apple`, live App Store purchase, and live App Store restore remain unverified.
+  - Family-share and broader cross-device restore behavior remain only partially verified until the live pass can be executed.
+  - The blocker is external access, not a newly discovered product or code defect in the repo.
+- Next: `M13.3b - Live authenticated-commerce execution and report` once physical-device and live-environment access are available
+
+### 2026-03-21 - M13.3b blocker reconfirmation
+- Status: BLOCKED
+- Summary: Reconfirmed that the live authenticated-commerce execution milestone is still blocked in the current environment. The repo-side prep is complete, and there is now a visible physical iPhone, but it is not yet paired or ready for live developer execution, so the real Apple-auth and App Store pass still cannot proceed.
+- Files: `docs/verification/live-authenticated-commerce-verification-prep.md`, `PLANS.md`, `SPRINT.md`
+- Tests:
+  - No automated tests were run.
+  - Environment checks:
+    - `xcrun xctrace list devices`
+    - `xcrun devicectl list devices`
+    - `xcrun devicectl list devices --verbose`
+- Decisions:
+  - Keep `M13.3b` blocked until physical-device and live-environment access are actually available.
+  - Record concrete blocker evidence instead of leaving the blocked state as an unverified assumption.
+- Risks/Notes:
+  - `xcrun devicectl list devices` now shows one physical iPhone, but `xcrun devicectl list devices --verbose` reports `pairingState: unpaired` and `tunnelState: disconnected`.
+  - The blocker is now narrower: device presence exists, but pairing, live execution readiness, and Apple/App Store credentialed interaction are still missing.
+  - Production `Sign in with Apple`, live App Store purchase, and live App Store restore remain unverified.
+- Next: `M13.3b - Live authenticated-commerce execution and report` once a physical device and live-environment access are available
+
+### 2026-03-21 - M13.3b blocker refinement
+- Status: BLOCKED
+- Summary: Refined the blocked-state evidence after a new environment check. A physical iPhone is now visible to CoreDevice, so the blocker is no longer "no device." The remaining blocker is that the device is unpaired and disconnected for developer execution, and the live Apple/App Store credentials plus human-operated verification pass are still unavailable.
+- Files: `docs/verification/live-authenticated-commerce-verification-prep.md`, `PLANS.md`, `SPRINT.md`
+- Tests:
+  - No automated tests were run.
+  - Environment checks:
+    - `xcrun xctrace list devices`
+    - `xcrun devicectl list devices`
+    - `xcrun devicectl list devices --verbose`
+- Decisions:
+  - Keep `M13.3b` blocked, but narrow the documented blocker from "no device" to "device present but not paired or execution-ready."
+  - Preserve the existing live-pass checklist because it is still the right next action once the pairing and credential prerequisites are cleared.
+- Risks/Notes:
+  - The visible device reports `pairingState: unpaired` and `tunnelState: disconnected`.
+  - Production `Sign in with Apple`, live App Store purchase, and live App Store restore remain unverified.
+  - Family-share and broader cross-device restore behavior remain only partially verified until the live pass can run.
+- Next: `M13.3b - Live authenticated-commerce execution and report` once device pairing, live build access, and Apple/App Store credentials are available

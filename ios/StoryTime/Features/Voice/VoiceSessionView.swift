@@ -30,6 +30,10 @@ private final class UITestSessionAPIClient: APIClienting {
         try await base.syncEntitlements(request: body)
     }
 
+    func redeemPromoCode(request body: PromoCodeRedemptionRequest) async throws -> EntitlementBootstrapEnvelope {
+        try await base.redeemPromoCode(request: body)
+    }
+
     func preflightEntitlements(request body: EntitlementPreflightRequest) async throws -> EntitlementPreflightResponse {
         try await base.preflightEntitlements(request: body)
     }
