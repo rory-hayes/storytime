@@ -14,6 +14,11 @@ import {
   issueSyncedEntitlements,
 } from "./lib/entitlements.js";
 import {
+  FirebaseParentIdentityVerifier,
+  resolveOptionalParentIdentity,
+  type ParentIdentityVerifier
+} from "./lib/parentIdentity.js";
+import {
   attachRequestContext,
   getRequestContext,
   resolveRequestId,
@@ -65,9 +70,10 @@ export function buildDefaultServices(env: Env): AppServices {
   };
 }
 
-export function createApp(opts?: { env?: Env; services?: AppServices }) {
+export function createApp(opts?: { env?: Env; services?: AppServices; parentIdentityVerifier?: ParentIdentityVerifier }) {
   const env = opts?.env ?? loadEnv();
   const services = opts?.services ?? buildDefaultServices(env);
+  const parentIdentityVerifier = opts?.parentIdentityVerifier ?? new FirebaseParentIdentityVerifier();
   const limiters = createRateLimiters(env);
   analytics.configurePersistence(
     env.ENABLE_USAGE_METERING || env.ENABLE_STRUCTURED_ANALYTICS ? env.ANALYTICS_PERSIST_PATH : undefined
@@ -109,13 +115,16 @@ export function createApp(opts?: { env?: Env; services?: AppServices }) {
       return next();
     }
 
-    try {
+    void (async () => {
       const region = resolveRequestedRegion(req, env);
       const identity = resolveSessionIdentityWithOptions(req, env, region, {
         allowProvisional: req.path === "/v1/session/identity"
       });
       const client = req.header("x-storytime-client")?.trim().slice(0, 80) || "unknown";
       const requestId = res.getHeader("x-request-id")?.toString() ?? resolveRequestId(req);
+      const parentIdentity = isAccountOwnedRoute(req)
+        ? await resolveOptionalParentIdentity(req, env, parentIdentityVerifier)
+        : null;
       const context: RequestContext = {
         requestId,
         startedAt: Date.now(),
@@ -126,6 +135,7 @@ export function createApp(opts?: { env?: Env; services?: AppServices }) {
         installHash: identity.installHash,
         sessionId: identity.sessionId,
         authLevel: identity.authLevel,
+        parentIdentity,
         client,
         logger: logger.child({
           request_id: requestId,
@@ -133,7 +143,8 @@ export function createApp(opts?: { env?: Env; services?: AppServices }) {
           region,
           install_hash: identity.installHash,
           session_id: identity.sessionId,
-          auth_level: identity.authLevel
+          auth_level: identity.authLevel,
+          parent_auth_state: parentIdentity ? "authenticated_parent" : "install_only"
         })
       };
 
@@ -158,9 +169,7 @@ export function createApp(opts?: { env?: Env; services?: AppServices }) {
       }
 
       next();
-    } catch (error) {
-      next(error);
-    }
+    })().catch(next);
   });
 
   app.get("/health", (_req, res) => {
@@ -436,6 +445,10 @@ function createRateLimiters(env: Env): RouteLimiters {
       "Embeddings rate limit exceeded"
     )
   };
+}
+
+function isAccountOwnedRoute(req: Request): boolean {
+  return req.path === "/v1/session/identity" || req.path.startsWith("/v1/entitlements/");
 }
 
 function requiresIdentity(req: Request) {

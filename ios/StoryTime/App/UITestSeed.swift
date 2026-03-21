@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FirebaseAuth)
+import FirebaseAuth
+#endif
 
 enum UITestSeed {
     static func prepareIfNeeded() {
@@ -7,6 +10,10 @@ enum UITestSeed {
         let shouldReset = shouldSeed || environment["STORYTIME_UI_TEST_RESET"] == "1"
         guard shouldReset else { return }
 
+#if canImport(FirebaseAuth)
+        try? Auth.auth().signOut()
+#endif
+
         let defaults = UserDefaults.standard
         let keys = [
             "storytime.series.library.v1",
@@ -14,6 +21,7 @@ enum UITestSeed {
             "storytime.active.child.profile.v1",
             "storytime.parent.privacy.v1",
             "storytime.continuity.memory.v1",
+            "storytime.ui-test.parent-auth.state.v1",
             FirstRunExperienceStore.onboardingCompletedKey,
             "com.storytime.install-id",
             "com.storytime.entitlements.bootstrap.v1",
@@ -214,6 +222,41 @@ enum UITestSeed {
         return UITestParentManagedPurchaseProvider(environment: environment)
     }
 
+    static func parentAuthProviderIfNeeded() -> (any ParentAuthProviding)? {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["STORYTIME_UI_TEST_MODE"] == "1" else {
+            return nil
+        }
+
+        return UITestParentAuthProvider(userDefaults: .standard)
+    }
+
+    static func refreshedEntitlementEnvelopeIfNeeded() -> EntitlementBootstrapEnvelope? {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["STORYTIME_UI_TEST_MODE"] == "1" else {
+            return nil
+        }
+
+        guard let rawTier = environment["STORYTIME_UI_TEST_REFRESH_ENTITLEMENT_TIER"]?.lowercased() else {
+            return nil
+        }
+
+        return commerceEnvelopeIfNeeded(rawTier: rawTier, environment: environment)
+    }
+
+    static func restoredEntitlementEnvelopeIfNeeded() -> EntitlementBootstrapEnvelope? {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["STORYTIME_UI_TEST_MODE"] == "1" else {
+            return nil
+        }
+
+        guard let rawTier = environment["STORYTIME_UI_TEST_RESTORE_ENTITLEMENT_TIER"]?.lowercased() else {
+            return nil
+        }
+
+        return commerceEnvelopeIfNeeded(rawTier: rawTier, environment: environment)
+    }
+
     private static func defaultPreflightResponse(
         for request: EntitlementPreflightRequest,
         snapshot: EntitlementSnapshot
@@ -304,7 +347,11 @@ enum UITestSeed {
         )
     }
 
-    fileprivate static func seededEntitlementEnvelope(childProfileCount: Int, environment: [String: String]) -> EntitlementBootstrapEnvelope {
+    fileprivate static func seededEntitlementEnvelope(
+        childProfileCount: Int,
+        environment: [String: String],
+        owner: EntitlementOwner? = nil
+    ) -> EntitlementBootstrapEnvelope {
         let now = Date()
         let tier = seededTier(environment: environment)
         let snapshot = EntitlementSnapshot(
@@ -337,7 +384,8 @@ enum UITestSeed {
         return EntitlementBootstrapEnvelope(
             snapshot: snapshot,
             token: "ui-seeded-entitlement-token",
-            expiresAt: now.addingTimeInterval(600).timeIntervalSince1970
+            expiresAt: now.addingTimeInterval(600).timeIntervalSince1970,
+            owner: owner
         )
     }
 
@@ -401,6 +449,46 @@ enum UITestSeed {
 
         return value
     }
+
+    private static func commerceEnvelopeIfNeeded(
+        rawTier: String,
+        environment: [String: String]
+    ) -> EntitlementBootstrapEnvelope? {
+        guard rawTier == "plus" || rawTier == "starter" else {
+            return nil
+        }
+
+        var resolvedEnvironment = environment
+        resolvedEnvironment["STORYTIME_UI_TEST_ENTITLEMENT_TIER"] = rawTier
+        let owner = resolvedParentOwner()
+        return seededEntitlementEnvelope(
+            childProfileCount: seededChildProfileCount(),
+            environment: resolvedEnvironment,
+            owner: owner
+        )
+    }
+
+    fileprivate static func seededChildProfileCount() -> Int {
+        let defaults = UserDefaults.standard
+        guard let data = defaults.data(forKey: "storytime.child.profiles.v1"),
+              let profiles = try? JSONDecoder().decode([ChildProfile].self, from: data) else {
+            return 1
+        }
+
+        return max(profiles.count, 1)
+    }
+
+    fileprivate static func resolvedParentOwner() -> EntitlementOwner? {
+        guard let currentUser = parentAuthProviderIfNeeded()?.currentUser else {
+            return nil
+        }
+
+        return EntitlementOwner(
+            kind: .parentUser,
+            parentUserID: currentUser.uid,
+            authProvider: .firebase
+        )
+    }
 }
 
 private struct UITestParentManagedPurchaseProvider: ParentManagedPurchaseProviding {
@@ -428,21 +516,145 @@ private struct UITestParentManagedPurchaseProvider: ParentManagedPurchaseProvidi
             var plusEnvironment = environment
             plusEnvironment["STORYTIME_UI_TEST_ENTITLEMENT_TIER"] = "plus"
             let envelope = UITestSeed.seededEntitlementEnvelope(
-                childProfileCount: seededChildProfileCount(),
-                environment: plusEnvironment
+                childProfileCount: UITestSeed.seededChildProfileCount(),
+                environment: plusEnvironment,
+                owner: UITestSeed.resolvedParentOwner()
             )
             AppEntitlements.store(envelope: envelope)
             return .purchased(syncRequest: nil)
         }
     }
+}
 
-    private func seededChildProfileCount() -> Int {
-        let defaults = UserDefaults.standard
-        guard let data = defaults.data(forKey: "storytime.child.profiles.v1"),
-              let profiles = try? JSONDecoder().decode([ChildProfile].self, from: data) else {
-            return 1
+private final class UITestParentAuthProvider: ParentAuthProviding {
+    private struct StoredState: Codable {
+        var currentUser: ParentAuthUser?
+        var passwordsByEmail: [String: String]
+        var appleUser: ParentAuthUser?
+    }
+
+    private static let stateKey = "storytime.ui-test.parent-auth.state.v1"
+
+    private let userDefaults: UserDefaults
+    private var observers: [UUID: @MainActor (ParentAuthUser?) -> Void] = [:]
+
+    init(userDefaults: UserDefaults) {
+        self.userDefaults = userDefaults
+    }
+
+    var currentUser: ParentAuthUser? {
+        loadState().currentUser
+    }
+
+    @discardableResult
+    func addAuthStateObserver(_ observer: @escaping @MainActor (ParentAuthUser?) -> Void) -> UUID {
+        let id = UUID()
+        observers[id] = observer
+        return id
+    }
+
+    func removeAuthStateObserver(id: UUID) {
+        observers.removeValue(forKey: id)
+    }
+
+    func createUser(email: String, password: String) async throws -> ParentAuthUser {
+        let normalizedEmail = normalize(email)
+        guard normalizedEmail.contains("@"), normalizedEmail.contains(".") else {
+            throw ParentAuthProviderError.invalidEmail
+        }
+        guard password.count >= 6 else {
+            throw ParentAuthProviderError.weakPassword
         }
 
-        return max(profiles.count, 1)
+        var state = loadState()
+        guard state.passwordsByEmail[normalizedEmail] == nil else {
+            throw ParentAuthProviderError.emailAlreadyInUse
+        }
+
+        let user = ParentAuthUser(
+            uid: "ui-test-parent-\(UUID().uuidString.lowercased())",
+            email: normalizedEmail,
+            isAnonymous: false,
+            signInMethod: .emailPassword
+        )
+        state.passwordsByEmail[normalizedEmail] = password
+        state.currentUser = user
+        saveState(state)
+        notifyObservers(with: user)
+        return user
+    }
+
+    func signIn(email: String, password: String) async throws -> ParentAuthUser {
+        let normalizedEmail = normalize(email)
+        var state = loadState()
+        guard let storedPassword = state.passwordsByEmail[normalizedEmail], storedPassword == password else {
+            throw ParentAuthProviderError.invalidCredentials
+        }
+
+        let user = ParentAuthUser(
+            uid: state.currentUser?.email == normalizedEmail ? (state.currentUser?.uid ?? "") : "",
+            email: normalizedEmail,
+            isAnonymous: false,
+            signInMethod: .emailPassword
+        )
+        let resolvedUser = ParentAuthUser(
+            uid: user.uid.isEmpty ? "ui-test-parent-\(UUID().uuidString.lowercased())" : user.uid,
+            email: normalizedEmail,
+            isAnonymous: false,
+            signInMethod: .emailPassword
+        )
+        state.currentUser = resolvedUser
+        saveState(state)
+        notifyObservers(with: resolvedUser)
+        return resolvedUser
+    }
+
+    func signInWithApple() async throws -> ParentAuthUser {
+        var state = loadState()
+        let appleUser = state.appleUser ?? ParentAuthUser(
+            uid: "ui-test-apple-parent",
+            email: nil,
+            isAnonymous: false,
+            signInMethod: .apple
+        )
+
+        state.appleUser = appleUser
+        state.currentUser = appleUser
+        saveState(state)
+        notifyObservers(with: appleUser)
+        return appleUser
+    }
+
+    func signOut() throws {
+        var state = loadState()
+        state.currentUser = nil
+        saveState(state)
+        notifyObservers(with: nil)
+    }
+
+    private func loadState() -> StoredState {
+        guard let data = userDefaults.data(forKey: Self.stateKey),
+              let state = try? JSONDecoder().decode(StoredState.self, from: data) else {
+            return StoredState(currentUser: nil, passwordsByEmail: [:], appleUser: nil)
+        }
+
+        return state
+    }
+
+    private func saveState(_ state: StoredState) {
+        guard let data = try? JSONEncoder().encode(state) else { return }
+        userDefaults.set(data, forKey: Self.stateKey)
+    }
+
+    private func notifyObservers(with user: ParentAuthUser?) {
+        for observer in observers.values {
+            Task { @MainActor in
+                observer(user)
+            }
+        }
+    }
+
+    private func normalize(_ email: String) -> String {
+        email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 }

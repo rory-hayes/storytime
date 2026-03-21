@@ -7,6 +7,7 @@ import { createApp, type AppServices } from "../app.js";
 import { analytics } from "../lib/analytics.js";
 import { AppError } from "../lib/errors.js";
 import { resetEntitlementUsageLedger } from "../lib/entitlements.js";
+import type { ParentIdentityVerifier } from "../lib/parentIdentity.js";
 import { createEntitlementToken } from "../lib/security.js";
 import { makeTestEnv } from "./testHelpers.js";
 
@@ -77,6 +78,26 @@ function mockServices(): AppServices {
   };
 }
 
+class StubParentIdentityVerifier implements ParentIdentityVerifier {
+  async verifyParentToken(token: string) {
+    if (token === "parent-token-alpha") {
+      return {
+        uid: "parent-alpha",
+        provider: "firebase" as const
+      };
+    }
+
+    if (token === "parent-token-beta") {
+      return {
+        uid: "parent-beta",
+        provider: "firebase" as const
+      };
+    }
+
+    throw new AppError("Invalid parent account token", 401, "invalid_parent_auth");
+  }
+}
+
 describe("v1 API", () => {
   beforeEach(() => {
     analytics.reset();
@@ -140,6 +161,54 @@ describe("v1 API", () => {
   });
 
   it("refreshes entitlements from normalized purchase state", async () => {
+    const app = createApp({
+      env: makeTestEnv({ FIREBASE_PROJECT_ID: "storytime-test" }),
+      services: mockServices(),
+      parentIdentityVerifier: new StubParentIdentityVerifier()
+    });
+    const bootstrap = await request(app)
+      .post("/v1/session/identity")
+      .set("x-storytime-install-id", "install-123")
+      .set("x-storytime-parent-auth", "parent-token-alpha")
+      .send({});
+
+    const response = await request(app)
+      .post("/v1/entitlements/sync")
+      .set("x-storytime-install-id", "install-123")
+      .set("x-storytime-session", bootstrap.headers["x-storytime-session"])
+      .set("x-storytime-parent-auth", "parent-token-alpha")
+      .send({
+        refresh_reason: "purchase",
+        active_product_ids: [],
+        transactions: [
+          {
+            product_id: "storytime.plus.monthly",
+            original_transaction_id: "original-1",
+            latest_transaction_id: "latest-1",
+            purchased_at: Math.floor(Date.now() / 1000) - 120,
+            expires_at: Math.floor(Date.now() / 1000) + 3_600,
+            revoked_at: null,
+            ownership_type: "purchased",
+            environment: "sandbox",
+            verification_state: "verified",
+            is_active: true
+          }
+        ]
+      });
+
+    expect(response.status).toBe(200);
+    expect(response.body.entitlements.snapshot.tier).toBe("plus");
+    expect(response.body.entitlements.snapshot.source).toBe("storekit_verified");
+    expect(response.body.entitlements.snapshot.max_child_profiles).toBe(3);
+    expect(response.body.entitlements.token).toBeTruthy();
+    expect(response.body.entitlements.owner).toEqual({
+      kind: "parent_user",
+      parent_user_id: "parent-alpha",
+      auth_provider: "firebase"
+    });
+  });
+
+  it("rejects purchase sync without an authenticated parent account", async () => {
     const app = createApp({ env: makeTestEnv(), services: mockServices() });
     const bootstrap = await request(app)
       .post("/v1/session/identity")
@@ -169,18 +238,248 @@ describe("v1 API", () => {
         ]
       });
 
+    expect(response.status).toBe(401);
+    expect(response.body.error).toBe("parent_auth_required");
+    expect(response.body.message).toBe("Sign in to a parent account before purchasing Plus.");
+  });
+
+  it("restores entitlements to the signed-in parent account", async () => {
+    const app = createApp({
+      env: makeTestEnv({ FIREBASE_PROJECT_ID: "storytime-test" }),
+      services: mockServices(),
+      parentIdentityVerifier: new StubParentIdentityVerifier()
+    });
+    const bootstrap = await request(app)
+      .post("/v1/session/identity")
+      .set("x-storytime-install-id", "install-restore-123")
+      .set("x-storytime-parent-auth", "parent-token-alpha")
+      .send({});
+
+    const response = await request(app)
+      .post("/v1/entitlements/sync")
+      .set("x-storytime-install-id", "install-restore-123")
+      .set("x-storytime-session", bootstrap.headers["x-storytime-session"])
+      .set("x-storytime-parent-auth", "parent-token-alpha")
+      .send({
+        refresh_reason: "restore",
+        active_product_ids: [],
+        transactions: [
+          {
+            product_id: "storytime.plus.yearly",
+            original_transaction_id: "restore-original-1",
+            latest_transaction_id: "restore-latest-1",
+            purchased_at: Math.floor(Date.now() / 1000) - 120,
+            expires_at: Math.floor(Date.now() / 1000) + 3_600,
+            revoked_at: null,
+            ownership_type: "family_shared",
+            environment: "sandbox",
+            verification_state: "verified",
+            is_active: true
+          }
+        ]
+      });
+
     expect(response.status).toBe(200);
     expect(response.body.entitlements.snapshot.tier).toBe("plus");
     expect(response.body.entitlements.snapshot.source).toBe("storekit_verified");
-    expect(response.body.entitlements.snapshot.max_child_profiles).toBe(3);
-    expect(response.body.entitlements.token).toBeTruthy();
+    expect(response.body.entitlements.owner).toEqual({
+      kind: "parent_user",
+      parent_user_id: "parent-alpha",
+      auth_provider: "firebase"
+    });
   });
 
-  it("allows blocked new-story preflight after purchase refresh updates the entitlement token", async () => {
+  it("rejects restore sync without an authenticated parent account", async () => {
     const app = createApp({ env: makeTestEnv(), services: mockServices() });
     const bootstrap = await request(app)
       .post("/v1/session/identity")
+      .set("x-storytime-install-id", "install-restore-123")
+      .send({});
+
+    const response = await request(app)
+      .post("/v1/entitlements/sync")
+      .set("x-storytime-install-id", "install-restore-123")
+      .set("x-storytime-session", bootstrap.headers["x-storytime-session"])
+      .send({
+        refresh_reason: "restore",
+        active_product_ids: [],
+        transactions: [
+          {
+            product_id: "storytime.plus.yearly",
+            original_transaction_id: "restore-original-1",
+            latest_transaction_id: "restore-latest-1",
+            purchased_at: Math.floor(Date.now() / 1000) - 120,
+            expires_at: Math.floor(Date.now() / 1000) + 3_600,
+            revoked_at: null,
+            ownership_type: "family_shared",
+            environment: "sandbox",
+            verification_state: "verified",
+            is_active: true
+          }
+        ]
+      });
+
+    expect(response.status).toBe(401);
+    expect(response.body.error).toBe("parent_auth_required");
+    expect(response.body.message).toBe("Sign in to a parent account before restoring Plus.");
+  });
+
+  it("persists authenticated parent-owned entitlements across installs for the same parent account", async () => {
+    const app = createApp({
+      env: makeTestEnv({ FIREBASE_PROJECT_ID: "storytime-test" }),
+      services: mockServices(),
+      parentIdentityVerifier: new StubParentIdentityVerifier()
+    });
+
+    const firstInstallBootstrap = await request(app)
+      .post("/v1/session/identity")
       .set("x-storytime-install-id", "install-123")
+      .set("x-storytime-parent-auth", "parent-token-alpha")
+      .send({});
+
+    const refreshed = await request(app)
+      .post("/v1/entitlements/sync")
+      .set("x-storytime-install-id", "install-123")
+      .set("x-storytime-session", firstInstallBootstrap.headers["x-storytime-session"])
+      .set("x-storytime-parent-auth", "parent-token-alpha")
+      .send({
+        refresh_reason: "purchase",
+        active_product_ids: [],
+        transactions: [
+          {
+            product_id: "storytime.plus.monthly",
+            original_transaction_id: "original-1",
+            latest_transaction_id: "latest-1",
+            purchased_at: Math.floor(Date.now() / 1000) - 120,
+            expires_at: Math.floor(Date.now() / 1000) + 3_600,
+            revoked_at: null,
+            ownership_type: "purchased",
+            environment: "sandbox",
+            verification_state: "verified",
+            is_active: true
+          }
+        ]
+      });
+
+    const secondInstallBootstrap = await request(app)
+      .post("/v1/session/identity")
+      .set("x-storytime-install-id", "install-456")
+      .set("x-storytime-parent-auth", "parent-token-alpha")
+      .send({});
+
+    expect(firstInstallBootstrap.status).toBe(200);
+    expect(firstInstallBootstrap.body.entitlements.owner).toEqual({
+      kind: "parent_user",
+      parent_user_id: "parent-alpha",
+      auth_provider: "firebase"
+    });
+
+    expect(refreshed.status).toBe(200);
+    expect(refreshed.body.entitlements.snapshot.tier).toBe("plus");
+    expect(refreshed.body.entitlements.owner).toEqual({
+      kind: "parent_user",
+      parent_user_id: "parent-alpha",
+      auth_provider: "firebase"
+    });
+
+    expect(secondInstallBootstrap.status).toBe(200);
+    expect(secondInstallBootstrap.body.entitlements.snapshot.tier).toBe("plus");
+    expect(secondInstallBootstrap.body.entitlements.owner).toEqual({
+      kind: "parent_user",
+      parent_user_id: "parent-alpha",
+      auth_provider: "firebase"
+    });
+  });
+
+  it("rejects invalid parent auth tokens on account-owned entitlement routes", async () => {
+    const app = createApp({
+      env: makeTestEnv({ FIREBASE_PROJECT_ID: "storytime-test" }),
+      services: mockServices(),
+      parentIdentityVerifier: new StubParentIdentityVerifier()
+    });
+
+    const response = await request(app)
+      .post("/v1/session/identity")
+      .set("x-storytime-install-id", "install-123")
+      .set("x-storytime-parent-auth", "invalid-parent-token")
+      .send({});
+
+    expect(response.status).toBe(401);
+    expect(response.body.error).toBe("invalid_parent_auth");
+  });
+
+  it("ignores stale install-owned entitlement tokens once a parent account is authenticated", async () => {
+    const app = createApp({
+      env: makeTestEnv({ FIREBASE_PROJECT_ID: "storytime-test" }),
+      services: mockServices(),
+      parentIdentityVerifier: new StubParentIdentityVerifier()
+    });
+
+    const installOnlyBootstrap = await request(app)
+      .post("/v1/session/identity")
+      .set("x-storytime-install-id", "install-123")
+      .send({});
+
+    const refreshed = await request(app)
+      .post("/v1/entitlements/sync")
+      .set("x-storytime-install-id", "install-123")
+      .set("x-storytime-session", installOnlyBootstrap.headers["x-storytime-session"])
+      .set("x-storytime-parent-auth", "parent-token-alpha")
+      .send({
+        refresh_reason: "purchase",
+        active_product_ids: [],
+        transactions: [
+          {
+            product_id: "storytime.plus.monthly",
+            original_transaction_id: "original-1",
+            latest_transaction_id: "latest-1",
+            purchased_at: Math.floor(Date.now() / 1000) - 120,
+            expires_at: Math.floor(Date.now() / 1000) + 3_600,
+            revoked_at: null,
+            ownership_type: "purchased",
+            environment: "sandbox",
+            verification_state: "verified",
+            is_active: true
+          }
+        ]
+      });
+
+    const allowed = await request(app)
+      .post("/v1/entitlements/preflight")
+      .set("x-storytime-install-id", "install-123")
+      .set("x-storytime-session", installOnlyBootstrap.headers["x-storytime-session"])
+      .set("x-storytime-entitlement", installOnlyBootstrap.body.entitlements.token)
+      .set("x-storytime-parent-auth", "parent-token-alpha")
+      .send({
+        action: "new_story",
+        child_profile_id: "fbeafe23-42d5-4ea7-8035-5680419504e9",
+        child_profile_count: 2,
+        requested_length_minutes: 4
+      });
+
+    expect(refreshed.status).toBe(200);
+    expect(refreshed.body.entitlements.snapshot.tier).toBe("plus");
+
+    expect(allowed.status).toBe(200);
+    expect(allowed.body.allowed).toBe(true);
+    expect(allowed.body.snapshot.tier).toBe("plus");
+    expect(allowed.body.entitlements.owner).toEqual({
+      kind: "parent_user",
+      parent_user_id: "parent-alpha",
+      auth_provider: "firebase"
+    });
+  });
+
+  it("allows blocked new-story preflight after purchase refresh updates the entitlement token", async () => {
+    const app = createApp({
+      env: makeTestEnv({ FIREBASE_PROJECT_ID: "storytime-test" }),
+      services: mockServices(),
+      parentIdentityVerifier: new StubParentIdentityVerifier()
+    });
+    const bootstrap = await request(app)
+      .post("/v1/session/identity")
+      .set("x-storytime-install-id", "install-123")
+      .set("x-storytime-parent-auth", "parent-token-alpha")
       .send({});
 
     const blocked = await request(app)
@@ -199,6 +498,7 @@ describe("v1 API", () => {
       .post("/v1/entitlements/sync")
       .set("x-storytime-install-id", "install-123")
       .set("x-storytime-session", bootstrap.headers["x-storytime-session"])
+      .set("x-storytime-parent-auth", "parent-token-alpha")
       .send({
         refresh_reason: "purchase",
         active_product_ids: [],
@@ -223,6 +523,7 @@ describe("v1 API", () => {
       .set("x-storytime-install-id", "install-123")
       .set("x-storytime-session", bootstrap.headers["x-storytime-session"])
       .set("x-storytime-entitlement", refreshed.body.entitlements.token)
+      .set("x-storytime-parent-auth", "parent-token-alpha")
       .send({
         action: "new_story",
         child_profile_id: "fbeafe23-42d5-4ea7-8035-5680419504e9",
@@ -318,6 +619,9 @@ describe("v1 API", () => {
     const entitlement = createEntitlementToken(
       {
         install_id: "install-123",
+        owner: {
+          kind: "install"
+        },
         snapshot: {
           tier: "starter",
           source: "none",

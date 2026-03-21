@@ -24,6 +24,15 @@ type SessionTokenPayload = {
 
 export type EntitlementTier = "starter" | "plus";
 export type EntitlementSource = "none" | "storekit_verified" | "debug_seed";
+export type EntitlementOwner =
+  | {
+      kind: "install";
+    }
+  | {
+      kind: "parent_user";
+      parent_user_id: string;
+      auth_provider: "firebase";
+    };
 export type EntitlementUsageWindow = {
   kind: "rolling_period";
   duration_seconds: number | null;
@@ -50,6 +59,7 @@ export type EntitlementSnapshot = {
 type EntitlementTokenPayload = {
   aud: "storytime.entitlement";
   install_id: string;
+  owner: EntitlementOwner;
   snapshot: EntitlementSnapshot;
   exp: number;
   iat: number;
@@ -177,6 +187,7 @@ export function verifySessionToken(token: string, installId: string, env: Env): 
 export function createEntitlementToken(
   payload: {
     install_id: string;
+    owner: EntitlementOwner;
     snapshot: Omit<EntitlementSnapshot, "effective_at" | "expires_at">;
   },
   env: Env
@@ -191,6 +202,7 @@ export function createEntitlementToken(
   const fullPayload: EntitlementTokenPayload = {
     aud: "storytime.entitlement",
     install_id: payload.install_id,
+    owner: payload.owner,
     snapshot,
     exp: expiresAt,
     iat: issuedAt,

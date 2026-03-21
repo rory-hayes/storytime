@@ -1,5 +1,8 @@
 import Combine
 import Foundation
+#if canImport(FirebaseAuth)
+import FirebaseAuth
+#endif
 #if canImport(StoreKit)
 import StoreKit
 #endif
@@ -100,11 +103,56 @@ struct EntitlementBootstrapEnvelope: Codable, Equatable {
     let snapshot: EntitlementSnapshot
     let token: String
     let expiresAt: TimeInterval
+    let owner: EntitlementOwner?
+
+    init(
+        snapshot: EntitlementSnapshot,
+        token: String,
+        expiresAt: TimeInterval,
+        owner: EntitlementOwner? = nil
+    ) {
+        self.snapshot = snapshot
+        self.token = token
+        self.expiresAt = expiresAt
+        self.owner = owner
+    }
 
     private enum CodingKeys: String, CodingKey {
         case snapshot
         case token
         case expiresAt = "expires_at"
+        case owner
+    }
+}
+
+enum EntitlementOwnerKind: String, Codable, Equatable {
+    case install
+    case parentUser = "parent_user"
+}
+
+enum EntitlementOwnerAuthProvider: String, Codable, Equatable {
+    case firebase
+}
+
+struct EntitlementOwner: Codable, Equatable {
+    let kind: EntitlementOwnerKind
+    let parentUserID: String?
+    let authProvider: EntitlementOwnerAuthProvider?
+
+    init(
+        kind: EntitlementOwnerKind,
+        parentUserID: String? = nil,
+        authProvider: EntitlementOwnerAuthProvider? = nil
+    ) {
+        self.kind = kind
+        self.parentUserID = parentUserID
+        self.authProvider = authProvider
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case kind
+        case parentUserID = "parent_user_id"
+        case authProvider = "auth_provider"
     }
 }
 
@@ -384,6 +432,7 @@ enum ParentManagedPurchaseOutcome: Equatable {
 enum ParentManagedPurchaseError: Error, Equatable {
     case unavailable
     case verificationFailed
+    case parentAccountRequired
 }
 
 protocol ParentManagedPurchaseProviding {
@@ -1046,6 +1095,28 @@ protocol APIClienting: AnyObject {
     func createEmbeddings(inputs: [String]) async throws -> [[Double]]
 }
 
+protocol ParentAuthTokenProviding {
+    func currentParentAuthToken() async -> String?
+}
+
+struct FirebaseParentAuthTokenProvider: ParentAuthTokenProviding {
+    func currentParentAuthToken() async -> String? {
+        #if canImport(FirebaseAuth)
+        guard let user = Auth.auth().currentUser else {
+            return nil
+        }
+
+        return await withCheckedContinuation { continuation in
+            user.getIDToken { token, _ in
+                continuation.resume(returning: token)
+            }
+        }
+        #else
+        return nil
+        #endif
+    }
+}
+
 final class APIClient: APIClienting {
     var traceHandler: ((APIClientTraceEvent) -> Void)?
     var resolvedRegion: StoryTimeRegion? { AppSession.currentRegion }
@@ -1053,16 +1124,19 @@ final class APIClient: APIClienting {
     private let session: URLSession
     private let candidateBaseURLs: [URL]
     private let installId: String
+    private let parentAuthTokenProvider: ParentAuthTokenProviding
     private var activeBaseURL: URL?
 
     init(
         baseURLs: [URL] = AppConfig.candidateAPIBaseURLs,
         session: URLSession = .shared,
-        installId: String = AppInstall.identity
+        installId: String = AppInstall.identity,
+        parentAuthTokenProvider: ParentAuthTokenProviding = FirebaseParentAuthTokenProvider()
     ) {
         self.candidateBaseURLs = baseURLs
         self.session = session
         self.installId = installId
+        self.parentAuthTokenProvider = parentAuthTokenProvider
     }
 
     func prepareConnection() async throws -> URL {
@@ -1112,6 +1186,7 @@ final class APIClient: APIClienting {
                 request.httpBody = try JSONEncoder().encode(body)
                 request.timeoutInterval = 20
                 self.applyInstallHeaders(to: &request)
+                await self.applyParentAuthHeaderIfAvailable(to: &request)
 
                 do {
                     let (data, response) = try await self.perform(request, operation: .entitlementSync)
@@ -1146,6 +1221,7 @@ final class APIClient: APIClienting {
                 request.timeoutInterval = 20
                 self.applyInstallHeaders(to: &request)
                 self.applyEntitlementHeader(to: &request)
+                await self.applyParentAuthHeaderIfAvailable(to: &request)
 
                 do {
                     let (data, response) = try await self.perform(request, operation: .entitlementPreflight)
@@ -1407,6 +1483,7 @@ final class APIClient: APIClienting {
         request.httpMethod = "POST"
         request.timeoutInterval = 12
         applyInstallHeaders(to: &request)
+        await applyParentAuthHeaderIfAvailable(to: &request)
 
         do {
             let (data, response) = try await perform(request, operation: .sessionBootstrap)
@@ -1553,6 +1630,12 @@ final class APIClient: APIClienting {
     private func applyEntitlementHeader(to request: inout URLRequest) {
         if let entitlementToken = AppEntitlements.currentToken {
             request.setValue(entitlementToken, forHTTPHeaderField: "x-storytime-entitlement")
+        }
+    }
+
+    private func applyParentAuthHeaderIfAvailable(to request: inout URLRequest) async {
+        if let parentAuthToken = await parentAuthTokenProvider.currentParentAuthToken() {
+            request.setValue(parentAuthToken, forHTTPHeaderField: "x-storytime-parent-auth")
         }
     }
 
@@ -1761,20 +1844,29 @@ enum AppSession {
 
 enum AppEntitlements {
     private static let envelopeKey = "com.storytime.entitlements.bootstrap.v1"
+    private static let installEnvelopeKey = "com.storytime.entitlements.bootstrap.install.v1"
 
     static var currentEnvelope: EntitlementBootstrapEnvelope? {
         let defaults = UserDefaults.standard
         guard let data = defaults.data(forKey: envelopeKey) else {
+            if let installEnvelope = storedInstallEnvelope {
+                storeCurrent(envelope: installEnvelope)
+                return installEnvelope
+            }
             return nil
         }
 
         guard let envelope = try? JSONDecoder().decode(EntitlementBootstrapEnvelope.self, from: data) else {
-            defaults.removeObject(forKey: envelopeKey)
+            clearCurrent()
             return nil
         }
 
         if envelope.expiresAt < Date().timeIntervalSince1970 {
-            clear()
+            clearCurrent()
+            if let installEnvelope = storedInstallEnvelope {
+                storeCurrent(envelope: installEnvelope)
+                return installEnvelope
+            }
             return nil
         }
 
@@ -1789,12 +1881,75 @@ enum AppEntitlements {
         currentEnvelope?.token
     }
 
+    static var currentOwner: EntitlementOwner? {
+        currentEnvelope?.owner
+    }
+
     static func store(envelope: EntitlementBootstrapEnvelope) {
+        storeCurrent(envelope: envelope)
+
+        if envelope.owner?.kind != .parentUser {
+            storeInstallFallback(envelope: envelope)
+        }
+    }
+
+    static func reconcileForParentChange(currentParentUserID: String?) {
+        guard let owner = currentOwner else { return }
+
+        switch owner.kind {
+        case .install:
+            return
+        case .parentUser:
+            guard owner.parentUserID == currentParentUserID else {
+                restoreInstallFallbackIfAvailable()
+                return
+            }
+        }
+    }
+
+    static func clear() {
+        clearCurrent()
+        UserDefaults.standard.removeObject(forKey: installEnvelopeKey)
+    }
+
+    private static func storeCurrent(envelope: EntitlementBootstrapEnvelope) {
         guard let data = try? JSONEncoder().encode(envelope) else { return }
         UserDefaults.standard.set(data, forKey: envelopeKey)
     }
 
-    static func clear() {
+    private static var storedInstallEnvelope: EntitlementBootstrapEnvelope? {
+        let defaults = UserDefaults.standard
+        guard let data = defaults.data(forKey: installEnvelopeKey) else {
+            return nil
+        }
+
+        guard let envelope = try? JSONDecoder().decode(EntitlementBootstrapEnvelope.self, from: data) else {
+            defaults.removeObject(forKey: installEnvelopeKey)
+            return nil
+        }
+
+        if envelope.expiresAt < Date().timeIntervalSince1970 {
+            defaults.removeObject(forKey: installEnvelopeKey)
+            return nil
+        }
+
+        return envelope
+    }
+
+    private static func storeInstallFallback(envelope: EntitlementBootstrapEnvelope) {
+        guard let data = try? JSONEncoder().encode(envelope) else { return }
+        UserDefaults.standard.set(data, forKey: installEnvelopeKey)
+    }
+
+    private static func restoreInstallFallbackIfAvailable() {
+        if let installEnvelope = storedInstallEnvelope {
+            storeCurrent(envelope: installEnvelope)
+        } else {
+            clearCurrent()
+        }
+    }
+
+    private static func clearCurrent() {
         UserDefaults.standard.removeObject(forKey: envelopeKey)
     }
 }
@@ -1802,19 +1957,23 @@ enum AppEntitlements {
 @MainActor
 final class EntitlementManager: ObservableObject {
     @Published private(set) var snapshot: EntitlementSnapshot?
+    @Published private(set) var envelope: EntitlementBootstrapEnvelope?
+    @Published private(set) var owner: EntitlementOwner?
 
     init(snapshot: EntitlementSnapshot? = AppEntitlements.currentSnapshot) {
         self.snapshot = snapshot
+        self.envelope = AppEntitlements.currentEnvelope
+        self.owner = AppEntitlements.currentEnvelope?.owner
     }
 
     func reloadFromCache() {
-        snapshot = AppEntitlements.currentSnapshot
+        reconcileCachedEntitlements()
     }
 
     func refreshFromBootstrap(using client: APIClienting) async throws {
         let baseURL = try await client.prepareConnection()
         try await client.bootstrapSessionIdentity(baseURL: baseURL)
-        snapshot = AppEntitlements.currentSnapshot
+        reconcileCachedEntitlements()
     }
 
     func refreshFromPurchaseState(
@@ -1824,21 +1983,26 @@ final class EntitlementManager: ObservableObject {
     ) async throws {
         let request = try await purchaseStateProvider.currentSyncRequest(refreshReason: reason)
         _ = try await client.syncEntitlements(request: request)
-        snapshot = AppEntitlements.currentSnapshot
+        reconcileCachedEntitlements()
     }
 
     func purchaseProduct(
         using client: APIClienting,
         purchaseProvider: any ParentManagedPurchaseProviding,
-        productID: String
+        productID: String,
+        parentAccount: ParentAuthUser?
     ) async throws -> ParentManagedPurchaseOutcome {
+        guard parentAccount != nil else {
+            throw ParentManagedPurchaseError.parentAccountRequired
+        }
+
         let outcome = try await purchaseProvider.purchase(productID: productID)
         switch outcome {
         case .purchased(let syncRequest):
             if let syncRequest {
                 _ = try await client.syncEntitlements(request: syncRequest)
             }
-            snapshot = AppEntitlements.currentSnapshot
+            reconcileCachedEntitlements()
         case .pending, .cancelled:
             break
         }
@@ -1847,6 +2011,14 @@ final class EntitlementManager: ObservableObject {
 
     func invalidate() {
         AppEntitlements.clear()
+        envelope = nil
+        owner = nil
         snapshot = nil
+    }
+
+    private func reconcileCachedEntitlements() {
+        envelope = AppEntitlements.currentEnvelope
+        owner = envelope?.owner
+        snapshot = envelope?.snapshot
     }
 }

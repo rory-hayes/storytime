@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { extractClientIp, extractInstallId, resolveSessionIdentityWithOptions, SESSION_HEADER } from "../lib/auth.js";
 import { loadEnv } from "../lib/env.js";
 import { AppError } from "../lib/errors.js";
+import { resolveOptionalParentIdentity, type ParentIdentityVerifier, PARENT_AUTH_HEADER } from "../lib/parentIdentity.js";
 import {
   createEntitlementToken,
   createRealtimeTicket,
@@ -128,6 +129,9 @@ describe("auth and security", () => {
     const issued = createEntitlementToken(
       {
         install_id: "install-123",
+        owner: {
+          kind: "install"
+        },
         snapshot: {
           tier: "starter",
           source: "none",
@@ -156,6 +160,28 @@ describe("auth and security", () => {
     expect(verified.snapshot.max_child_profiles).toBe(1);
     expect(verified.snapshot.can_replay_saved_stories).toBe(true);
     expect(verified.snapshot.expires_at).toBe(issued.expires_at);
+    expect(verified.owner).toEqual({ kind: "install" });
+  });
+
+  it("returns no parent identity when the parent auth header is absent", async () => {
+    const identity = await resolveOptionalParentIdentity(makeRequest(), makeTestEnv(), new StubParentIdentityVerifier());
+
+    expect(identity).toBeNull();
+  });
+
+  it("verifies parent auth headers through the configured parent identity verifier", async () => {
+    const request = makeRequest({
+      headers: {
+        [PARENT_AUTH_HEADER]: "parent-token-123"
+      }
+    });
+
+    const identity = await resolveOptionalParentIdentity(request, makeTestEnv(), new StubParentIdentityVerifier());
+
+    expect(identity).toEqual({
+      uid: "parent-user-123",
+      provider: "firebase"
+    });
   });
 
   it("rejects tampered or expired tokens", () => {
@@ -211,3 +237,16 @@ describe("auth and security", () => {
     ).toThrow(/Production secrets/);
   });
 });
+
+class StubParentIdentityVerifier implements ParentIdentityVerifier {
+  async verifyParentToken(token: string) {
+    if (token !== "parent-token-123") {
+      throw new AppError("Invalid parent account token", 401, "invalid_parent_auth");
+    }
+
+    return {
+      uid: "parent-user-123",
+      provider: "firebase" as const
+    };
+  }
+}

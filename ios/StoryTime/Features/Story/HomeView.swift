@@ -467,6 +467,7 @@ private struct StorySeriesCard: View {
 
 struct ParentTrustCenterView: View {
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var parentAuthManager: ParentAuthManager
 
     @ObservedObject var store: StoryLibraryStore
     @StateObject private var entitlementManager = EntitlementManager()
@@ -483,9 +484,77 @@ struct ParentTrustCenterView: View {
     @State private var availablePurchaseOptions: [ParentManagedPurchaseOption] = []
     @State private var planActionMessage: String?
     @State private var planErrorMessage: String?
+    @State private var showingParentAccountSheet = false
 
     var body: some View {
         Form {
+            Section("Parent account") {
+                Text(parentAuthManager.accountStatusTitle)
+                    .font(.system(size: 20, weight: .black, design: .rounded))
+                    .accessibilityIdentifier("parentAccountStatusTitle")
+
+                Text(parentAuthManager.accountStatusSummary)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("parentAccountStatusSummary")
+
+                if parentAuthManager.isSignedIn {
+                    Button("Manage Parent Account") {
+                        showingParentAccountSheet = true
+                    }
+                    .accessibilityIdentifier("parentAccountManageButton")
+
+                    Text("This device will keep the parent signed in after relaunch until a parent signs out.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("parentAccountPersistenceSummary")
+
+                    Text("Use Manage Parent Account to sign out on this device without adding account prompts to child story flow.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("parentAccountManageSummary")
+
+                    Button("Sign Out on This Device", role: .destructive) {
+                        let didSignOut = parentAuthManager.signOut()
+                        if didSignOut {
+                            AppEntitlements.reconcileForParentChange(currentParentUserID: nil)
+                            entitlementManager.reloadFromCache()
+                            Task {
+                                await loadPurchaseOptionsIfNeeded(force: true)
+                            }
+                        }
+                    }
+                    .accessibilityIdentifier("parentAccountSignOutButton")
+
+                    Text("Signing out removes the parent account session from this device only. Saved child story history still stays local on device in this sprint.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("parentAccountSignOutSummary")
+                } else {
+                    Button("Create or Sign In") {
+                        showingParentAccountSheet = true
+                    }
+                    .accessibilityIdentifier("parentAccountEntryButton")
+
+                    Text("Parent account sign-in is optional before the first story, but purchase, restore, and promo work stay here in parent-managed surfaces.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("parentAccountEntrySummary")
+                }
+
+                if let authErrorMessage = parentAuthManager.authErrorMessage {
+                    Text(authErrorMessage)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("parentAccountErrorSummary")
+                }
+
+                Text("The PARENT check opens this screen on the current device. Firebase Auth keeps parent account identity separate from child story flow.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("parentAccountStatusFootnote")
+            }
+
             Section("Plan") {
                 VStack(alignment: .leading, spacing: 8) {
                     Text(currentPlanTitle)
@@ -496,6 +565,37 @@ struct ParentTrustCenterView: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .accessibilityIdentifier("parentPlanSummary")
+                }
+
+                if currentPlanIsPlus {
+                    Text(currentPlusSummary)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("parentPlusActiveSummary")
+                } else if !parentAuthManager.isSignedIn {
+                    Text(purchaseAccountRequirementSummary)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("parentPurchaseAccountRequiredSummary")
+
+                    Button(purchaseAccountButtonTitle) {
+                        showingParentAccountSheet = true
+                    }
+                    .disabled(isRefreshingPlan || isRestoringPurchases || isPurchasingUpgrade)
+                    .accessibilityIdentifier("parentPurchaseAccountEntryButton")
+                } else {
+                    Text(purchaseSummary)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("parentPurchaseSummary")
+
+                    Button(upgradeButtonTitle) {
+                        Task {
+                            await beginPlusPurchase()
+                        }
+                    }
+                    .disabled(isRefreshingPlan || isRestoringPurchases || isPurchasingUpgrade)
+                    .accessibilityIdentifier("parentUpgradeToPlusButton")
                 }
 
                 if let snapshot = entitlementManager.snapshot {
@@ -519,6 +619,13 @@ struct ParentTrustCenterView: View {
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                             .accessibilityIdentifier("parentPlanLengthSummary")
+                    }
+
+                    if let ownershipSummary = planOwnershipSummary {
+                        Text(ownershipSummary)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .accessibilityIdentifier("parentPlanOwnershipSummary")
                     }
                 } else {
                     Text("Plan status is not loaded yet for this device. Refresh here if a parent needs the latest plan details before starting another story.")
@@ -545,34 +652,6 @@ struct ParentTrustCenterView: View {
                         .accessibilityIdentifier("parentPlusPlanSummary")
                 }
 
-                if currentPlanIsPlus {
-                    Text("Plus is already active on this device.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .accessibilityIdentifier("parentPlusActiveSummary")
-                } else if let purchaseOption = preferredPurchaseOption {
-                    Text("Upgrade to Plus here before starting more remote story launches. The App Store purchase sheet stays inside Parent Controls.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .accessibilityIdentifier("parentPurchaseSummary")
-
-                    Button(upgradeButtonTitle(for: purchaseOption)) {
-                        Task {
-                            await purchasePlus(using: purchaseOption)
-                        }
-                    }
-                    .disabled(isRefreshingPlan || isRestoringPurchases || isPurchasingUpgrade)
-                    .accessibilityIdentifier("parentUpgradeToPlusButton")
-                } else if isLoadingPurchaseOptions {
-                    ProgressView("Checking Plus purchase options...")
-                        .accessibilityIdentifier("parentPurchaseLoadingIndicator")
-                } else {
-                    Text("Plus purchase isn't available on this device right now. Restore and plan review still stay here in Parent Controls.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .accessibilityIdentifier("parentPurchaseUnavailableSummary")
-                }
-
                 if let planActionMessage {
                     Text(planActionMessage)
                         .font(.footnote)
@@ -594,6 +673,13 @@ struct ParentTrustCenterView: View {
                 }
                 .disabled(isRefreshingPlan || isRestoringPurchases)
                 .accessibilityIdentifier("parentRefreshPlanButton")
+
+                if !parentAuthManager.isSignedIn {
+                    Text(restoreAccountRequirementSummary)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("parentRestoreAccountRequiredSummary")
+                }
 
                 Button(restorePurchasesButtonTitle) {
                     Task {
@@ -783,9 +869,29 @@ struct ParentTrustCenterView: View {
                 await loadPurchaseOptionsIfNeeded()
             }
         }
+        .onChange(of: parentAuthManager.currentUser?.uid) { _, _ in
+            entitlementManager.reloadFromCache()
+            Task {
+                await loadPurchaseOptionsIfNeeded(force: true)
+            }
+        }
         .sheet(isPresented: $showProfileEditor) {
             NavigationStack {
                 ChildProfileEditorView(store: store, profile: editingProfile, maxProfiles: effectiveChildProfileLimit)
+            }
+        }
+        .sheet(isPresented: $showingParentAccountSheet, onDismiss: {
+            Task {
+                do {
+                    try await entitlementManager.refreshFromBootstrap(using: APIClient())
+                } catch {
+                    // Keep the parent account sheet lightweight; the explicit refresh button remains available.
+                }
+                await loadPurchaseOptionsIfNeeded(force: true)
+            }
+        }) {
+            NavigationStack {
+                ParentAccountSheetView()
             }
         }
         .alert("Delete saved story history?", isPresented: $showDeleteHistoryConfirmation) {
@@ -860,6 +966,22 @@ struct ParentTrustCenterView: View {
         availablePurchaseOptions.first
     }
 
+    private var upgradeButtonTitle: String {
+        if let purchaseOption = preferredPurchaseOption {
+            return upgradeButtonTitle(for: purchaseOption)
+        }
+
+        return isLoadingPurchaseOptions ? "Checking Plus..." : "Upgrade to Plus"
+    }
+
+    private var purchaseSummary: String {
+        if preferredPurchaseOption != nil {
+            return "Upgrade to Plus here before starting more remote story launches. This purchase will be linked to \(purchaseOwnershipIdentity) and the App Store purchase sheet stays inside Parent Controls."
+        }
+
+        return "Upgrade to Plus here before starting more remote story launches. StoryTime will confirm the current App Store purchase option inside Parent Controls and link the purchase to \(purchaseOwnershipIdentity)."
+    }
+
     private func storyStartsSummary(for snapshot: EntitlementSnapshot) -> String {
         if let remaining = snapshot.remainingStoryStarts {
             return "New story starts remaining in the current window: \(remaining)"
@@ -931,7 +1053,12 @@ struct ParentTrustCenterView: View {
         defer { isRefreshingPlan = false }
 
         do {
-            try await entitlementManager.refreshFromBootstrap(using: APIClient())
+            if let uiTestEnvelope = UITestSeed.refreshedEntitlementEnvelopeIfNeeded() {
+                AppEntitlements.store(envelope: uiTestEnvelope)
+                entitlementManager.reloadFromCache()
+            } else {
+                try await entitlementManager.refreshFromBootstrap(using: APIClient())
+            }
             await loadPurchaseOptionsIfNeeded(force: true)
             planActionMessage = "Plan status refreshed for this device."
             ClientLaunchTelemetry.recordParentPlanRefresh(outcome: .completed, snapshot: entitlementManager.snapshot)
@@ -948,6 +1075,22 @@ struct ParentTrustCenterView: View {
         ClientLaunchTelemetry.recordRestorePurchases(outcome: .started, snapshot: entitlementManager.snapshot)
         isRestoringPurchases = true
         defer { isRestoringPurchases = false }
+
+        guard parentAuthManager.isSignedIn else {
+            showingParentAccountSheet = true
+            planErrorMessage = "Sign in to a parent account before restoring Plus so the restored plan belongs to that parent."
+            ClientLaunchTelemetry.recordRestorePurchases(outcome: .failed, snapshot: entitlementManager.snapshot)
+            return
+        }
+
+        if let uiTestEnvelope = UITestSeed.restoredEntitlementEnvelopeIfNeeded() {
+            AppEntitlements.store(envelope: uiTestEnvelope)
+            entitlementManager.reloadFromCache()
+            await loadPurchaseOptionsIfNeeded(force: true)
+            planActionMessage = "Restore check finished. StoryTime refreshed the plan for this device."
+            ClientLaunchTelemetry.recordRestorePurchases(outcome: .completed, snapshot: entitlementManager.snapshot)
+            return
+        }
 
 #if canImport(StoreKit)
         if #available(iOS 17.0, *) {
@@ -977,29 +1120,33 @@ struct ParentTrustCenterView: View {
 
     @MainActor
     private func purchasePlus(using purchaseOption: ParentManagedPurchaseOption) async {
-        planActionMessage = nil
-        planErrorMessage = nil
-        isPurchasingUpgrade = true
-        defer { isPurchasingUpgrade = false }
+            planActionMessage = nil
+            planErrorMessage = nil
+            isPurchasingUpgrade = true
+            defer { isPurchasingUpgrade = false }
 
         do {
             let outcome = try await entitlementManager.purchaseProduct(
                 using: APIClient(),
                 purchaseProvider: resolvedPurchaseProvider(),
-                productID: purchaseOption.productID
+                productID: purchaseOption.productID,
+                parentAccount: parentAuthManager.currentUser
             )
             await loadPurchaseOptionsIfNeeded(force: true)
 
             switch outcome {
             case .purchased:
                 planActionMessage = currentPlanIsPlus
-                    ? "Plus is now ready on this device."
+                    ? "Plus is now ready for \(purchaseOwnershipIdentity) on this device."
                     : "Purchase finished. StoryTime refreshed the plan for this device."
             case .pending:
                 planActionMessage = "Purchase is pending approval. The current plan stays active until the App Store confirms it."
             case .cancelled:
                 planActionMessage = "Purchase wasn't completed. The current plan stays the same on this device."
             }
+        } catch ParentManagedPurchaseError.parentAccountRequired {
+            showingParentAccountSheet = true
+            planErrorMessage = "Sign in to a parent account before buying Plus so the purchase belongs to that parent."
         } catch ParentManagedPurchaseError.unavailable {
             planErrorMessage = "Plus purchase isn't available on this device right now."
         } catch ParentManagedPurchaseError.verificationFailed {
@@ -1007,6 +1154,23 @@ struct ParentTrustCenterView: View {
         } catch {
             planErrorMessage = "I couldn't upgrade this device right now. Ask a grown-up to try again."
         }
+    }
+
+    @MainActor
+    private func beginPlusPurchase() async {
+        if let purchaseOption = preferredPurchaseOption {
+            await purchasePlus(using: purchaseOption)
+            return
+        }
+
+        await loadPurchaseOptionsIfNeeded(force: true)
+
+        guard let purchaseOption = preferredPurchaseOption else {
+            planErrorMessage = "Plus purchase isn't available on this device right now."
+            return
+        }
+
+        await purchasePlus(using: purchaseOption)
     }
 
     @MainActor
@@ -1037,6 +1201,55 @@ struct ParentTrustCenterView: View {
         }
 
         return "Upgrade to Plus - \(purchaseOption.displayPrice)"
+    }
+
+    private var purchaseAccountButtonTitle: String {
+        if let purchaseOption = preferredPurchaseOption {
+            return "Create or Sign In to Buy Plus - \(purchaseOption.displayPrice)"
+        }
+
+        return "Create or Sign In to Buy Plus"
+    }
+
+    private var purchaseAccountRequirementSummary: String {
+        "A parent account is required before buying Plus so the purchase can belong to that parent instead of staying tied only to this device."
+    }
+
+    private var restoreAccountRequirementSummary: String {
+        "A parent account is required before restoring Plus so the refreshed entitlement belongs to that parent instead of staying tied only to this device."
+    }
+
+    private var purchaseOwnershipIdentity: String {
+        if let email = parentAuthManager.currentUser?.email, !email.isEmpty {
+            return email
+        }
+
+        return "this parent account"
+    }
+
+    private var currentPlusSummary: String {
+        if entitlementManager.owner?.kind == .parentUser {
+            return "Plus is active for \(purchaseOwnershipIdentity) on this device."
+        }
+
+        return "Plus is already active on this device."
+    }
+
+    private var planOwnershipSummary: String? {
+        guard let owner = entitlementManager.owner else {
+            return nil
+        }
+
+        switch owner.kind {
+        case .parentUser:
+            return "This entitlement snapshot is linked to \(purchaseOwnershipIdentity)."
+        case .install:
+            if parentAuthManager.isSignedIn {
+                return "This entitlement snapshot is still local to this device. New purchases made while signed in will be linked to \(purchaseOwnershipIdentity)."
+            }
+
+            return "This entitlement snapshot currently belongs to this device."
+        }
     }
 
     private func resolvedPurchaseProvider() -> any ParentManagedPurchaseProviding {
@@ -1165,12 +1378,15 @@ struct ChildProfileEditorView: View {
 }
 
 struct FirstRunOnboardingView: View {
+    @EnvironmentObject private var parentAuthManager: ParentAuthManager
+
     @ObservedObject var store: StoryLibraryStore
     let onFinish: (Bool) -> Void
 
     @State private var stepIndex = 0
     @State private var showingParentControls = false
     @State private var showingChildEditor = false
+    @State private var showingParentAccountSheet = false
 
     private let steps = OnboardingStep.allCases
 
@@ -1199,6 +1415,11 @@ struct FirstRunOnboardingView: View {
         .sheet(isPresented: $showingChildEditor) {
             NavigationStack {
                 ChildProfileEditorView(store: store, profile: store.activeProfile)
+            }
+        }
+        .sheet(isPresented: $showingParentAccountSheet) {
+            NavigationStack {
+                ParentAccountSheetView()
             }
         }
     }
@@ -1408,10 +1629,29 @@ struct FirstRunOnboardingView: View {
             )
 
             onboardingHighlight(
+                title: parentAuthManager.accountStatusTitle,
+                summary: parentAuthManager.accountStatusSummary,
+                identifier: "onboardingAccountStatusCard"
+            )
+
+            onboardingHighlight(
                 title: "Next screen",
                 summary: "StoryTime will open the normal story setup flow so the parent can choose story path and length before handing the device to the child.",
                 identifier: "onboardingHandoffNextScreen"
             )
+
+            if !parentAuthManager.isSignedIn {
+                Button("Create or Sign In") {
+                    showingParentAccountSheet = true
+                }
+                .buttonStyle(.bordered)
+                .accessibilityIdentifier("onboardingParentAccountButton")
+
+                Text("This is optional right now. The first story can still start without parent sign-in.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("onboardingParentAccountSummary")
+            }
         }
     }
 

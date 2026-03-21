@@ -72,6 +72,7 @@ export function makeRequestContext(overrides: Partial<RequestContext> = {}): Req
     installHash: "install-hash-123",
     sessionId: "session-123",
     authLevel: "verified_session",
+    parentIdentity: null,
     client: "test-suite",
     logger,
     ...overrides

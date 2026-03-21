@@ -4,6 +4,7 @@ import type { Request } from "express";
 import type { Env, Region } from "./env.js";
 import { AppError } from "./errors.js";
 import type { SessionIdentity } from "./auth.js";
+import type { ParentIdentity } from "./parentIdentity.js";
 
 export type RequestContext = {
   requestId: string;
@@ -15,6 +16,7 @@ export type RequestContext = {
   installHash: string;
   sessionId: string;
   authLevel: SessionIdentity["authLevel"];
+  parentIdentity: ParentIdentity | null;
   client: string;
   logger: pino.Logger;
 };

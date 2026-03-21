@@ -281,7 +281,13 @@ final class SmokeTests: XCTestCase {
         let outcome = try await manager.purchaseProduct(
             using: client,
             purchaseProvider: provider,
-            productID: "storytime.plus.monthly"
+            productID: "storytime.plus.monthly",
+            parentAccount: ParentAuthUser(
+                uid: "parent-123",
+                email: "parent@example.com",
+                isAnonymous: false,
+                signInMethod: .emailPassword
+            )
         )
 
         XCTAssertEqual(outcome, provider.outcome)
@@ -303,13 +309,47 @@ final class SmokeTests: XCTestCase {
         let outcome = try await manager.purchaseProduct(
             using: client,
             purchaseProvider: provider,
-            productID: "storytime.plus.monthly"
+            productID: "storytime.plus.monthly",
+            parentAccount: ParentAuthUser(
+                uid: "parent-123",
+                email: "parent@example.com",
+                isAnonymous: false,
+                signInMethod: .emailPassword
+            )
         )
 
         XCTAssertEqual(outcome, .cancelled)
         XCTAssertEqual(provider.purchasedProductID, "storytime.plus.monthly")
         XCTAssertNil(client.lastSyncRequest)
         XCTAssertNil(manager.snapshot)
+    }
+
+    @MainActor
+    func testEntitlementManagerRequiresParentAccountBeforePurchase() async {
+        let client = StubEntitlementSyncClient()
+        let manager = EntitlementManager(snapshot: nil)
+        let provider = StubParentManagedPurchaseProvider(
+            outcome: .purchased(
+                syncRequest: EntitlementSyncRequest(refreshReason: .purchase, transactions: [])
+            )
+        )
+
+        do {
+            _ = try await manager.purchaseProduct(
+                using: client,
+                purchaseProvider: provider,
+                productID: "storytime.plus.monthly",
+                parentAccount: nil
+            )
+            XCTFail("Expected purchase to require an authenticated parent account")
+        } catch let error as ParentManagedPurchaseError {
+            XCTAssertEqual(error, .parentAccountRequired)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertNil(provider.purchasedProductID)
+        XCTAssertNil(client.lastSyncRequest)
     }
 
     @MainActor

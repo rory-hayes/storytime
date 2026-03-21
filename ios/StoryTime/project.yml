@@ -24,9 +24,12 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.tuesday.storytime
         INFOPLIST_FILE: App/Info.plist
+        CODE_SIGN_ENTITLEMENTS: App/StoryTime.entitlements
     dependencies:
       - package: Firebase
         product: FirebaseCore
+      - package: Firebase
+        product: FirebaseAuth
     info:
       path: App/Info.plist
       properties:

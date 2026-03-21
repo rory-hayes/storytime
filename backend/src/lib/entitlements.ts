@@ -1,9 +1,11 @@
 import type { Request } from "express";
 import type { Env } from "./env.js";
 import type { RequestContext } from "./requestContext.js";
+import { AppError } from "./errors.js";
 import {
   createEntitlementToken,
   verifyEntitlementToken,
+  type EntitlementOwner,
   type EntitlementSnapshot,
   type EntitlementSource,
   type EntitlementTier
@@ -17,6 +19,7 @@ export type EntitlementBootstrapEnvelope = {
   snapshot: EntitlementSnapshot;
   token: string;
   expires_at: number;
+  owner: EntitlementOwner;
 };
 
 export type EntitlementPreflightBlockReason =
@@ -35,7 +38,7 @@ export type EntitlementPreflightDecision = {
   block_reason: EntitlementPreflightBlockReason | null;
   recommended_upgrade_surface: EntitlementUpgradeSurface | null;
   snapshot: EntitlementSnapshot;
-  entitlements: EntitlementBootstrapEnvelope;
+  entitlements?: EntitlementBootstrapEnvelope;
 };
 
 type UsageLedgerState = {
@@ -43,12 +46,25 @@ type UsageLedgerState = {
   continue_story: number[];
 };
 
+type StoredEntitlementRecord = {
+  owner: EntitlementOwner;
+  snapshot: Omit<EntitlementSnapshot, "effective_at" | "expires_at">;
+  updated_at: number;
+};
+
 const entitlementUsageLedger = new Map<string, UsageLedgerState>();
+const entitlementRecordsByParentUserId = new Map<string, StoredEntitlementRecord>();
 
 export function issueBootstrapEntitlements(req: Request, context: RequestContext, env: Env): EntitlementBootstrapEnvelope {
+  const owner = resolveEntitlementOwner(context);
+  const storedRecord = resolveStoredEntitlementRecord(owner);
+  if (storedRecord) {
+    return issueCurrentEntitlements(storedRecord.snapshot, owner, context, env);
+  }
+
   const tier = resolveTierSeed(req, env);
   const source: EntitlementSource = tier === "plus" ? "debug_seed" : "none";
-  return issueCurrentEntitlements(baseSnapshotForTier(env, tier, source), context, env);
+  return issueCurrentEntitlements(baseSnapshotForTier(env, tier, source), owner, context, env);
 }
 
 export function issueSyncedEntitlements(
@@ -57,18 +73,83 @@ export function issueSyncedEntitlements(
   env: Env
 ): EntitlementBootstrapEnvelope {
   const activeProductIDs = resolveActiveProductIDs(request);
+  const owner = resolveEntitlementOwner(context);
+  assertAccountOwnedCommerceSyncHasAuthenticatedParent(request, activeProductIDs, owner);
   const tier: EntitlementTier = hasPlusProduct(activeProductIDs) ? "plus" : "starter";
   const source: EntitlementSource = activeProductIDs.size > 0 ? "storekit_verified" : "none";
-  return issueCurrentEntitlements(baseSnapshotForTier(env, tier, source), context, env);
+  const snapshot = baseSnapshotForTier(env, tier, source);
+
+  if (owner.kind === "parent_user") {
+    entitlementRecordsByParentUserId.set(owner.parent_user_id, {
+      owner,
+      snapshot,
+      updated_at: Math.floor(Date.now() / 1_000)
+    });
+  }
+
+  return issueCurrentEntitlements(snapshot, owner, context, env);
+}
+
+function assertAccountOwnedCommerceSyncHasAuthenticatedParent(
+  request: EntitlementsSyncRequest,
+  activeProductIDs: Set<string>,
+  owner: EntitlementOwner
+): void {
+  if (activeProductIDs.size == 0) {
+    return;
+  }
+
+  if (request.refresh_reason !== "purchase" && request.refresh_reason !== "restore") {
+    return;
+  }
+
+  if (owner.kind === "parent_user") {
+    return;
+  }
+
+  const publicMessage =
+    request.refresh_reason === "restore"
+      ? "Sign in to a parent account before restoring Plus."
+      : "Sign in to a parent account before purchasing Plus.";
+
+  throw new AppError(
+    "Account-owned commerce sync requires an authenticated parent account",
+    401,
+    "parent_auth_required",
+    {
+      refresh_reason: request.refresh_reason,
+      active_product_ids: Array.from(activeProductIDs)
+    },
+    {
+      publicMessage
+    }
+  );
 }
 
 export function resolveEntitlementSnapshot(req: Request, context: RequestContext, env: Env): EntitlementSnapshot {
+  const owner = resolveEntitlementOwner(context);
+  const usageOwnerKey = resolveUsageOwnerKey(owner, context.installId);
+  const storedRecord = resolveStoredEntitlementRecord(owner);
+  if (storedRecord) {
+    return issueCurrentEntitlements(applyUsageLedger(storedRecord.snapshot, usageOwnerKey), owner, context, env).snapshot;
+  }
+
   const suppliedToken = req.header(ENTITLEMENT_HEADER)?.trim();
   if (!suppliedToken) {
     return issueBootstrapEntitlements(req, context, env).snapshot;
   }
 
-  return applyUsageLedger(verifyEntitlementToken(suppliedToken, context.installId, env).snapshot, context.installId);
+  const verified = verifyEntitlementToken(suppliedToken, context.installId, env);
+  if (entitlementOwnersMatch(verified.owner, owner)) {
+    return issueCurrentEntitlements(
+      applyUsageLedger(stripSnapshotLifetime(verified.snapshot), usageOwnerKey),
+      owner,
+      context,
+      env
+    ).snapshot;
+  }
+
+  return issueBootstrapEntitlements(req, context, env).snapshot;
 }
 
 export function evaluatePreflightForRequest(
@@ -81,7 +162,12 @@ export function evaluatePreflightForRequest(
   const initialDecision = evaluatePreflight(request, currentSnapshot);
 
   if (!initialDecision.allowed) {
-    const entitlements = issueCurrentEntitlements(stripSnapshotLifetime(currentSnapshot), context, env);
+    const entitlements = issueCurrentEntitlements(
+      stripSnapshotLifetime(currentSnapshot),
+      resolveEntitlementOwner(context),
+      context,
+      env
+    );
     return {
       ...initialDecision,
       snapshot: entitlements.snapshot,
@@ -89,8 +175,13 @@ export function evaluatePreflightForRequest(
     };
   }
 
-  recordUsage(context.installId, request.action);
-  const entitlements = issueCurrentEntitlements(stripSnapshotLifetime(currentSnapshot), context, env);
+  recordUsage(resolveUsageOwnerKey(resolveEntitlementOwner(context), context.installId), request.action);
+  const entitlements = issueCurrentEntitlements(
+    stripSnapshotLifetime(currentSnapshot),
+    resolveEntitlementOwner(context),
+    context,
+    env
+  );
 
   return {
     action: request.action,
@@ -104,6 +195,7 @@ export function evaluatePreflightForRequest(
 
 export function resetEntitlementUsageLedger(): void {
   entitlementUsageLedger.clear();
+  entitlementRecordsByParentUserId.clear();
 }
 
 export function evaluatePreflight(
@@ -209,10 +301,16 @@ function blockedDecision(
 
 function issueCurrentEntitlements(
   snapshot: Omit<EntitlementSnapshot, "effective_at" | "expires_at">,
+  owner: EntitlementOwner,
   context: RequestContext,
   env: Env
 ): EntitlementBootstrapEnvelope {
-  return issueEntitlementEnvelope(applyUsageLedger(snapshot, context.installId), context, env);
+  return issueEntitlementEnvelope(
+    applyUsageLedger(snapshot, resolveUsageOwnerKey(owner, context.installId)),
+    owner,
+    context,
+    env
+  );
 }
 
 function recommendedUpgradeSurface(action: EntitlementPreflightRequest["action"]): EntitlementUpgradeSurface {
@@ -221,12 +319,14 @@ function recommendedUpgradeSurface(action: EntitlementPreflightRequest["action"]
 
 function issueEntitlementEnvelope(
   snapshot: Omit<EntitlementSnapshot, "effective_at" | "expires_at">,
+  owner: EntitlementOwner,
   context: RequestContext,
   env: Env
 ): EntitlementBootstrapEnvelope {
   const issued = createEntitlementToken(
     {
       install_id: context.installId,
+      owner,
       snapshot
     },
     env
@@ -235,7 +335,8 @@ function issueEntitlementEnvelope(
   return {
     snapshot: issued.snapshot,
     token: issued.token,
-    expires_at: issued.expires_at
+    expires_at: issued.expires_at,
+    owner
   };
 }
 
@@ -254,9 +355,9 @@ function resolveTierSeed(req: Request, env: Env): EntitlementTier {
 
 function applyUsageLedger(
   snapshot: Omit<EntitlementSnapshot, "effective_at" | "expires_at"> | EntitlementSnapshot,
-  installId: string
+  usageOwnerKey: string
 ): Omit<EntitlementSnapshot, "effective_at" | "expires_at"> {
-  const state = pruneUsageState(installId, snapshot.usage_window.duration_seconds);
+  const state = pruneUsageState(usageOwnerKey, snapshot.usage_window.duration_seconds);
   return {
     ...stripSnapshotLifetime(snapshot),
     remaining_story_starts: remainingCount(snapshot.max_story_starts_per_period, state.new_story.length),
@@ -272,14 +373,14 @@ function stripSnapshotLifetime(
   return rest;
 }
 
-function recordUsage(installId: string, action: EntitlementPreflightRequest["action"]): void {
-  const state = pruneUsageState(installId, null);
+function recordUsage(usageOwnerKey: string, action: EntitlementPreflightRequest["action"]): void {
+  const state = pruneUsageState(usageOwnerKey, null);
   state[action].push(Math.floor(Date.now() / 1_000));
-  entitlementUsageLedger.set(installId, state);
+  entitlementUsageLedger.set(usageOwnerKey, state);
 }
 
-function pruneUsageState(installId: string, durationSeconds: number | null): UsageLedgerState {
-  const existing = entitlementUsageLedger.get(installId) ?? {
+function pruneUsageState(usageOwnerKey: string, durationSeconds: number | null): UsageLedgerState {
+  const existing = entitlementUsageLedger.get(usageOwnerKey) ?? {
     new_story: [],
     continue_story: []
   };
@@ -299,9 +400,9 @@ function pruneUsageState(installId: string, durationSeconds: number | null): Usa
   };
 
   if (pruned.new_story.length === 0 && pruned.continue_story.length === 0) {
-    entitlementUsageLedger.delete(installId);
+    entitlementUsageLedger.delete(usageOwnerKey);
   } else {
-    entitlementUsageLedger.set(installId, pruned);
+    entitlementUsageLedger.set(usageOwnerKey, pruned);
   }
 
   return {
@@ -316,6 +417,52 @@ function remainingCount(limit: number | null, used: number): number | null {
   }
 
   return Math.max(0, limit - used);
+}
+
+function resolveEntitlementOwner(context: RequestContext): EntitlementOwner {
+  if (context.parentIdentity) {
+    return {
+      kind: "parent_user",
+      parent_user_id: context.parentIdentity.uid,
+      auth_provider: context.parentIdentity.provider
+    };
+  }
+
+  return {
+    kind: "install"
+  };
+}
+
+function resolveStoredEntitlementRecord(owner: EntitlementOwner): StoredEntitlementRecord | null {
+  if (owner.kind !== "parent_user") {
+    return null;
+  }
+
+  return entitlementRecordsByParentUserId.get(owner.parent_user_id) ?? null;
+}
+
+function resolveUsageOwnerKey(owner: EntitlementOwner, installId: string): string {
+  if (owner.kind === "parent_user") {
+    return `parent:${owner.parent_user_id}`;
+  }
+
+  return `install:${installId}`;
+}
+
+function entitlementOwnersMatch(left: EntitlementOwner, right: EntitlementOwner): boolean {
+  if (left.kind !== right.kind) {
+    return false;
+  }
+
+  if (left.kind === "install" && right.kind === "install") {
+    return true;
+  }
+
+  if (left.kind === "parent_user" && right.kind === "parent_user") {
+    return left.parent_user_id === right.parent_user_id && left.auth_provider === right.auth_provider;
+  }
+
+  return false;
 }
 
 function baseSnapshotForTier(

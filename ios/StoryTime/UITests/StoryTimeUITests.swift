@@ -214,14 +214,138 @@ final class StoryTimeUITests: XCTestCase {
         XCTAssertTrue(scrollToElement(app.staticTexts["parentPlanFootnote"], in: app))
     }
 
-    func testParentControlsCanCompleteParentManagedPlusPurchase() {
+    func testParentControlsShowSignedOutParentAccountStatus() {
         let app = launchApp()
 
         openParentControls(in: app)
 
+        let accountStatusTitle = app.staticTexts["parentAccountStatusTitle"]
+        XCTAssertTrue(accountStatusTitle.waitForExistence(timeout: 10))
+        XCTAssertEqual(accountStatusTitle.label, "Parent account not signed in")
+        XCTAssertEqual(
+            app.staticTexts["parentAccountStatusSummary"].label,
+            "Firebase Auth is ready on this device, but no parent account is signed in yet. Child story screens stay sign-in-free."
+        )
+        XCTAssertTrue(app.buttons["parentAccountEntryButton"].exists)
+        XCTAssertEqual(
+            app.staticTexts["parentAccountEntrySummary"].label,
+            "Parent account sign-in is optional before the first story, but purchase, restore, and promo work stay here in parent-managed surfaces."
+        )
+        XCTAssertEqual(
+            app.staticTexts["parentAccountStatusFootnote"].label,
+            "The PARENT check opens this screen on the current device. Firebase Auth keeps parent account identity separate from child story flow."
+        )
+        XCTAssertTrue(scrollToElement(app.staticTexts["parentPurchaseAccountRequiredSummary"], in: app))
+        XCTAssertEqual(
+            app.staticTexts["parentPurchaseAccountRequiredSummary"].label,
+            "A parent account is required before buying Plus so the purchase can belong to that parent instead of staying tied only to this device."
+        )
+        XCTAssertTrue(scrollToElement(app.staticTexts["parentRestoreAccountRequiredSummary"], in: app))
+        XCTAssertEqual(
+            app.staticTexts["parentRestoreAccountRequiredSummary"].label,
+            "A parent account is required before restoring Plus so the refreshed entitlement belongs to that parent instead of staying tied only to this device."
+        )
+        XCTAssertTrue(app.buttons["parentPurchaseAccountEntryButton"].exists)
+        XCTAssertFalse(app.buttons["parentUpgradeToPlusButton"].exists)
+    }
+
+    func testParentControlsCanCreateParentAccountAndPersistAcrossRelaunch() {
+        let app = launchApp()
+
+        openParentControls(in: app)
+        createParentAccount(in: app, email: "parent@example.com", password: "secret1")
+
+        XCTAssertTrue(app.staticTexts["parent@example.com"].waitForExistence(timeout: 10))
+        XCTAssertEqual(
+            app.staticTexts["parentAccountPersistenceSummary"].label,
+            "This device will keep the parent signed in after relaunch until a parent signs out."
+        )
+        XCTAssertTrue(app.buttons["parentAccountManageButton"].exists)
+
+        app.terminate()
+
+        let relaunched = launchApp(reset: false, seed: false)
+        openParentControls(in: relaunched)
+
+        XCTAssertTrue(relaunched.staticTexts["parent@example.com"].waitForExistence(timeout: 10))
+        XCTAssertTrue(relaunched.buttons["parentAccountManageButton"].exists)
+    }
+
+    func testParentControlsCanSignOutAndSignBackIn() {
+        let app = launchApp()
+
+        openParentControls(in: app)
+        createParentAccount(in: app, email: "grownup@example.com", password: "secret1")
+
+        app.terminate()
+
+        let relaunched = launchApp(reset: false, seed: false)
+        openParentControls(in: relaunched)
+
+        let signOutButton = relaunched.buttons["parentAccountSignOutButton"]
+        XCTAssertTrue(signOutButton.waitForExistence(timeout: 10))
+        signOutButton.tap()
+
+        let signedOutTitle = relaunched.staticTexts["parentAccountStatusTitle"]
+        XCTAssertTrue(signedOutTitle.waitForExistence(timeout: 10))
+        XCTAssertEqual(signedOutTitle.label, "Parent account not signed in")
+        XCTAssertTrue(relaunched.buttons["parentAccountEntryButton"].exists)
+
+        let entryButton = relaunched.buttons["parentAccountEntryButton"]
+        entryButton.tap()
+        XCTAssertTrue(relaunched.staticTexts["parentAccountSheetTitle"].waitForExistence(timeout: 10))
+
+        let modePicker = relaunched.segmentedControls["parentAccountModePicker"].buttons["Sign In"]
+        XCTAssertTrue(modePicker.waitForExistence(timeout: 10))
+        modePicker.tap()
+
+        let emailField = relaunched.textFields["parentAccountEmailField"]
+        XCTAssertTrue(emailField.waitForExistence(timeout: 10))
+        emailField.tap()
+        emailField.typeText("grownup@example.com")
+
+        let passwordField = relaunched.secureTextFields["parentAccountPasswordField"]
+        XCTAssertTrue(passwordField.waitForExistence(timeout: 10))
+        passwordField.tap()
+        passwordField.typeText("secret1")
+
+        let primaryButton = relaunched.buttons["parentAccountPrimaryButton"]
+        XCTAssertTrue(primaryButton.waitForExistence(timeout: 10))
+        primaryButton.tap()
+
+        XCTAssertTrue(relaunched.staticTexts["grownup@example.com"].waitForExistence(timeout: 10))
+        XCTAssertTrue(relaunched.buttons["parentAccountManageButton"].exists)
+    }
+
+    func testParentControlsCanSignInWithAppleAndPersistAcrossRelaunch() {
+        let app = launchApp()
+
+        openParentControls(in: app)
+        signInWithApple(in: app)
+
+        XCTAssertTrue(app.staticTexts["Parent account signed in with Apple"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["parentAccountManageButton"].exists)
+        XCTAssertTrue(app.buttons["parentAccountSignOutButton"].exists)
+
+        app.terminate()
+
+        let relaunched = launchApp(reset: false, seed: false)
+        openParentControls(in: relaunched)
+
+        XCTAssertTrue(relaunched.staticTexts["Parent account signed in with Apple"].waitForExistence(timeout: 10))
+        XCTAssertTrue(relaunched.buttons["parentAccountManageButton"].exists)
+        XCTAssertTrue(relaunched.buttons["parentAccountSignOutButton"].exists)
+    }
+
+    func testParentControlsCanCompleteParentManagedPlusPurchase() {
+        let app = launchApp()
+
+        openParentControls(in: app)
+        createParentAccount(in: app, email: "buyer@example.com", password: "secret1")
+
         let upgradeButton = app.buttons["parentUpgradeToPlusButton"]
-        XCTAssertTrue(upgradeButton.waitForExistence(timeout: 10))
-        XCTAssertEqual(upgradeButton.label, "Upgrade to Plus - $4.99")
+        XCTAssertTrue(scrollToElement(upgradeButton, in: app))
+        XCTAssertTrue(upgradeButton.label.hasPrefix("Upgrade to Plus"))
         upgradeButton.tap()
 
         let planTitle = app.staticTexts["parentPlanTitle"]
@@ -229,9 +353,41 @@ final class StoryTimeUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["parentPlusActiveSummary"].waitForExistence(timeout: 10))
         XCTAssertEqual(
             app.staticTexts["parentPlanActionStatus"].label,
-            "Plus is now ready on this device."
+            "Plus is now ready for buyer@example.com on this device."
+        )
+        XCTAssertEqual(
+            app.staticTexts["parentPlanOwnershipSummary"].label,
+            "This entitlement snapshot is linked to buyer@example.com."
         )
         XCTAssertFalse(app.buttons["parentUpgradeToPlusButton"].exists)
+    }
+
+    func testParentControlsCanRestorePlusForSignedInParentAndClearItOnSignOut() {
+        let app = launchApp(extraEnvironment: [
+            "STORYTIME_UI_TEST_RESTORE_ENTITLEMENT_TIER": "plus"
+        ])
+
+        openParentControls(in: app)
+        createParentAccount(in: app, email: "restore@example.com", password: "secret1")
+        restorePurchases(in: app)
+
+        let restoredPlanTitle = app.staticTexts["parentPlanTitle"]
+        XCTAssertTrue(waitForLabel(of: restoredPlanTitle, toEqual: "Plus"))
+        XCTAssertEqual(
+            app.staticTexts["parentPlanOwnershipSummary"].label,
+            "This entitlement snapshot is linked to restore@example.com."
+        )
+
+        let signOutButton = app.buttons["parentAccountSignOutButton"]
+        XCTAssertTrue(scrollToElement(signOutButton, in: app))
+        signOutButton.tap()
+
+        let signedOutPlanTitle = app.staticTexts["parentPlanTitle"]
+        XCTAssertTrue(scrollToElement(signedOutPlanTitle, in: app))
+        XCTAssertTrue(waitForLabel(of: signedOutPlanTitle, toEqual: "Starter"))
+        XCTAssertTrue(app.staticTexts["parentAccountStatusTitle"].waitForExistence(timeout: 10))
+        XCTAssertEqual(app.staticTexts["parentAccountStatusTitle"].label, "Parent account not signed in")
+        XCTAssertFalse(app.staticTexts["parentPlanOwnershipSummary"].exists)
     }
 
     func testParentControlsGateAddChildWhenPlanLimitIsReached() {
@@ -535,6 +691,68 @@ final class StoryTimeUITests: XCTestCase {
         XCTAssertTrue(relaunched.buttons["newStoryInlineButton"].waitForExistence(timeout: 10))
     }
 
+    func testOnboardingShowsParentAccountStatusOnHandoffStep() {
+        let app = launchFreshApp()
+
+        advanceOnboarding(in: app, toStep: 5)
+
+        let accountStatusTitle = app.staticTexts["Parent account not signed in"]
+        XCTAssertTrue(accountStatusTitle.waitForExistence(timeout: 10))
+        XCTAssertTrue(
+            app.staticTexts["Firebase Auth is ready on this device, but no parent account is signed in yet. Child story screens stay sign-in-free."].exists
+        )
+        XCTAssertTrue(app.buttons["onboardingParentAccountButton"].exists)
+        XCTAssertEqual(
+            app.staticTexts["onboardingParentAccountSummary"].label,
+            "This is optional right now. The first story can still start without parent sign-in."
+        )
+    }
+
+    func testOnboardingParentAccountEntryRemainsOptional() {
+        let app = launchFreshApp()
+
+        advanceOnboarding(in: app, toStep: 5)
+
+        let parentAccountButton = app.buttons["onboardingParentAccountButton"]
+        XCTAssertTrue(parentAccountButton.waitForExistence(timeout: 10))
+        parentAccountButton.tap()
+
+        XCTAssertTrue(app.staticTexts["parentAccountSheetTitle"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["parentAccountAppleButton"].exists)
+        XCTAssertTrue(app.staticTexts["parentAccountAppleSummary"].exists)
+        XCTAssertTrue(app.buttons["parentAccountCancelButton"].exists)
+        app.buttons["parentAccountCancelButton"].tap()
+
+        XCTAssertTrue(app.buttons["onboardingStartFirstStoryButton"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["onboardingFinishLaterButton"].exists)
+    }
+
+    func testChildStorySurfacesRemainFreeOfAccountPrompts() {
+        let app = launchApp()
+
+        XCTAssertFalse(app.staticTexts["parentAccountStatusTitle"].exists)
+
+        let newStoryButton = app.buttons["newStoryInlineButton"]
+        XCTAssertTrue(newStoryButton.waitForExistence(timeout: 10))
+        newStoryButton.tap()
+
+        XCTAssertFalse(app.staticTexts["parentAccountStatusTitle"].exists)
+
+        let startVoiceButton = app.buttons["startVoiceSessionButton"]
+        if !startVoiceButton.waitForExistence(timeout: 3) {
+            for _ in 0..<3 where !startVoiceButton.exists {
+                app.swipeUp()
+            }
+        }
+        XCTAssertTrue(startVoiceButton.waitForExistence(timeout: 10))
+        startVoiceButton.tap()
+
+        let storyTitle = app.staticTexts["storyTitleLabel"]
+        XCTAssertTrue(storyTitle.waitForExistence(timeout: 120))
+        XCTAssertFalse(app.staticTexts["parentAccountStatusTitle"].exists)
+        XCTAssertFalse(app.buttons["parentUpgradeToPlusButton"].exists)
+    }
+
     func testJourneyBlocksNewStoryStartAndRoutesToParentManagedReview() {
         let app = launchApp(extraEnvironment: [
             "STORYTIME_UI_TEST_PREFLIGHT_OVERRIDE": "block_new_story"
@@ -651,12 +869,57 @@ final class StoryTimeUITests: XCTestCase {
         XCTAssertTrue(parentPlanButton.waitForExistence(timeout: 10))
         parentPlanButton.tap()
 
+        createParentAccount(in: app, email: "journeybuyer@example.com", password: "secret1")
+
         let upgradeButton = app.buttons["parentUpgradeToPlusButton"]
-        XCTAssertTrue(upgradeButton.waitForExistence(timeout: 10))
+        XCTAssertTrue(scrollToElement(upgradeButton, in: app))
         upgradeButton.tap()
 
         let parentPlanTitle = app.staticTexts["parentPlanTitle"]
         XCTAssertTrue(waitForLabel(of: parentPlanTitle, toEqual: "Plus"))
+
+        app.buttons["Done"].tap()
+        XCTAssertTrue(app.staticTexts["journeyUpgradeReviewTitle"].waitForExistence(timeout: 10))
+        app.buttons["Done"].tap()
+
+        XCTAssertTrue(waitForLabel(of: startVoiceButton, toEqual: "Start Voice Session"))
+        startVoiceButton.tap()
+
+        let storyTitle = app.staticTexts["storyTitleLabel"]
+        XCTAssertTrue(storyTitle.waitForExistence(timeout: 120))
+    }
+
+    func testJourneyBlockedStartCanRecoverAfterAuthenticatedRestore() {
+        let app = launchApp(extraEnvironment: [
+            "STORYTIME_UI_TEST_PREFLIGHT_OVERRIDE": "block_new_story",
+            "STORYTIME_UI_TEST_RESTORE_ENTITLEMENT_TIER": "plus"
+        ])
+
+        let newStoryButton = app.buttons["newStoryInlineButton"]
+        XCTAssertTrue(newStoryButton.waitForExistence(timeout: 10))
+        newStoryButton.tap()
+
+        let startVoiceButton = app.buttons["startVoiceSessionButton"]
+        XCTAssertTrue(scrollToElement(startVoiceButton, in: app))
+        startVoiceButton.tap()
+        XCTAssertTrue(waitForLabel(of: startVoiceButton, toEqual: "Ask a Parent to Review Plans"))
+        startVoiceButton.tap()
+
+        let gateField = app.textFields["parentAccessGateField"]
+        XCTAssertTrue(gateField.waitForExistence(timeout: 10))
+        gateField.tap()
+        gateField.typeText("PARENT")
+
+        let unlockButton = app.buttons["unlockParentControlsButton"]
+        XCTAssertTrue(unlockButton.waitForExistence(timeout: 10))
+        unlockButton.tap()
+
+        let parentPlanButton = app.buttons["journeyUpgradeReviewParentControlsButton"]
+        XCTAssertTrue(parentPlanButton.waitForExistence(timeout: 10))
+        parentPlanButton.tap()
+
+        createParentAccount(in: app, email: "restorejourney@example.com", password: "secret1")
+        restorePurchases(in: app)
 
         app.buttons["Done"].tap()
         XCTAssertTrue(app.staticTexts["journeyUpgradeReviewTitle"].waitForExistence(timeout: 10))
@@ -793,12 +1056,58 @@ final class StoryTimeUITests: XCTestCase {
         XCTAssertTrue(parentPlanButton.waitForExistence(timeout: 10))
         parentPlanButton.tap()
 
+        createParentAccount(in: app, email: "seriesbuyer@example.com", password: "secret1")
+
         let upgradeButton = app.buttons["parentUpgradeToPlusButton"]
-        XCTAssertTrue(upgradeButton.waitForExistence(timeout: 10))
+        XCTAssertTrue(scrollToElement(upgradeButton, in: app))
         upgradeButton.tap()
 
         let parentPlanTitle = app.staticTexts["parentPlanTitle"]
         XCTAssertTrue(waitForLabel(of: parentPlanTitle, toEqual: "Plus"))
+
+        app.buttons["Done"].tap()
+        XCTAssertTrue(app.staticTexts["seriesDetailUpgradeReviewTitle"].waitForExistence(timeout: 10))
+        app.buttons["Done"].tap()
+
+        XCTAssertTrue(waitForLabel(of: newEpisodeButton, toEqual: "New Episode"))
+        newEpisodeButton.tap()
+
+        let storyTitle = app.staticTexts["storyTitleLabel"]
+        XCTAssertTrue(storyTitle.waitForExistence(timeout: 120))
+    }
+
+    func testSeriesDetailBlockedContinuationCanRecoverAfterAuthenticatedPlanRefresh() {
+        let app = launchApp(extraEnvironment: [
+            "STORYTIME_UI_TEST_PREFLIGHT_OVERRIDE": "block_continue_story",
+            "STORYTIME_UI_TEST_REFRESH_ENTITLEMENT_TIER": "plus"
+        ])
+
+        let seededSeriesCard = app.buttons["seriesCard-55555555-5555-5555-5555-555555555555"]
+        XCTAssertTrue(seededSeriesCard.waitForExistence(timeout: 10))
+        seededSeriesCard.tap()
+
+        let newEpisodeButton = app.buttons["newEpisodeButton"]
+        XCTAssertTrue(newEpisodeButton.waitForExistence(timeout: 10))
+        newEpisodeButton.tap()
+
+        XCTAssertTrue(waitForLabel(of: newEpisodeButton, toEqual: "Ask a Parent"))
+        newEpisodeButton.tap()
+
+        let gateField = app.textFields["parentAccessGateField"]
+        XCTAssertTrue(gateField.waitForExistence(timeout: 10))
+        gateField.tap()
+        gateField.typeText("PARENT")
+
+        let unlockButton = app.buttons["unlockParentControlsButton"]
+        XCTAssertTrue(unlockButton.waitForExistence(timeout: 10))
+        unlockButton.tap()
+
+        let parentPlanButton = app.buttons["seriesDetailUpgradeReviewParentControlsButton"]
+        XCTAssertTrue(parentPlanButton.waitForExistence(timeout: 10))
+        parentPlanButton.tap()
+
+        createParentAccount(in: app, email: "refreshseries@example.com", password: "secret1")
+        refreshPlanStatus(in: app)
 
         app.buttons["Done"].tap()
         XCTAssertTrue(app.staticTexts["seriesDetailUpgradeReviewTitle"].waitForExistence(timeout: 10))
@@ -1188,10 +1497,19 @@ final class StoryTimeUITests: XCTestCase {
         XCTAssertFalse(seededSeriesCard.exists)
     }
 
-    private func launchApp(extraEnvironment: [String: String] = [:]) -> XCUIApplication {
+    private func launchApp(
+        reset: Bool = true,
+        seed: Bool = true,
+        extraEnvironment: [String: String] = [:]
+    ) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchEnvironment["STORYTIME_UI_TEST_MODE"] = "1"
-        app.launchEnvironment["STORYTIME_UI_TEST_SEED"] = "1"
+        if seed {
+            app.launchEnvironment["STORYTIME_UI_TEST_SEED"] = "1"
+        }
+        if reset && !seed {
+            app.launchEnvironment["STORYTIME_UI_TEST_RESET"] = "1"
+        }
         extraEnvironment.forEach { app.launchEnvironment[$0.key] = $0.value }
         app.launch()
         return app
@@ -1227,6 +1545,71 @@ final class StoryTimeUITests: XCTestCase {
         unlockButton.tap()
     }
 
+    private func createParentAccount(in app: XCUIApplication, email: String, password: String) {
+        let entryButton = app.buttons["parentAccountEntryButton"]
+        XCTAssertTrue(entryButton.waitForExistence(timeout: 10))
+        entryButton.tap()
+
+        XCTAssertTrue(app.staticTexts["parentAccountSheetTitle"].waitForExistence(timeout: 10))
+
+        let emailField = app.textFields["parentAccountEmailField"]
+        XCTAssertTrue(emailField.waitForExistence(timeout: 10))
+        emailField.tap()
+        emailField.typeText(email)
+
+        let passwordField = app.secureTextFields["parentAccountPasswordField"]
+        XCTAssertTrue(passwordField.waitForExistence(timeout: 10))
+        passwordField.tap()
+        passwordField.typeText(password)
+
+        let primaryButton = app.buttons["parentAccountPrimaryButton"]
+        XCTAssertTrue(primaryButton.waitForExistence(timeout: 10))
+        primaryButton.tap()
+
+        let sheetTitle = app.staticTexts["parentAccountSheetTitle"]
+        XCTAssertTrue(waitForNonExistence(of: sheetTitle, timeout: 10))
+        XCTAssertTrue(app.buttons["parentAccountManageButton"].waitForExistence(timeout: 10))
+
+        let savePasswordButton = app.buttons["Not Now"]
+        if savePasswordButton.waitForExistence(timeout: 2) {
+            savePasswordButton.tap()
+        }
+    }
+
+    private func signInWithApple(in app: XCUIApplication) {
+        let entryButton = app.buttons["parentAccountEntryButton"]
+        XCTAssertTrue(entryButton.waitForExistence(timeout: 10))
+        entryButton.tap()
+
+        let sheetTitle = app.staticTexts["parentAccountSheetTitle"]
+        XCTAssertTrue(sheetTitle.waitForExistence(timeout: 10))
+
+        let appleButton = app.buttons["parentAccountAppleButton"]
+        XCTAssertTrue(appleButton.waitForExistence(timeout: 10))
+        appleButton.tap()
+
+        XCTAssertTrue(waitForNonExistence(of: sheetTitle, timeout: 10))
+    }
+
+    private func refreshPlanStatus(in app: XCUIApplication) {
+        let refreshButton = app.buttons["parentRefreshPlanButton"]
+        XCTAssertTrue(scrollToElement(refreshButton, in: app))
+        refreshButton.tap()
+        XCTAssertTrue(app.staticTexts["parentPlanActionStatus"].waitForExistence(timeout: 10))
+        XCTAssertEqual(app.staticTexts["parentPlanActionStatus"].label, "Plan status refreshed for this device.")
+    }
+
+    private func restorePurchases(in app: XCUIApplication) {
+        let restoreButton = app.buttons["parentRestorePurchasesButton"]
+        XCTAssertTrue(scrollToElement(restoreButton, in: app))
+        restoreButton.tap()
+        XCTAssertTrue(app.staticTexts["parentPlanActionStatus"].waitForExistence(timeout: 10))
+        XCTAssertEqual(
+            app.staticTexts["parentPlanActionStatus"].label,
+            "Restore check finished. StoryTime refreshed the plan for this device."
+        )
+    }
+
     private func startSeededReplayAndWaitForCompletion(in app: XCUIApplication) {
         let seededSeriesCard = app.buttons["seriesCard-55555555-5555-5555-5555-555555555555"]
         XCTAssertTrue(seededSeriesCard.waitForExistence(timeout: 10))
@@ -1252,6 +1635,13 @@ final class StoryTimeUITests: XCTestCase {
             }
         }
 
+        for _ in 0..<maxSwipes {
+            app.swipeDown()
+            if element.waitForExistence(timeout: 1) {
+                return true
+            }
+        }
+
         return element.exists
     }
 
@@ -1261,6 +1651,18 @@ final class StoryTimeUITests: XCTestCase {
         timeout: TimeInterval = 10
     ) -> Bool {
         let predicate = NSPredicate(format: "label == %@", expected)
+        let expectation = XCTNSPredicateExpectation(predicate: predicate, object: element)
+        return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
+    }
+
+    private func waitForHittable(_ element: XCUIElement, timeout: TimeInterval = 10) -> Bool {
+        let predicate = NSPredicate(format: "exists == true AND hittable == true")
+        let expectation = XCTNSPredicateExpectation(predicate: predicate, object: element)
+        return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
+    }
+
+    private func waitForNonExistence(of element: XCUIElement, timeout: TimeInterval = 10) -> Bool {
+        let predicate = NSPredicate(format: "exists == false")
         let expectation = XCTNSPredicateExpectation(predicate: predicate, object: element)
         return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
     }

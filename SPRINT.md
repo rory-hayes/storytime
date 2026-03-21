@@ -2,7 +2,7 @@
 
 ## Sprint Goal
 
-Use the verified hybrid-runtime baseline and completed M8 groundwork to ship the next launch-readiness milestone set without weakening the runtime gate.
+Use the repo-ready MVP baseline to ship the smallest parent-account, authenticated-entitlement, StoreKit, and promo-grant foundation without weakening the runtime gate or the child-safe product boundary.
 
 ## Execution Rules
 
@@ -13,13 +13,14 @@ Use the verified hybrid-runtime baseline and completed M8 groundwork to ship the
 - Do not mark a milestone `DONE` until its definition of done is met and its required tests pass.
 - After every run, update both `PLANS.md` and this file.
 - Keep `tiny-backend/` out of active implementation and planning except as labeled historical context.
-- The hybrid runtime baseline and M8 productization groundwork are established; prioritize launch readiness, onboarding, entitlement implementation, upgrade surfaces, usage enforcement, repeat-use flow, telemetry confidence, and explicit acceptance evidence unless a new runtime defect is explicitly recorded in `PLANS.md`.
+- The hybrid runtime baseline and launch-ready MVP baseline are established; prioritize parent-managed account identity, authenticated entitlements, parent-only commerce flows, promo grants, and explicit blocked-to-unlocked verification unless a new runtime defect is explicitly recorded in `PLANS.md`.
 
 ## Queue State
 
 - Sprint 10 is complete.
 - The final launch recommendation is now recorded in `docs/verification/launch-candidate-acceptance-report.md` as `READY FOR MVP LAUNCH`.
-- No ordered incomplete milestone remains in this sprint queue. Add a new approved milestone group before starting further implementation work.
+- Sprint 11 is now approved as the parent-account and payment-foundation sprint.
+- The next ordered milestone is still `M11.6 - Authenticated restore and entitlement refresh verification`.
 
 ## Status Legend
 
@@ -165,6 +166,322 @@ Completion notes:
 - The March 20, 2026 rerun passed the hybrid validation baseline, backend launch-contract suite, iOS launch-product unit suite, and full `38`-test iOS UI launch suite after `M10.1` and `M10.2`.
 - The only rerun issue was a tightly related brittle UI assertion in `testJourneyReviewLinksToDurableParentPlanSurface`; updating that test to use the existing `scrollToElement(...)` pattern produced a clean targeted rerun and a clean full rerun without changing product behavior.
 - `docs/verification/launch-candidate-acceptance-report.md` now records the final repo-grounded recommendation as `READY FOR MVP LAUNCH`, while keeping the external live App Store environment gap explicitly labeled as non-blocking and unverified in repo terms.
+
+## Phase 11 - Parent Accounts, Authenticated Entitlements, And Commerce Foundation
+
+### M11.1 - Account architecture and flow alignment
+
+Status: `DONE`
+
+Goal:
+- Lock the minimal Sprint 11 architecture so parent identity, payments, entitlements, and promo grants fit the current repo without widening into cloud sync or child-facing auth friction.
+
+Concrete tasks:
+- Inspect the active parent-managed surfaces, install/session auth flow, entitlement token model, and Firebase bootstrap already present in the repo.
+- Define the minimal parent account journey across onboarding, `HomeView`, `NewStoryJourneyView`, `StorySeriesDetailView`, and `ParentTrustCenterView`.
+- Decide which parent auth methods are in scope first and which are explicitly deferred.
+- Define how authenticated parent identity, StoreKit purchase ownership, backend entitlement records, and promo grants stay separate but connected.
+- Define whether story history and continuity remain local-only in Sprint 11 and record any explicit deferrals such as cloud sync or cross-device continuity.
+- Update the relevant planning docs and control files with the approved architecture, open decisions, and next implementation step.
+
+Required tests or verification method:
+- Planning-only milestone; no new automated tests required.
+- Repo-grounded documentation update citing the inspected code paths, tests, and recent verification artifacts.
+
+Dependencies:
+- `docs/verification/launch-candidate-acceptance-report.md`
+- Current auth, entitlement, and purchase seams in `ios/StoryTime/App/StoryTimeApp.swift`, `ios/StoryTime/Networking/APIClient.swift`, `ios/StoryTime/Features/Story/HomeView.swift`, `backend/src/app.ts`, `backend/src/lib/auth.ts`, `backend/src/lib/security.ts`, and `backend/src/lib/entitlements.ts`
+
+Definition of done:
+- The minimal Sprint 11 architecture is explicit in repo terms.
+- Parent-managed auth and commerce boundaries are locked.
+- The first implementation milestone after planning is specific enough for one Codex run.
+
+Completion notes:
+- `docs/parent-account-payment-foundation-architecture.md` now locks Sprint 11 around Firebase-backed parent identity layered on top of the existing install/session runtime model instead of replacing it outright.
+- First-scope auth methods are now explicitly narrowed to `email/password` plus `Sign in with Apple`, while Google sign-in, phone auth, child identity, and broader family-role systems remain deferred.
+- Parent identity, StoreKit purchase truth, and backend entitlement enforcement are now explicitly separated systems, with authenticated parent ownership kept separate from `EntitlementSnapshot.source`.
+- Promo redemption is now locked as a parent-only, authenticated, bounded flow with `promo_grant` as the intended premium source, and story history plus continuity remain local-only for Sprint 11.
+
+### M11.2 - Firebase Auth integration for parent identity
+
+Status: `DONE`
+
+Goal:
+- Add the minimum Firebase Auth foundation needed to support parent identity without disturbing child-facing story flow or the verified runtime startup path.
+
+Concrete tasks:
+- Add the required Firebase Auth dependency and app bootstrap wiring on top of the existing `FirebaseCore` setup.
+- Introduce a parent-auth manager or equivalent seam that can expose signed-in parent state to parent-managed UI surfaces.
+- Keep install/session runtime bootstrap separate from parent identity until backend-authenticated ownership is ready.
+- Ensure sign-in state is available to onboarding and `ParentTrustCenterView` without adding prompts to `VoiceSessionView`.
+- Record any required config, environment, or local-development setup needed for repo use.
+
+Required tests or verification method:
+- New or updated iOS auth-manager tests
+- `StoryTimeUITests` coverage proving child-facing story surfaces stay sign-in-free
+- `APIClientTests` only if request headers or bootstrap behavior change
+
+Dependencies:
+- `M11.1`
+
+Definition of done:
+- The repo has a working Firebase Auth foundation for parent identity.
+- Parent auth state is observable from parent-managed surfaces.
+- Child storytelling surfaces remain auth-free.
+
+Completion notes:
+- `FirebaseAuth` is now linked in the iOS target on top of the existing `FirebaseCore` package setup, and `StoryTimeApp` now bootstraps Firebase before the parent-auth seam is created.
+- The app now owns a dedicated `ParentAuthManager` observable object that listens to Firebase Auth state and exposes signed-in versus signed-out parent status without touching `APIClient` or the install/session runtime model.
+- Onboarding handoff and `ParentTrustCenterView` now display parent-auth status, while `NewStoryJourneyView`, `StorySeriesDetailView`, and `VoiceSessionView` remain free of sign-in prompts.
+- Targeted unit and UI coverage now prove the parent-auth seam works and that child-facing story surfaces stay sign-in-free.
+
+### M11.3a - Email/password parent account surfaces and relaunch persistence
+
+Status: `DONE`
+
+Goal:
+- Implement the smallest parent-managed account UI and persistence flow for `email/password` so a parent can create or sign into an account without turning story start into a sign-in-first experience.
+
+Concrete tasks:
+- Add a parent-managed account entry surface reachable from onboarding handoff or `ParentTrustCenterView`.
+- Implement `email/password` create-account and sign-in flows through the Firebase-backed parent-auth seam.
+- Persist and restore signed-in parent session state on app relaunch in a way that stays separate from child story history.
+- Add parent-facing signed-in state, direct sign-out, and safe failure messaging where appropriate.
+- Keep blocked launch review and purchase entry parent-managed, and do not inject sign-in prompts into `NewStoryJourneyView`, `StorySeriesDetailView`, or `VoiceSessionView` during child use.
+
+Required tests or verification method:
+- `StoryTimeUITests` for parent create account, sign in, relaunch persistence, and sign-out
+- iOS auth-manager tests for parent session restoration and failure states
+
+Dependencies:
+- `M11.2`
+
+Definition of done:
+- A parent can create or sign into an account with `email/password` from a parent-managed surface.
+- Signed-in state persists across relaunch.
+- Child-facing story flows remain usable without direct auth clutter.
+
+Completion notes:
+- `ParentTrustCenterView` and onboarding handoff now route to a shared `ParentAccountSheetView` for parent-only `email/password` create-account and sign-in actions.
+- `ParentAuthManager` now exposes async create-account and sign-in actions, safe failure messaging, and sign-out while keeping parent identity separate from install/session runtime plumbing.
+- Direct signed-in sign-out now stays in `ParentTrustCenterView`, relaunch persistence is covered with the deterministic UI-test auth provider, and child-facing story surfaces remain auth-free in targeted UI coverage.
+
+### M11.3b - Sign in with Apple on parent-managed account surfaces
+
+Status: `DONE`
+
+Goal:
+- Add `Sign in with Apple` to the same parent-managed account surfaces so Sprint 11 completes the planned first-scope auth set without widening into child-facing auth friction.
+
+Concrete tasks:
+- Extend the parent account sheet and any related parent-led entry points with `Sign in with Apple`.
+- Integrate the Apple sign-in credential flow into the existing `ParentAuthManager` seam without weakening explicit signed-in versus signed-out state handling.
+- Ensure relaunch persistence, signed-in summary, sign-out, and safe cancellation or failure messaging remain explicit for Apple-authenticated sessions.
+- Keep onboarding, `ParentTrustCenterView`, blocked review surfaces, and purchase entry parent-managed while leaving child story flow sign-in-free.
+- Record any repo-level setup or simulator constraints needed to test the Apple flow honestly.
+
+Required tests or verification method:
+- `StoryTimeUITests` for parent-managed `Sign in with Apple` entry visibility and signed-in-state behavior
+- iOS auth-manager tests for Apple sign-in success, cancellation, and failure handling
+
+Dependencies:
+- `M11.3a`
+
+Definition of done:
+- A parent can use `Sign in with Apple` from the approved parent-managed account surfaces.
+- Apple-authenticated state is explicit, safe, and persistent across relaunch.
+- Child-facing story flows remain free of direct auth prompts.
+
+Completion notes:
+- The shared `ParentAccountSheetView` now includes a parent-managed `Sign in with Apple` action alongside the existing `email/password` flow, and onboarding handoff plus `ParentTrustCenterView` continue to reuse that shared surface instead of adding auth prompts to child story flow.
+- `ParentAuthManager` now supports Apple-authenticated sign-in, explicit Apple-versus-email signed-in summaries, safe cancellation messaging, and the Firebase Auth Apple credential flow behind the same observable parent-auth seam.
+- The app target now includes the required Apple sign-in entitlement, and the repo records the environment constraint honestly: production code uses `AuthenticationServices`, while deterministic UI-test coverage uses the seeded test auth provider because the system Apple authorization sheet is environment-dependent in automation.
+- Targeted unit and UI coverage now prove Apple-authenticated relaunch persistence on parent-managed surfaces and confirm child story surfaces remain free of direct auth prompts.
+
+### M11.4 - Backend authenticated entitlement model alignment
+
+Status: `DONE`
+
+Goal:
+- Align backend entitlement lookup, persistence, and preflight ownership to authenticated parent users while preserving the existing install/session runtime plumbing.
+
+Concrete tasks:
+- Add backend verification for Firebase-authenticated parent identity on the routes that need account ownership.
+- Introduce the minimal backend user-ownership model needed for entitlement records and promo grants.
+- Separate install-scoped runtime session behavior from authenticated parent ownership so the current realtime and story routes do not regress.
+- Update entitlement bootstrap, sync, refresh, and preflight contracts to support authenticated ownership while keeping parent-managed surfaces truthful.
+- Record the ownership model for purchase-derived versus promo-derived premium access.
+
+Required tests or verification method:
+- backend `auth-security.test.ts` updates for authenticated parent identity handling
+- backend entitlement route or integration tests for authenticated ownership
+- `APIClientTests` for any changed contract handling
+
+Dependencies:
+- `M11.1`
+- `M11.2`
+
+Definition of done:
+- Backend entitlement ownership is explicit and authenticated.
+- Install/session runtime plumbing still works for the active app architecture.
+- Directly affected backend and client contract tests pass.
+
+Completion notes:
+- The backend now verifies Firebase-authenticated parent identity on `/v1/session/identity` and entitlement routes through an injected verifier seam and the `x-storytime-parent-auth` header.
+- Entitlement owner is now explicit and separate from source; bootstrap, sync, and preflight return owner metadata, and signed entitlement tokens carry that owner forward for later checks.
+- Authenticated parent entitlement records now resolve by parent user while story and realtime routes remain install/session scoped, and stale install-owned entitlement tokens are ignored once a parent account is authenticated.
+- Targeted backend auth plus integration tests, a backend production build, and `APIClientTests` all pass for the updated ownership contract.
+
+### M11.5 - StoreKit purchase integration in parent-managed surfaces
+
+Status: `DONE`
+
+Goal:
+- Tie the existing parent-managed StoreKit purchase flow to authenticated parent accounts while keeping purchase UI out of child-session surfaces.
+
+Concrete tasks:
+- Reuse the existing StoreKit normalization seam and parent-managed purchase UI in `ParentTrustCenterView`.
+- Connect purchase completion to the authenticated backend entitlement owner model instead of install-only entitlement ownership.
+- Keep purchase initiation, completion, and failure handling in parent-managed surfaces only.
+- Keep blocked review sheets routing into parent-managed surfaces rather than embedding purchase UI in story setup or voice runtime.
+- Update parent-facing copy so purchase ownership and account expectations are truthful.
+
+Required tests or verification method:
+- `StoryTimeUITests` for authenticated parent-managed purchase completion
+- `APIClientTests` for purchase-sync contract changes
+- backend entitlement integration tests for authenticated purchase ownership
+
+Dependencies:
+- `M11.3a`
+- `M11.3b`
+- `M11.4`
+
+Definition of done:
+- An authenticated parent can complete a purchase from approved parent-managed surfaces.
+- Purchase ownership is tied to the authenticated account.
+- Child-session surfaces remain purchase-free.
+
+Notes:
+- Client and backend purchase ownership now require an authenticated parent account, and parent-facing copy in `ParentTrustCenterView` now explains that new purchases belong to the signed-in parent rather than only to the current device.
+- Backend purchase-linked `/v1/entitlements/sync` now rejects unauthenticated purchase refresh with `parent_auth_required`, and targeted backend entitlement tests plus `APIClientTests`/`SmokeTests` are passing.
+- Focused UI coverage now proves direct authenticated purchase completion in `ParentTrustCenterView`, plus blocked new-story and blocked continuation recovery after purchase while child-session surfaces remain purchase-free.
+- UI-test account helpers now dismiss the system `Save Password?` sheet so parent-managed purchase verification remains deterministic without changing product behavior.
+
+### M11.6 - Authenticated restore and entitlement refresh verification
+
+Status: `IN PROGRESS`
+
+Goal:
+- Prove restore and entitlement refresh behave correctly once account ownership exists.
+
+Concrete tasks:
+- Verify restore works for the signed-in parent account and refreshes the correct entitlement owner.
+- Verify account relaunch, sign-out, and re-sign-in do not leave stale entitlement state on device.
+- Verify blocked new-story and continuation flows can recover after authenticated restore or entitlement refresh when the refreshed state materially changes.
+- Record the verification evidence and any remaining environment-dependent gaps.
+
+Required tests or verification method:
+- `StoryTimeUITests` for authenticated restore and refresh recovery paths
+- `APIClientTests` for refreshed authenticated entitlement-state handling
+- backend integration tests for authenticated sync or refresh routes
+- Updated verification doc with explicit evidence labels
+
+Dependencies:
+- `M11.5`
+
+Definition of done:
+- Restore and entitlement refresh are directly verified under authenticated user ownership.
+- Retry uses refreshed authenticated entitlement state instead of bypassing gating.
+- Remaining live-environment gaps are documented explicitly.
+
+Notes:
+- Backend restore-linked `/v1/entitlements/sync` now requires authenticated parent ownership with the same `parent_auth_required` boundary as purchase-linked sync, and targeted backend restore tests are passing.
+- `APIClientTests` plus `ParentAuthManagerTests` now cover authenticated restore owner metadata, restore account requirements, and the new install-owned entitlement fallback path after parent sign-out.
+- Isolated UI tests now prove blocked new-story recovery after authenticated restore and blocked continuation recovery after authenticated plan refresh.
+- The milestone is not done yet because `StoryTimeUITests.testParentControlsCanRestorePlusForSignedInParentAndClearItOnSignOut` still does not observe the expected `Starter` title after sign-out from restored Plus, even though the underlying fallback path now passes in unit coverage.
+
+### M11.7 - Promo-code redemption flow for premium grants
+
+Status: `TODO`
+
+Goal:
+- Add a bounded parent-only promo redemption flow that grants premium access through backend entitlement ownership without requiring a paid purchase.
+
+Concrete tasks:
+- Add a parent-managed promo redemption entry point in an approved parent surface.
+- Define the minimal backend promo-grant record and redemption rules chosen in `M11.1`.
+- Update the entitlement model so promo grants can produce premium access with truthful source or ownership metadata.
+- Ensure promo redemption remains explicit, safe to test, and separate from paid purchase completion.
+- Document any admin or seeding assumptions required for repo verification without relying on hidden debug-only behavior for real promo logic.
+
+Required tests or verification method:
+- `StoryTimeUITests` for promo redemption from a parent-managed surface
+- `APIClientTests` for promo redemption contract handling
+- backend integration tests for promo redemption success, invalid code, and already-used or expired code cases
+
+Dependencies:
+- `M11.3a`
+- `M11.3b`
+- `M11.4`
+
+Definition of done:
+- An authenticated parent can redeem a valid promo code and receive premium access.
+- Promo-derived premium access is distinguishable from paid purchase ownership in the backend model.
+- Promo failure modes are safe and test-covered.
+
+### M11.8 - Account, payment, and promo happy-path verification
+
+Status: `TODO`
+
+Goal:
+- Prove the new account-backed commercial flows work end to end without leaking auth or purchase friction into child storytelling surfaces.
+
+Concrete tasks:
+- Verify blocked new-story start -> parent sign in or account creation -> purchase -> unlock -> retry success.
+- Verify blocked saved-series continuation -> parent sign in or account creation -> purchase -> unlock -> retry success.
+- Verify blocked flows can also recover through promo redemption where applicable.
+- Verify restore remains parent-managed and child-session surfaces stay auth-free and purchase-free.
+- Record exact commands, evidence labels, remaining gaps, and any route-specific assumptions.
+
+Required tests or verification method:
+- `StoryTimeUITests` for purchase and promo recovery paths
+- `APIClientTests` for authenticated entitlement-token or state reuse on retry
+- backend integration tests for blocked-to-allowed authenticated transitions
+- Updated verification artifact in `docs/verification/`
+
+Dependencies:
+- `M11.6`
+- `M11.7`
+
+Definition of done:
+- The repo has direct automated evidence for purchase-backed and promo-backed blocked-to-unlocked recovery.
+- Retry uses the authenticated entitlement path instead of bypassing gating.
+- Child-facing runtime surfaces still do not host auth or purchase prompts.
+
+### M11.9 - Post-sprint readiness summary and remaining gaps
+
+Status: `TODO`
+
+Goal:
+- Summarize the resulting account and commerce foundation, remaining risks, and the next recommended workstream after Sprint 11.
+
+Concrete tasks:
+- Re-inspect the new parent-auth, entitlement, purchase, restore, and promo flows in repo terms.
+- Record what is fully verified, partially verified, or still unverified after Sprint 11.
+- Decide whether the next sprint should stay on authenticated commerce hardening or move into cross-device and account-linked continuity planning.
+- Update `PLANS.md`, `SPRINT.md`, and the relevant verification or architecture docs with the explicit recommendation.
+
+Required tests or verification method:
+- The exact Sprint 11 verification command set recorded in the updated docs
+- Updated summary or readiness report in `docs/`
+
+Dependencies:
+- `M11.8`
+
+Definition of done:
+- The repo contains one explicit post-sprint recommendation.
+- Remaining gaps and intentional deferrals are documented clearly enough for the next queue decision.
 
 ## Phase 1 - Core Voice Reliability
 

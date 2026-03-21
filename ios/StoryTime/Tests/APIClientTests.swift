@@ -169,6 +169,72 @@ final class APIClientTests: XCTestCase {
         XCTAssertEqual(AppEntitlements.currentToken, "signed-entitlement-token")
     }
 
+    func testBootstrapSessionIdentityIncludesParentAuthHeaderAndStoresEntitlementOwner() async throws {
+        let session = makeSession()
+        let baseURL = URL(string: "https://backend.example.com/")!
+        let effectiveAt = Date().addingTimeInterval(-60).timeIntervalSince1970
+        let expiresAt = Date().addingTimeInterval(3_600).timeIntervalSince1970
+
+        URLProtocolStub.handler = { request in
+            let url = try XCTUnwrap(request.url)
+            XCTAssertEqual(url.path, "/v1/session/identity")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "x-storytime-parent-auth"), "parent-token-123")
+            return try Self.httpResponse(
+                url: url,
+                statusCode: 200,
+                json: [
+                    "session_id": "session-parent-owned-1",
+                    "region": "US",
+                    "entitlements": [
+                        "snapshot": [
+                            "tier": "plus",
+                            "source": "storekit_verified",
+                            "max_child_profiles": 3,
+                            "max_story_starts_per_period": 12,
+                            "max_continuations_per_period": 12,
+                            "max_story_length_minutes": 10,
+                            "can_replay_saved_stories": true,
+                            "can_start_new_stories": true,
+                            "can_continue_saved_series": true,
+                            "effective_at": effectiveAt,
+                            "expires_at": expiresAt,
+                            "usage_window": [
+                                "kind": "rolling_period",
+                                "duration_seconds": 604800,
+                                "resets_at": NSNull()
+                            ],
+                            "remaining_story_starts": 12,
+                            "remaining_continuations": 12
+                        ],
+                        "token": "signed-parent-entitlement-token",
+                        "expires_at": expiresAt,
+                        "owner": [
+                            "kind": "parent_user",
+                            "parent_user_id": "parent-123",
+                            "auth_provider": "firebase"
+                        ]
+                    ]
+                ],
+                headers: [
+                    "x-storytime-session": "signed-session-token",
+                    "x-storytime-session-expires-at": String(Date().addingTimeInterval(300).timeIntervalSince1970)
+                ]
+            )
+        }
+
+        let client = APIClient(
+            baseURLs: [baseURL],
+            session: session,
+            installId: "install-123",
+            parentAuthTokenProvider: StubParentAuthTokenProvider(token: "parent-token-123")
+        )
+        try await client.bootstrapSessionIdentity(baseURL: baseURL)
+
+        XCTAssertEqual(AppEntitlements.currentEnvelope?.owner?.kind, .parentUser)
+        XCTAssertEqual(AppEntitlements.currentEnvelope?.owner?.parentUserID, "parent-123")
+        XCTAssertEqual(AppEntitlements.currentEnvelope?.owner?.authProvider, .firebase)
+    }
+
     func testAppEntitlementsClearsExpiredSnapshot() {
         AppEntitlements.store(
             envelope: EntitlementBootstrapEnvelope(
@@ -308,6 +374,407 @@ final class APIClientTests: XCTestCase {
         XCTAssertEqual(AppEntitlements.currentToken, "refreshed-entitlement-token")
     }
 
+    func testRestoreSyncStoresAuthenticatedOwnerMetadata() async throws {
+        let session = makeSession()
+        let baseURL = URL(string: "https://backend.example.com/")!
+        let effectiveAt = Date().addingTimeInterval(-60).timeIntervalSince1970
+        let expiresAt = Date().addingTimeInterval(3_600).timeIntervalSince1970
+
+        URLProtocolStub.handler = { request in
+            let url = try XCTUnwrap(request.url)
+
+            switch url.path {
+            case "/v1/session/identity":
+                XCTAssertEqual(request.value(forHTTPHeaderField: "x-storytime-parent-auth"), "parent-token-123")
+                return try Self.httpResponse(
+                    url: url,
+                    statusCode: 200,
+                    json: ["session_id": "session-restore-owner-1", "region": "US"],
+                    headers: [
+                        "x-storytime-session": "signed-session-token",
+                        "x-storytime-session-expires-at": String(Date().addingTimeInterval(300).timeIntervalSince1970)
+                    ]
+                )
+            case "/v1/entitlements/sync":
+                let body = try Self.requestBody(from: request)
+                let decoded = try JSONDecoder().decode(EntitlementSyncRequest.self, from: body)
+                XCTAssertEqual(decoded.refreshReason, .restore)
+                XCTAssertEqual(request.value(forHTTPHeaderField: "x-storytime-parent-auth"), "parent-token-123")
+
+                return try Self.httpResponse(
+                    url: url,
+                    statusCode: 200,
+                    json: [
+                        "entitlements": [
+                            "snapshot": [
+                                "tier": "plus",
+                                "source": "storekit_verified",
+                                "max_child_profiles": 3,
+                                "max_story_starts_per_period": 12,
+                                "max_continuations_per_period": 12,
+                                "max_story_length_minutes": 10,
+                                "can_replay_saved_stories": true,
+                                "can_start_new_stories": true,
+                                "can_continue_saved_series": true,
+                                "effective_at": effectiveAt,
+                                "expires_at": expiresAt,
+                                "usage_window": [
+                                    "kind": "rolling_period",
+                                    "duration_seconds": 604800,
+                                    "resets_at": NSNull()
+                                ],
+                                "remaining_story_starts": 12,
+                                "remaining_continuations": 12
+                            ],
+                            "token": "restore-owner-token",
+                            "expires_at": expiresAt,
+                            "owner": [
+                                "kind": "parent_user",
+                                "parent_user_id": "parent-alpha",
+                                "auth_provider": "firebase"
+                            ]
+                        ]
+                    ]
+                )
+            default:
+                XCTFail("Unexpected restore sync request: \(url.absoluteString)")
+                return Self.rawResponse(url: url, statusCode: 404, body: "")
+            }
+        }
+
+        let client = APIClient(
+            baseURLs: [baseURL],
+            session: session,
+            installId: "install-123",
+            parentAuthTokenProvider: StubParentAuthTokenProvider(token: "parent-token-123")
+        )
+        let envelope = try await client.syncEntitlements(
+            request: EntitlementSyncRequest(
+                refreshReason: .restore,
+                transactions: [
+                    EntitlementSyncTransaction(
+                        productID: "storytime.plus.monthly",
+                        originalTransactionID: "original-1",
+                        latestTransactionID: "latest-1",
+                        purchasedAt: Int(Date().addingTimeInterval(-600).timeIntervalSince1970),
+                        expiresAt: Int(Date().addingTimeInterval(3_600).timeIntervalSince1970),
+                        revokedAt: nil,
+                        ownershipType: .purchased,
+                        environment: .sandbox,
+                        verificationState: .verified,
+                        isActive: true
+                    )
+                ]
+            )
+        )
+
+        XCTAssertEqual(envelope.owner?.kind, .parentUser)
+        XCTAssertEqual(envelope.owner?.parentUserID, "parent-alpha")
+        XCTAssertEqual(AppEntitlements.currentOwner?.kind, .parentUser)
+        XCTAssertEqual(AppEntitlements.currentOwner?.parentUserID, "parent-alpha")
+    }
+
+    func testSyncAndPreflightSendParentAuthHeaderWhenParentIsSignedIn() async throws {
+        let session = makeSession()
+        let baseURL = URL(string: "https://backend.example.com/")!
+        let effectiveAt = Date().addingTimeInterval(-60).timeIntervalSince1970
+        let expiresAt = Date().addingTimeInterval(3_600).timeIntervalSince1970
+        var observedPaths: [String] = []
+
+        URLProtocolStub.handler = { request in
+            let url = try XCTUnwrap(request.url)
+            observedPaths.append(url.path)
+
+            switch url.path {
+            case "/v1/session/identity":
+                XCTAssertEqual(request.value(forHTTPHeaderField: "x-storytime-parent-auth"), "parent-token-123")
+                return try Self.httpResponse(
+                    url: url,
+                    statusCode: 200,
+                    json: ["session_id": "session-sync-parent-1", "region": "US"],
+                    headers: [
+                        "x-storytime-session": "signed-session-token",
+                        "x-storytime-session-expires-at": String(Date().addingTimeInterval(300).timeIntervalSince1970)
+                    ]
+                )
+            case "/v1/entitlements/sync":
+                XCTAssertEqual(request.value(forHTTPHeaderField: "x-storytime-parent-auth"), "parent-token-123")
+                return try Self.httpResponse(
+                    url: url,
+                    statusCode: 200,
+                    json: [
+                        "entitlements": [
+                            "snapshot": [
+                                "tier": "plus",
+                                "source": "storekit_verified",
+                                "max_child_profiles": 3,
+                                "max_story_starts_per_period": 12,
+                                "max_continuations_per_period": 12,
+                                "max_story_length_minutes": 10,
+                                "can_replay_saved_stories": true,
+                                "can_start_new_stories": true,
+                                "can_continue_saved_series": true,
+                                "effective_at": effectiveAt,
+                                "expires_at": expiresAt,
+                                "usage_window": [
+                                    "kind": "rolling_period",
+                                    "duration_seconds": 604800,
+                                    "resets_at": NSNull()
+                                ],
+                                "remaining_story_starts": 12,
+                                "remaining_continuations": 12
+                            ],
+                            "token": "refreshed-entitlement-token",
+                            "expires_at": expiresAt,
+                            "owner": [
+                                "kind": "parent_user",
+                                "parent_user_id": "parent-123",
+                                "auth_provider": "firebase"
+                            ]
+                        ]
+                    ]
+                )
+            case "/v1/entitlements/preflight":
+                XCTAssertEqual(request.value(forHTTPHeaderField: "x-storytime-parent-auth"), "parent-token-123")
+                XCTAssertEqual(request.value(forHTTPHeaderField: "x-storytime-entitlement"), "refreshed-entitlement-token")
+                return try Self.httpResponse(
+                    url: url,
+                    statusCode: 200,
+                    json: [
+                        "action": "new_story",
+                        "allowed": true,
+                        "block_reason": NSNull(),
+                        "recommended_upgrade_surface": NSNull(),
+                        "snapshot": [
+                            "tier": "plus",
+                            "source": "storekit_verified",
+                            "max_child_profiles": 3,
+                            "max_story_starts_per_period": 12,
+                            "max_continuations_per_period": 12,
+                            "max_story_length_minutes": 10,
+                            "can_replay_saved_stories": true,
+                            "can_start_new_stories": true,
+                            "can_continue_saved_series": true,
+                            "effective_at": effectiveAt,
+                            "expires_at": expiresAt,
+                            "usage_window": [
+                                "kind": "rolling_period",
+                                "duration_seconds": 604800,
+                                "resets_at": NSNull()
+                            ],
+                            "remaining_story_starts": 11,
+                            "remaining_continuations": 12
+                        ],
+                        "entitlements": [
+                            "snapshot": [
+                                "tier": "plus",
+                                "source": "storekit_verified",
+                                "max_child_profiles": 3,
+                                "max_story_starts_per_period": 12,
+                                "max_continuations_per_period": 12,
+                                "max_story_length_minutes": 10,
+                                "can_replay_saved_stories": true,
+                                "can_start_new_stories": true,
+                                "can_continue_saved_series": true,
+                                "effective_at": effectiveAt,
+                                "expires_at": expiresAt,
+                                "usage_window": [
+                                    "kind": "rolling_period",
+                                    "duration_seconds": 604800,
+                                    "resets_at": NSNull()
+                                ],
+                                "remaining_story_starts": 11,
+                                "remaining_continuations": 12
+                            ],
+                            "token": "refreshed-preflight-entitlement-token",
+                            "expires_at": expiresAt,
+                            "owner": [
+                                "kind": "parent_user",
+                                "parent_user_id": "parent-123",
+                                "auth_provider": "firebase"
+                            ]
+                        ]
+                    ]
+                )
+            default:
+                XCTFail("Unexpected request: \(url.absoluteString)")
+                throw URLError(.badURL)
+            }
+        }
+
+        let client = APIClient(
+            baseURLs: [baseURL],
+            session: session,
+            installId: "install-123",
+            parentAuthTokenProvider: StubParentAuthTokenProvider(token: "parent-token-123")
+        )
+
+        let syncEnvelope = try await client.syncEntitlements(
+            request: EntitlementSyncRequest(
+                refreshReason: .purchase,
+                transactions: [
+                    EntitlementSyncTransaction(
+                        productID: "storytime.plus.monthly",
+                        originalTransactionID: "original-1",
+                        latestTransactionID: "latest-1",
+                        purchasedAt: Int(Date().addingTimeInterval(-120).timeIntervalSince1970),
+                        expiresAt: Int(Date().addingTimeInterval(3600).timeIntervalSince1970),
+                        revokedAt: nil,
+                        ownershipType: .purchased,
+                        environment: .sandbox,
+                        verificationState: .verified,
+                        isActive: true
+                    )
+                ]
+            )
+        )
+
+        let response = try await client.preflightEntitlements(
+            request: EntitlementPreflightRequest(
+                action: .newStory,
+                childProfileID: "fbeafe23-42d5-4ea7-8035-5680419504e9",
+                childProfileCount: 1,
+                requestedLengthMinutes: 4
+            )
+        )
+
+        XCTAssertEqual(observedPaths, ["/v1/session/identity", "/v1/entitlements/sync", "/v1/entitlements/preflight"])
+        XCTAssertEqual(syncEnvelope.owner?.kind, .parentUser)
+        XCTAssertEqual(syncEnvelope.owner?.parentUserID, "parent-123")
+        XCTAssertEqual(response.entitlements?.owner?.kind, .parentUser)
+        XCTAssertEqual(response.entitlements?.owner?.parentUserID, "parent-123")
+    }
+
+    func testRestoreSyncWithoutParentAuthSurfacesAccountRequirement() async throws {
+        let session = makeSession()
+        let baseURL = URL(string: "https://backend.example.com/")!
+
+        URLProtocolStub.handler = { request in
+            let url = try XCTUnwrap(request.url)
+
+            switch url.path {
+            case "/v1/session/identity":
+                return try Self.httpResponse(
+                    url: url,
+                    statusCode: 200,
+                    json: ["session_id": "session-restore-auth-1", "region": "US"],
+                    headers: [
+                        "x-storytime-session": "signed-session-token",
+                        "x-storytime-session-expires-at": String(Date().addingTimeInterval(300).timeIntervalSince1970)
+                    ]
+                )
+            case "/v1/entitlements/sync":
+                return try Self.httpResponse(
+                    url: url,
+                    statusCode: 401,
+                    json: [
+                        "error": "parent_auth_required",
+                        "message": "Sign in to a parent account before restoring Plus."
+                    ]
+                )
+            default:
+                XCTFail("Unexpected restore auth request: \(url.absoluteString)")
+                return Self.rawResponse(url: url, statusCode: 404, body: "")
+            }
+        }
+
+        let client = APIClient(baseURLs: [baseURL], session: session, installId: "install-123")
+
+        do {
+            _ = try await client.syncEntitlements(
+                request: EntitlementSyncRequest(
+                    refreshReason: .restore,
+                    transactions: [
+                        EntitlementSyncTransaction(
+                            productID: "storytime.plus.monthly",
+                            originalTransactionID: "original-1",
+                            latestTransactionID: "latest-1",
+                            purchasedAt: Int(Date().addingTimeInterval(-600).timeIntervalSince1970),
+                            expiresAt: Int(Date().addingTimeInterval(3_600).timeIntervalSince1970),
+                            revokedAt: nil,
+                            ownershipType: .purchased,
+                            environment: .sandbox,
+                            verificationState: .verified,
+                            isActive: true
+                        )
+                    ]
+                )
+            )
+            XCTFail("Expected restore sync to require parent auth")
+        } catch let error as APIError {
+            XCTAssertEqual(error.statusCode, 401)
+            XCTAssertEqual(error.serverCode, "parent_auth_required")
+            XCTAssertEqual(error.serverMessage, "Sign in to a parent account before restoring Plus.")
+        }
+    }
+
+    func testPurchaseSyncRequiresParentAccountAuthentication() async throws {
+        let session = makeSession()
+        let baseURL = URL(string: "https://backend.example.com/")!
+
+        URLProtocolStub.handler = { request in
+            let url = try XCTUnwrap(request.url)
+
+            switch url.path {
+            case "/v1/session/identity":
+                XCTAssertNil(request.value(forHTTPHeaderField: "x-storytime-parent-auth"))
+                return try Self.httpResponse(
+                    url: url,
+                    statusCode: 200,
+                    json: ["session_id": "session-parent-required-1", "region": "US"],
+                    headers: [
+                        "x-storytime-session": "signed-session-token",
+                        "x-storytime-session-expires-at": String(Date().addingTimeInterval(300).timeIntervalSince1970)
+                    ]
+                )
+            case "/v1/entitlements/sync":
+                XCTAssertNil(request.value(forHTTPHeaderField: "x-storytime-parent-auth"))
+                return try Self.httpResponse(
+                    url: url,
+                    statusCode: 401,
+                    json: [
+                        "error": "parent_auth_required",
+                        "message": "Sign in to a parent account before purchasing Plus.",
+                        "request_id": "req-parent-auth-required"
+                    ]
+                )
+            default:
+                XCTFail("Unexpected request: \(url.absoluteString)")
+                return Self.rawResponse(url: url, statusCode: 404, body: "")
+            }
+        }
+
+        let client = APIClient(baseURLs: [baseURL], session: session, installId: "install-123")
+
+        do {
+            _ = try await client.syncEntitlements(
+                request: EntitlementSyncRequest(
+                    refreshReason: .purchase,
+                    transactions: [
+                        EntitlementSyncTransaction(
+                            productID: "storytime.plus.monthly",
+                            originalTransactionID: "original-1",
+                            latestTransactionID: "latest-1",
+                            purchasedAt: Int(Date().addingTimeInterval(-120).timeIntervalSince1970),
+                            expiresAt: Int(Date().addingTimeInterval(3600).timeIntervalSince1970),
+                            revokedAt: nil,
+                            ownershipType: .purchased,
+                            environment: .sandbox,
+                            verificationState: .verified,
+                            isActive: true
+                        )
+                    ]
+                )
+            )
+            XCTFail("Expected purchase sync to require authenticated parent identity")
+        } catch let error as APIError {
+            XCTAssertEqual(error.statusCode, 401)
+            XCTAssertEqual(error.serverCode, "parent_auth_required")
+            XCTAssertEqual(error.serverMessage, "Sign in to a parent account before purchasing Plus.")
+            XCTAssertEqual(error.requestId, "req-parent-auth-required")
+        }
+    }
+
     func testPreflightUsesRefreshedEntitlementTokenAfterPurchaseSync() async throws {
         let session = makeSession()
         let baseURL = URL(string: "https://backend.example.com/")!
@@ -319,6 +786,7 @@ final class APIClientTests: XCTestCase {
 
             switch url.path {
             case "/v1/session/identity":
+                XCTAssertEqual(request.value(forHTTPHeaderField: "x-storytime-parent-auth"), "parent-token-123")
                 return try Self.httpResponse(
                     url: url,
                     statusCode: 200,
@@ -356,6 +824,7 @@ final class APIClientTests: XCTestCase {
                     ]
                 )
             case "/v1/entitlements/sync":
+                XCTAssertEqual(request.value(forHTTPHeaderField: "x-storytime-parent-auth"), "parent-token-123")
                 let body = try Self.requestBody(from: request)
                 let decoded = try JSONDecoder().decode(EntitlementSyncRequest.self, from: body)
                 XCTAssertEqual(decoded.refreshReason, .purchase)
@@ -391,6 +860,7 @@ final class APIClientTests: XCTestCase {
                     ]
                 )
             case "/v1/entitlements/preflight":
+                XCTAssertEqual(request.value(forHTTPHeaderField: "x-storytime-parent-auth"), "parent-token-123")
                 XCTAssertEqual(request.value(forHTTPHeaderField: "x-storytime-entitlement"), "plus-token")
                 return try Self.httpResponse(
                     url: url,
@@ -452,7 +922,12 @@ final class APIClientTests: XCTestCase {
             }
         }
 
-        let client = APIClient(baseURLs: [baseURL], session: session, installId: "install-123")
+        let client = APIClient(
+            baseURLs: [baseURL],
+            session: session,
+            installId: "install-123",
+            parentAuthTokenProvider: StubParentAuthTokenProvider(token: "parent-token-123")
+        )
         _ = try await client.syncEntitlements(
             request: EntitlementSyncRequest(
                 refreshReason: .purchase,
@@ -2122,6 +2597,14 @@ final class APIClientTests: XCTestCase {
         }
 
         return data
+    }
+}
+
+private struct StubParentAuthTokenProvider: ParentAuthTokenProviding {
+    let token: String?
+
+    func currentParentAuthToken() async -> String? {
+        token
     }
 }
 

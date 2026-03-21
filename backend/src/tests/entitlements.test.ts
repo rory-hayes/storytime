@@ -57,6 +57,12 @@ describe("entitlements sync", () => {
   it("issues plus entitlements only from active verified plus products", () => {
     const env = makeTestEnv();
     const context = makeRequestContext();
+    const authenticatedContext = makeRequestContext({
+      parentIdentity: {
+        uid: "parent-restore-1",
+        provider: "firebase"
+      }
+    });
     const plusEnvelope = issueSyncedEntitlements(
       {
         refresh_reason: "restore",
@@ -76,7 +82,7 @@ describe("entitlements sync", () => {
           }
         ]
       },
-      context,
+      authenticatedContext,
       env
     );
     const starterEnvelope = issueSyncedEntitlements(
@@ -136,6 +142,12 @@ describe("entitlements sync", () => {
       PLUS_USAGE_WINDOW_DURATION_SECONDS: 1209600
     });
     const context = makeRequestContext();
+    const authenticatedContext = makeRequestContext({
+      parentIdentity: {
+        uid: "parent-123",
+        provider: "firebase"
+      }
+    });
 
     const starterEnvelope = issueSyncedEntitlements(
       {
@@ -152,7 +164,7 @@ describe("entitlements sync", () => {
         active_product_ids: ["storytime.plus.monthly"],
         transactions: []
       },
-      context,
+      authenticatedContext,
       env
     );
 
@@ -169,6 +181,34 @@ describe("entitlements sync", () => {
     expect(plusEnvelope.snapshot.usage_window.duration_seconds).toBe(1209600);
     expect(plusEnvelope.snapshot.remaining_story_starts).toBe(15);
     expect(plusEnvelope.snapshot.remaining_continuations).toBe(18);
+  });
+
+  it("requires an authenticated parent account for purchase-linked plus sync", () => {
+    expect(() =>
+      issueSyncedEntitlements(
+        {
+          refresh_reason: "purchase",
+          active_product_ids: ["storytime.plus.monthly"],
+          transactions: []
+        },
+        makeRequestContext(),
+        makeTestEnv()
+      )
+    ).toThrowError(/authenticated parent account/i);
+  });
+
+  it("requires an authenticated parent account for restore-linked plus sync", () => {
+    expect(() =>
+      issueSyncedEntitlements(
+        {
+          refresh_reason: "restore",
+          active_product_ids: ["storytime.plus.monthly"],
+          transactions: []
+        },
+        makeRequestContext(),
+        makeTestEnv()
+      )
+    ).toThrowError(/authenticated parent account/i);
   });
 
   it("allows starter preflight when launch intent is within current capability bounds", () => {
@@ -289,7 +329,7 @@ describe("entitlements sync", () => {
     const second = evaluatePreflightForRequest(
       makeRequest({
         headers: {
-          "x-storytime-entitlement": first.entitlements.token
+          "x-storytime-entitlement": first.entitlements!.token
         }
       }),
       {
@@ -305,7 +345,7 @@ describe("entitlements sync", () => {
     const third = evaluatePreflightForRequest(
       makeRequest({
         headers: {
-          "x-storytime-entitlement": second.entitlements.token
+          "x-storytime-entitlement": second.entitlements!.token
         }
       }),
       {
@@ -320,7 +360,7 @@ describe("entitlements sync", () => {
 
     expect(first.allowed).toBe(true);
     expect(first.snapshot.remaining_story_starts).toBe(1);
-    expect(first.entitlements.snapshot.remaining_story_starts).toBe(1);
+    expect(first.entitlements?.snapshot.remaining_story_starts).toBe(1);
 
     expect(second.allowed).toBe(true);
     expect(second.snapshot.remaining_story_starts).toBe(0);
@@ -328,7 +368,7 @@ describe("entitlements sync", () => {
     expect(third.allowed).toBe(false);
     expect(third.block_reason).toBe("story_starts_exhausted");
     expect(third.snapshot.remaining_story_starts).toBe(0);
-    expect(third.entitlements.snapshot.remaining_story_starts).toBe(0);
+    expect(third.entitlements?.snapshot.remaining_story_starts).toBe(0);
   });
 
   it("restores remaining counters after the rolling usage window expires", () => {

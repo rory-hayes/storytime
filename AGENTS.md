@@ -17,9 +17,9 @@ Active product loop:
 7. The runtime classifies interruptions before deciding whether to answer or revise, and any revision changes only future scenes unless a milestone explicitly widens scope.
 8. Story continuity is stored locally for future episodes.
 
-The hybrid runtime migration is materially stabilized, verified, and acceptance-hardened enough to support the next workstream. The productization groundwork is also complete enough to move into launch readiness. The current mission is to turn the verified runtime and M8 product direction into a launch-ready MVP with explicit onboarding, entitlement and billing foundations, parent-managed upgrade surfaces, enforceable usage limits, a coherent repeat-use loop, and evidence-backed launch acceptance criteria. Stability, correctness, low-latency interaction feel, deterministic session behavior, stage-level telemetry, and cost-aware routing remain gating requirements, but broad core-runtime rescue work is no longer the default next step unless a new defect is discovered.
+The hybrid runtime migration, productization groundwork, and commercial-closure sprint are now complete enough that StoryTime is `READY FOR MVP LAUNCH` in repo terms. The current mission is to turn that repo-ready MVP into the smallest real parent-account and payment-backed product foundation: add parent account creation and sign-in, connect identity to Firebase Auth, connect StoreKit purchases and backend entitlements to authenticated parent users, add a bounded promo-code grant path, and verify the blocked-to-unlocked happy paths under the new account model.
 
-The launch-gap assessment in `docs/verification/launch-readiness-gap-assessment.md` is now the source of truth for the remaining launch work. StoryTime is currently `CONDITIONALLY READY IF BLOCKERS ARE CLOSED`. The active final sprint is commercial-closure only: add the smallest truthful parent-managed purchase completion path, prove the blocked-to-upgraded-to-unblocked happy path, and rerun launch readiness with an explicit final recommendation. Do not widen scope into speculative monetization polish, broader operational tooling, or unrelated feature work unless a blocker is first recorded in `PLANS.md` and queued in `SPRINT.md`.
+This sprint is parent-account and payment-foundation work only. Keep runtime determinism, low-latency interaction feel, cost-aware routing, local continuity integrity, and the parent trust boundary intact while adding identity. Do not widen scope into cloud sync, multi-device continuity, speculative platform expansion, or unrelated post-launch work unless a blocker is first recorded in `PLANS.md` and queued in `SPRINT.md`.
 
 ## Active Code Areas
 
@@ -30,6 +30,7 @@ The launch-gap assessment in `docs/verification/launch-readiness-gap-assessment.
 `tiny-backend/` is historical only. Do not use it for active planning, implementation, migrations, or tests unless the task explicitly asks for historical context.
 
 Primary active iOS surfaces:
+- `ios/StoryTime/App/StoryTimeApp.swift`
 - `ios/StoryTime/Features/Story/HomeView.swift`
 - `ios/StoryTime/Features/Story/NewStoryJourneyView.swift`
 - `ios/StoryTime/Features/Voice/VoiceSessionView.swift`
@@ -43,6 +44,7 @@ Primary active iOS surfaces:
 
 Primary active backend surfaces:
 - `backend/src/app.ts`
+- `backend/src/lib/entitlements.ts`
 - `backend/src/services/realtimeService.ts`
 - `backend/src/services/storyDiscoveryService.ts`
 - `backend/src/services/storyService.ts`
@@ -66,33 +68,28 @@ Primary test surfaces:
 - `PracticeSessionViewModel` is the active client session coordinator. It owns discovery, generation, narration, interruption, revision, completion, and persistence triggers, and it is the authority boundary for the active hybrid runtime split between interaction mode, narration mode, and story state.
 - `VoiceSessionState` in `StoryDomain.swift` is the canonical client state model currently used by the coordinator. Structured story state and scene state are the authoritative control layer for runtime decisions.
 - `RealtimeVoiceClient` uses a hidden `WKWebView` bridge to manage microphone capture, the WebRTC peer connection, data channel events, and `/v1/realtime/call` SDP exchange. It is the live interaction transport; long-form scene narration should stay on the TTS path unless a milestone explicitly says otherwise.
-- `APIClient` handles backend base URL failover, session identity bootstrap, story endpoints, embeddings, and app install/session headers.
+- `StoryTimeApp` currently configures `FirebaseCore` and ships `GoogleService-Info.plist`, but Firebase Auth is not yet wired into the active parent identity flow.
+- `APIClient` handles backend base URL failover, install-scoped session identity bootstrap, entitlement bootstrap and preflight, StoreKit-backed sync, story endpoints, embeddings, and app install/session headers.
 - `StoryLibraryStore` is the active local store for story series, child profiles, privacy settings, and continuity cleanup coordination. Primary story and continuity data now persist through the Core Data-backed `storytime-v2.sqlite` store; `UserDefaults` remains only for install/session bootstrap keys and legacy migration sources.
-- The backend `app.ts` owns request context, auth/session identity, rate limiting, structured error responses, and the active HTTP routes.
+- The backend `app.ts` owns request context, install/session auth, rate limiting, entitlement routes, structured error responses, and the active HTTP routes.
 - `RealtimeService` issues signed realtime tickets and proxies `/v1/realtime/call` to OpenAI.
 - `StoryDiscoveryService`, `StoryService`, `StoryPlannerService`, and `StoryContinuityService` make up the active discovery, generation, revision, quality, and continuity pipeline. Backend generation and revision are already scene-based and should stay authoritative as narration transport changes.
 
 ## Current Program Priorities
 
-- Final commercial-closure sprint on top of the verified hybrid runtime and completed M8/M9 groundwork
-- Parent-managed purchase completion in already-approved upgrade surfaces only
-- End-to-end verification that blocked new-story and blocked continuation flows can recover after purchase or entitlement refresh
-- Final evidence-based launch recommendation after commercial blocker closure
-- Launch readiness on top of the verified hybrid runtime and completed M8 productization groundwork
-- MVP scope lock and explicit launch acceptance criteria
-- Onboarding and first-run clarity
-- Billing and entitlement implementation grounded in the active product architecture
-- Parent-managed paywall and upgrade surfaces tied to real product moments
-- Usage limits and plan enforcement before cost-bearing runtime work begins
-- End-of-story repeat-use loop implementation and polish
-- Cost, usage, and latency telemetry for commercial confidence
-- Evidence-based launch-candidate QA
+- Repo-ready MVP baseline preservation while adding the next foundation layer
+- Parent-managed account creation and sign-in
+- Firebase Auth integration for parent identity only
+- Explicit separation between identity, payments, and entitlements
+- Backend entitlement ownership tied to authenticated parent users
+- Parent-managed StoreKit purchase and restore flows that stay out of child-session surfaces
+- Promo-code redemption for family, friends, and testing with authenticated premium grants
+- End-to-end verification that blocked new-story and blocked continuation flows can recover after account creation or sign-in plus purchase, restore, or promo redemption
+- Minimal viable account and payment architecture over broad platform expansion
+- Keep story history and continuity local-only unless a milestone explicitly broadens scope
 - Stability
 - Correctness
 - Deterministic session behavior
-- Productization and monetization-aware UX on top of the verified hybrid runtime
-- User-journey clarity across onboarding, launch, live session, saved stories, and parent controls
-- Entitlement architecture and upgrade-flow planning grounded in real cost telemetry
 - Parent trust and privacy communication as product flows, not isolated copy tweaks
 - Low-latency live interaction feel
 - Hybrid runtime separation between interaction, narration, and story state
@@ -110,9 +107,12 @@ Primary test surfaces:
 ## Non-Goals
 
 - Broad core-runtime refactors without a reproduced defect or explicit reprioritization
-- Speculative monetization polish, package expansion, or pricing experiments before the commercial blockers are closed
-- Broader telemetry, dashboard, authentication, or account-system work unless a current commercial milestone requires a tightly related unblocker
-- Speculative post-launch package expansion or growth experiments before MVP scope lock
+- Broad backend or platform expansion beyond the smallest parent-account and payment foundation
+- Child-facing sign-in, purchase, restore, or promo-entry flows
+- Replacing the lightweight `PARENT` gate with child-visible auth friction in this sprint
+- Cloud sync or multi-device story-history portability in this sprint
+- Full account-linked continuity sync in this sprint
+- Speculative monetization polish, package expansion, pricing experiments, or growth work before the account and payment foundation is verified
 - Marketing-site or acquisition work outside the in-app product flow
 - New growth features
 - Cloud sync
@@ -173,6 +173,20 @@ Primary test surfaces:
 - Keep continuity facts safe, stable, and appropriate for retrieval across episodes.
 - Treat the parent hub as a trust boundary. Any access control work there must be deliberate and testable.
 
+## Parent Account, Identity, And Commerce Rules
+
+- Parent accounts are parent-managed only. Do not add child sign-up, sign-in, purchase, restore, or promo redemption flows.
+- Use Firebase Auth for parent identity. Do not describe or reuse the lightweight `PARENT` gate as secure account authentication.
+- Treat identity, payments, and entitlements as separate systems with explicit boundaries and tests:
+  - identity proves which parent is acting
+  - payments prove which StoreKit products are active
+  - entitlements decide what the authenticated parent can unlock in the product
+- Preserve the existing install/session bootstrap model for runtime plumbing unless a milestone explicitly replaces it. Account identity should layer onto the current startup path, not silently break it.
+- Purchase initiation, purchase completion, restore, entitlement refresh, and promo redemption must stay in parent-managed surfaces such as onboarding, Parent Controls, or blocked parent-review flows.
+- Do not place auth or commerce prompts inside `VoiceSessionView`, live interruption handling, or other active child storytelling surfaces.
+- Promo-code flows must be explicit, bounded, and testable. Real promo behavior must not depend on debug-only seeds, hidden headers, or unverifiable manual steps.
+- Keep story history and continuity local-only in this sprint unless a milestone explicitly broadens scope and updates privacy docs, UX copy, and tests in the same run.
+
 ## Error Handling Rules
 
 - User-facing errors must be safe and concise.
@@ -192,34 +206,32 @@ Primary test surfaces:
 - If a change touches narration transport, add or update deterministic narration transport tests at the coordinator boundary.
 - If a change touches the bridge, update `RealtimeVoiceClientTests`.
 - If a change touches API contract handling, update `APIClientTests` and backend route or service tests.
+- If a change touches parent auth, Firebase token handling, or authenticated session persistence, update or add iOS auth/account tests, `APIClientTests`, `StoryTimeUITests`, and backend auth or route tests.
 - If a change touches storage or child scoping, update `StoryLibraryStoreTests`.
 - If a change touches interruption classification, answer-only behavior, or future-scene revision boundaries, test those coordinator paths explicitly.
+- If a change touches authenticated entitlements, purchase ownership, restore, or promo grants, test both client and backend behavior plus the blocked-to-unlocked UI paths.
 - If a change spans client and backend, test both.
 
 ## Verification And Measurement Rules
 
 - After hybrid stabilization, verification still matters, but productization and monetization-aware UX are now the default priority unless a new runtime defect is discovered.
-- After the M8 groundwork, launch readiness is the default next workstream. Do not reopen broad foundational runtime work unless a new defect is reproduced and recorded in `PLANS.md`.
+- StoryTime is already `READY FOR MVP LAUNCH` in repo terms. The default next workstream is the parent-account and payment foundation sprint, not another implicit launch-readiness rerun.
 - Runtime verification reports must label each material behavior as `VERIFIED BY TEST`, `VERIFIED BY CODE INSPECTION`, `PARTIALLY VERIFIED`, or `UNVERIFIED`.
 - Verification reports must record the exact commands, test files, docs, and code paths inspected, plus the remaining gaps that still need direct evidence.
 - Telemetry milestones must keep runtime stages explicit where applicable. At minimum, preserve stage-based cost and latency attribution for `interaction`, `generation`, `narration`, and `revision`; document supporting stages separately instead of collapsing them into those four.
-- Launch-readiness verification must explicitly cover onboarding, entitlement sync, pre-session gating, repeat-use loop behavior, privacy and trust language, and the final launch-candidate QA pass with exact commands and evidence labels.
+- Account and commerce verification must explicitly cover account creation or sign-in, authenticated session persistence, purchase sync, restore, promo redemption, and the blocked-to-unlocked happy paths with exact commands and evidence labels.
 - Do not default back into broad hybrid-runtime refactors once the baseline is stable; if a new defect is discovered, record it in `PLANS.md` and reprioritize explicitly in `SPRINT.md`.
 
-## Productization, Launch Readiness, And Monetization Rules
+## Productization, Launch Readiness, Parent Accounts, And Monetization Rules
 
 - UX work must stay grounded in the current technical architecture: realtime for live interaction, TTS for long-form narration, and story/scene state as the authoritative control layer.
-- After the productization groundwork is complete, launch readiness is the default priority. Prefer shipping clarity, enforceable MVP boundaries, and explicit acceptance evidence over speculative expansion.
-- During the final sprint, keep scope limited to the commercial blockers recorded in `docs/verification/launch-readiness-gap-assessment.md` and the ordered `M10.1` through `M10.3` milestones in `SPRINT.md`.
-- Treat onboarding, paywall, entitlements, usage limits, and telemetry as connected product systems. Do not treat them as isolated cosmetic screens or copy-only tasks.
-- Monetization work must use model-routing economics and runtime-stage cost telemetry instead of arbitrary package or cap guesses.
-- Onboarding, paywall, upgrade, and parent-trust work should be handled as end-to-end product flows across `HomeView`, `NewStoryJourneyView`, `VoiceSessionView`, `StorySeriesDetailView`, and the parent hub, not as isolated cosmetic screens.
-- Prefer parent-managed upgrade entry points and trust-sensitive surfaces unless a milestone explicitly defines a child-facing prompt and its protections.
-- Purchase and entitlement work must remain parent-managed. Do not place purchase UI, purchase recovery UI, or transactional prompts inside `VoiceSessionView`, live interruption handling, or other active child-session surfaces.
-- Billing and provider choices must stay grounded in runtime-stage cost telemetry, pre-session enforcement needs, and truthful parent-managed trust surfaces.
-- Final QA and launch-acceptance milestones must define what MVP-launch-ready means in repo terms, including exact commands, evidence labels, remaining gaps, and any go/no-go blockers.
-- The final launch recommendation must be explicit and evidence-based. Future launch-readiness reports must clearly choose `READY FOR MVP LAUNCH`, `CONDITIONALLY READY`, or `NOT YET READY FOR MVP LAUNCH` and cite the exact blocker-closure evidence.
-- Verification remains required for productization work: planning milestones must cite repo evidence, and implementation milestones must update the directly affected UI/unit/backend tests as appropriate.
+- The launch-ready MVP baseline is already established. Keep scope limited to the ordered `M11.1` through `M11.9` milestones in `SPRINT.md` unless `PLANS.md` records a blocker or reprioritization.
+- Treat onboarding, parent auth, payments, entitlements, promo grants, usage limits, and telemetry as connected product systems. Do not treat them as isolated cosmetic screens or copy-only tasks.
+- Minimal viable account and payment architecture beats broad platform expansion in this sprint.
+- Parent-managed surfaces across `HomeView`, `NewStoryJourneyView`, `StorySeriesDetailView`, onboarding, and the parent hub remain the right places for auth and commerce work. Keep child-session runtime surfaces upgrade-free and sign-in-free.
+- Billing and provider choices must stay grounded in the active product architecture, existing runtime-stage cost telemetry, pre-session enforcement needs, and truthful parent-managed trust surfaces.
+- Cross-device story sync, shared family-management systems, and broader account-platform work remain deferred until this sprint lands and the next milestone is approved explicitly.
+- Verification remains required for planning and implementation work: planning milestones must cite repo evidence, and implementation milestones must update the directly affected UI, unit, backend, and verification docs as appropriate.
 
 ## Documentation And Status Update Rules
 
