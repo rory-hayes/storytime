@@ -7,7 +7,7 @@ final class SmokeTests: XCTestCase {
         XCTAssertTrue(AppConfig.candidateAPIBaseURLs.first?.absoluteString.hasPrefix("http") ?? false)
     }
 
-    func testAppConfigPrefersEnvironmentThenBundleThenLocalFallback() {
+    func testAppConfigPrefersEnvironmentThenBundleWithoutLocalFallback() {
         let candidates = AppConfig.candidateAPIBaseURLs(
             environment: ["API_BASE_URL": " https://override.example.com/api?debug=1#fragment "],
             infoDictionary: ["StoryTimeAPIBaseURL": "https://bundle.example.com"],
@@ -18,9 +18,54 @@ final class SmokeTests: XCTestCase {
             candidates,
             [
                 URL(string: "https://override.example.com/api")!,
+                URL(string: "https://bundle.example.com/")!
+            ]
+        )
+    }
+
+    func testAppConfigFallsBackToBundleThenLocalWhenNoEnvironmentOverrideExists() {
+        let candidates = AppConfig.candidateAPIBaseURLs(
+            environment: [:],
+            infoDictionary: ["StoryTimeAPIBaseURL": "https://bundle.example.com"],
+            includeLocalDebugFallback: true
+        )
+
+        XCTAssertEqual(
+            candidates,
+            [
                 URL(string: "https://bundle.example.com/")!,
                 URL(string: "http://127.0.0.1:8787")!
             ]
+        )
+    }
+
+    func testDeviceLocalhostFallbackIsDisabledByDefault() {
+        XCTAssertFalse(
+            AppConfig.shouldIncludeLocalDebugFallback(
+                environment: [:],
+                isDebugBuild: true,
+                isSimulatorBuild: false
+            )
+        )
+    }
+
+    func testDeviceLocalhostFallbackCanBeExplicitlyOptedIn() {
+        XCTAssertTrue(
+            AppConfig.shouldIncludeLocalDebugFallback(
+                environment: ["STORYTIME_ALLOW_DEVICE_LOCALHOST_FALLBACK": "1"],
+                isDebugBuild: true,
+                isSimulatorBuild: false
+            )
+        )
+    }
+
+    func testSimulatorStillAllowsLocalhostFallbackByDefault() {
+        XCTAssertTrue(
+            AppConfig.shouldIncludeLocalDebugFallback(
+                environment: [:],
+                isDebugBuild: true,
+                isSimulatorBuild: true
+            )
         )
     }
 
@@ -33,6 +78,23 @@ final class SmokeTests: XCTestCase {
 
         XCTAssertEqual(candidates, [URL(string: "https://backend-brown-ten-94.vercel.app/")!])
         XCTAssertNil(AppConfig.normalizedBaseURL(from: "ftp://backend.example.com"))
+    }
+
+    func testAppConfigDebugCandidateMessagesListBackendTargetsInOrder() {
+        let messages = AppConfig.debugCandidateBaseURLMessages(
+            baseURLs: [
+                URL(string: "https://backend.example.com/")!,
+                URL(string: "http://127.0.0.1:8787")!
+            ]
+        )
+
+        XCTAssertEqual(
+            messages,
+            [
+                "Backend target: https://backend.example.com/",
+                "Fallback target 1: http://127.0.0.1:8787"
+            ]
+        )
     }
 
     func testInfoPlistUsesLocalNetworkingInsteadOfArbitraryLoads() throws {
@@ -116,6 +178,120 @@ final class SmokeTests: XCTestCase {
 
         XCTAssertTrue(gateState.canAdvance)
         XCTAssertTrue(gateState.canFinish)
+    }
+
+    func testPlanStatusPresentationSurfacesSafePlanMessages() {
+        let connectionMessage = PlanStatusPresentation.launchCheckMessage(
+            for: APIError.connectionFailed([URL(string: "https://backend.example.com")!])
+        )
+        XCTAssertEqual(
+            connectionMessage,
+            "StoryTime couldn't reach the plan service right now. Ask a grown-up to check the connection and try again."
+        )
+
+        let authMessage = PlanStatusPresentation.launchCheckMessage(
+            for: APIError.invalidResponse(
+                statusCode: 401,
+                code: "parent_auth_required",
+                message: "Parent authentication required for entitlement route.",
+                requestId: "request-123",
+                body: "{\"error\":true}"
+            )
+        )
+        XCTAssertEqual(authMessage, "A grown-up needs to sign in before StoryTime can check this plan.")
+
+        let refreshMessage = PlanStatusPresentation.parentPlanRefreshMessage(
+            for: APIError.invalidResponse(
+                statusCode: 503,
+                code: nil,
+                message: "Temporary service interruption.",
+                requestId: "request-456",
+                body: "{\"error\":true}"
+            )
+        )
+        XCTAssertEqual(
+            refreshMessage,
+            "StoryTime couldn't refresh the current plan right now. Temporary service interruption."
+        )
+    }
+
+    func testPlanCheckDebugOverlayEnableFlag() {
+        XCTAssertFalse(PlanCheckDebugOverlay.isEnabled(environment: [:]))
+        XCTAssertTrue(PlanCheckDebugOverlay.isEnabled(environment: ["STORYTIME_DEBUG_PLAN_CHECK_OVERLAY": "1"]))
+    }
+
+    func testPlanCheckDebugOverlaySummarizesTraceAndFailuresSafely() {
+        let startedMessage = PlanCheckDebugOverlay.traceMessage(
+            for: APIClientTraceEvent(
+                operation: .sessionBootstrap,
+                phase: .started,
+                route: "/v1/session/identity",
+                requestId: "request-1",
+                sessionId: nil,
+                statusCode: nil
+            )
+        )
+        XCTAssertEqual(startedMessage, "Checking parent session on /v1/session/identity.")
+
+        let completedMessage = PlanCheckDebugOverlay.traceMessage(
+            for: APIClientTraceEvent(
+                operation: .entitlementPreflight,
+                phase: .completed,
+                route: "/v1/entitlements/preflight",
+                requestId: "request-2",
+                sessionId: "session-1",
+                statusCode: 200
+            )
+        )
+        XCTAssertEqual(completedMessage, "Plan service responded (200) on /v1/entitlements/preflight.")
+
+        let failureMessage = PlanCheckDebugOverlay.failureMessage(
+            for: APIError.invalidResponse(
+                statusCode: 401,
+                code: "parent_auth_required",
+                message: "Parent authentication required for entitlement route.",
+                requestId: "request-3",
+                body: "{\"error\":true}"
+            )
+        )
+        XCTAssertEqual(failureMessage, "Displayed error: a grown-up needs to sign in.")
+    }
+
+    func testVoiceStartupDebugOverlayEnableFlag() {
+        XCTAssertFalse(VoiceStartupDebugOverlay.isEnabled(environment: [:]))
+        XCTAssertTrue(VoiceStartupDebugOverlay.isEnabled(environment: ["STORYTIME_DEBUG_VOICE_STARTUP_OVERLAY": "1"]))
+    }
+
+    func testVoiceStartupDebugOverlaySummarizesSafeSnapshot() {
+        let snapshot = PracticeSessionViewModel.VoiceStartupDebugSnapshot(
+            phase: "booting",
+            statusMessage: "Connecting live voice",
+            errorMessage: "",
+            startupStage: "voice-connect",
+            lastStartupFailure: "callConnect",
+            traceEvents: [
+                PracticeSessionViewModel.SessionTraceEvent(
+                    kind: .startup,
+                    source: "connected",
+                    state: "booting",
+                    requestId: "request-1",
+                    sessionId: "session-1",
+                    apiOperation: .realtimeSession,
+                    statusCode: 200
+                )
+            ]
+        )
+
+        XCTAssertEqual(
+            VoiceStartupDebugOverlay.messages(for: snapshot),
+            [
+                "Phase: booting",
+                "Startup step: voice-connect",
+                "Status: Connecting live voice",
+                "Startup failure: callConnect",
+                "Trace: startup connected (realtimeSession 200)"
+            ]
+        )
     }
 
     @MainActor

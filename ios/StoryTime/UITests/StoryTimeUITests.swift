@@ -214,6 +214,23 @@ final class StoryTimeUITests: XCTestCase {
         XCTAssertTrue(scrollToElement(app.staticTexts["parentPlanFootnote"], in: app))
     }
 
+    func testParentControlsBootstrapPlanStatusWhenCacheStartsEmpty() {
+        let app = launchApp(extraEnvironment: [
+            "STORYTIME_UI_TEST_SKIP_INITIAL_ENTITLEMENT_SEED": "1",
+            "STORYTIME_UI_TEST_REFRESH_ENTITLEMENT_TIER": "starter"
+        ])
+
+        openParentControls(in: app)
+
+        let planTitle = app.staticTexts["parentPlanTitle"]
+        XCTAssertTrue(planTitle.waitForExistence(timeout: 10))
+        XCTAssertTrue(waitForLabel(of: planTitle, toEqual: "Starter"))
+        XCTAssertEqual(
+            app.staticTexts["parentPlanSummary"].label,
+            "Starter currently allows up to 2 child profiles, 1 new story start, and 1 saved-series continuation. Replay and parent controls stay available on this device."
+        )
+    }
+
     func testParentControlsShowSignedOutParentAccountStatus() {
         let app = launchApp()
 

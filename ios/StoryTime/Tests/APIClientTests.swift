@@ -1034,6 +1034,148 @@ final class APIClientTests: XCTestCase {
         }
     }
 
+    func testPreflightDoesNotHangWhenParentAuthTokenProviderStalls() async throws {
+        let session = makeSession()
+        let baseURL = URL(string: "https://backend.example.com/")!
+
+        URLProtocolStub.handler = { request in
+            let url = try XCTUnwrap(request.url)
+
+            switch url.path {
+            case "/v1/session/identity":
+                XCTAssertNil(request.value(forHTTPHeaderField: "x-storytime-parent-auth"))
+                return try Self.httpResponse(
+                    url: url,
+                    statusCode: 200,
+                    json: ["session_id": "session-stalled-parent-auth", "region": "US"],
+                    headers: [
+                        "x-storytime-session": "signed-session-token",
+                        "x-storytime-session-expires-at": String(Date().addingTimeInterval(300).timeIntervalSince1970)
+                    ]
+                )
+            case "/v1/entitlements/preflight":
+                XCTAssertNil(request.value(forHTTPHeaderField: "x-storytime-parent-auth"))
+                return try Self.httpResponse(
+                    url: url,
+                    statusCode: 401,
+                    json: [
+                        "error": "parent_auth_required",
+                        "message": "A grown-up needs to sign in before StoryTime can check this plan."
+                    ]
+                )
+            default:
+                XCTFail("Unexpected request: \(url.absoluteString)")
+                return Self.rawResponse(url: url, statusCode: 404, body: "")
+            }
+        }
+
+        let client = APIClient(
+            baseURLs: [baseURL],
+            session: session,
+            installId: "install-123",
+            parentAuthTokenProvider: HangingParentAuthTokenProvider(),
+            parentAuthTokenTimeoutNanoseconds: 50_000_000
+        )
+
+        do {
+            _ = try await client.preflightEntitlements(
+                request: EntitlementPreflightRequest(
+                    action: .newStory,
+                    childProfileID: UUID().uuidString,
+                    childProfileCount: 1,
+                    requestedLengthMinutes: 4
+                )
+            )
+            XCTFail("Expected preflight to require authenticated parent identity after token timeout")
+        } catch let error as APIError {
+            XCTAssertEqual(error.statusCode, 401)
+            XCTAssertEqual(error.serverCode, "parent_auth_required")
+        }
+    }
+
+    func testPreflightTimesOutWhenTransportStalls() async {
+        let session = makeSession()
+        let baseURL = URL(string: "https://backend.example.com/")!
+
+        URLProtocolStub.handler = { request in
+            let url = try XCTUnwrap(request.url)
+
+            switch url.path {
+            case "/v1/session/identity":
+                return try Self.httpResponse(
+                    url: url,
+                    statusCode: 200,
+                    json: ["session_id": "session-preflight-timeout", "region": "US"],
+                    headers: [
+                        "x-storytime-session": "signed-session-token",
+                        "x-storytime-session-expires-at": String(Date().addingTimeInterval(300).timeIntervalSince1970)
+                    ]
+                )
+            case "/v1/entitlements/preflight":
+                Thread.sleep(forTimeInterval: 0.2)
+                return try Self.httpResponse(
+                    url: url,
+                    statusCode: 200,
+                    json: [
+                        "allowed": true,
+                        "action": "new_story",
+                        "snapshot": [
+                            "tier": "starter",
+                            "source": "none",
+                            "max_child_profiles": 1,
+                            "max_story_starts_per_period": 3,
+                            "max_continuations_per_period": 3,
+                            "max_story_length_minutes": 10,
+                            "can_replay_saved_stories": true,
+                            "can_start_new_stories": true,
+                            "can_continue_saved_series": true,
+                            "effective_at": Date().addingTimeInterval(-60).timeIntervalSince1970,
+                            "expires_at": Date().addingTimeInterval(3600).timeIntervalSince1970,
+                            "usage_window": [
+                                "kind": "rolling_period",
+                                "duration_seconds": 604800,
+                                "resets_at": NSNull()
+                            ],
+                            "remaining_story_starts": 3,
+                            "remaining_continuations": 3
+                        ]
+                    ]
+                )
+            default:
+                XCTFail("Unexpected request: \(url.absoluteString)")
+                return Self.rawResponse(url: url, statusCode: 404, body: "")
+            }
+        }
+
+        let client = APIClient(
+            baseURLs: [baseURL],
+            session: session,
+            installId: "install-123",
+            requestTimeoutIntervalOverride: 0.05
+        )
+
+        do {
+            _ = try await client.preflightEntitlements(
+                request: EntitlementPreflightRequest(
+                    action: .newStory,
+                    childProfileID: UUID().uuidString,
+                    childProfileCount: 1,
+                    requestedLengthMinutes: 4
+                )
+            )
+            XCTFail("Expected preflight transport timeout to fail")
+        } catch let error as APIError {
+            switch error {
+            case .connectionFailed(let candidates):
+                XCTAssertEqual(candidates, [baseURL])
+            case .invalidResponse:
+                XCTFail("Expected connectionFailed for a stalled preflight transport")
+            }
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
     func testPreflightUsesRefreshedEntitlementTokenAfterPurchaseSync() async throws {
         let session = makeSession()
         let baseURL = URL(string: "https://backend.example.com/")!
@@ -3045,6 +3187,17 @@ private struct StubParentAuthTokenProvider: ParentAuthTokenProviding {
 
     func currentParentAuthToken() async -> String? {
         token
+    }
+}
+
+private struct HangingParentAuthTokenProvider: ParentAuthTokenProviding {
+    func currentParentAuthToken() async -> String? {
+        do {
+            try await Task.sleep(nanoseconds: .max)
+            return nil
+        } catch {
+            return nil
+        }
     }
 }
 

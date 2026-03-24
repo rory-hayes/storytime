@@ -9,7 +9,11 @@ enum AppConfig {
         candidateAPIBaseURLs(
             environment: ProcessInfo.processInfo.environment,
             infoDictionary: Bundle.main.infoDictionary ?? [:],
-            includeLocalDebugFallback: shouldIncludeLocalDebugFallback
+            includeLocalDebugFallback: shouldIncludeLocalDebugFallback(
+                environment: ProcessInfo.processInfo.environment,
+                isDebugBuild: isDebugBuild,
+                isSimulatorBuild: isSimulatorBuild
+            )
         )
     }
 
@@ -19,8 +23,9 @@ enum AppConfig {
         includeLocalDebugFallback: Bool
     ) -> [URL] {
         var candidates: [URL] = []
+        let explicitOverride = normalizedBaseURL(from: environment["API_BASE_URL"])
 
-        if let override = normalizedBaseURL(from: environment["API_BASE_URL"]) {
+        if let override = explicitOverride {
             candidates.append(override)
         }
 
@@ -30,7 +35,9 @@ enum AppConfig {
             candidates.append(bundledDefault)
         }
 
-        if includeLocalDebugFallback {
+        // Keep the localhost fallback for general debug convenience, but do not append it
+        // when the caller explicitly chose a backend target for this run.
+        if includeLocalDebugFallback, explicitOverride == nil {
             candidates.append(localDefault)
         }
 
@@ -62,11 +69,41 @@ enum AppConfig {
         return components.url
     }
 
-    private static var shouldIncludeLocalDebugFallback: Bool {
+    static func shouldIncludeLocalDebugFallback(
+        environment: [String: String],
+        isDebugBuild: Bool,
+        isSimulatorBuild: Bool
+    ) -> Bool {
+        guard isDebugBuild else { return false }
+        if isSimulatorBuild {
+            return true
+        }
+
+        // Localhost is only useful by default on the simulator. Physical devices should
+        // target the bundled or explicitly selected backend unless a developer opts in.
+        return environment["STORYTIME_ALLOW_DEVICE_LOCALHOST_FALLBACK"] == "1"
+    }
+
+    private static var isDebugBuild: Bool {
         #if DEBUG
         return true
         #else
         return false
         #endif
+    }
+
+    private static var isSimulatorBuild: Bool {
+        #if targetEnvironment(simulator)
+        return true
+        #else
+        return false
+        #endif
+    }
+
+    static func debugCandidateBaseURLMessages(baseURLs: [URL] = candidateAPIBaseURLs) -> [String] {
+        baseURLs.enumerated().map { index, baseURL in
+            let label = index == 0 ? "Backend target" : "Fallback target \(index)"
+            return "\(label): \(baseURL.absoluteString)"
+        }
     }
 }

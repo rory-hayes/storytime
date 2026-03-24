@@ -5,6 +5,138 @@ import StoreKit
 
 private let parentControlsDefaultMaxChildProfiles = 3
 
+struct PlanCheckDebugEntry: Identifiable, Equatable {
+    let id = UUID()
+    let message: String
+}
+
+enum PlanCheckDebugKind {
+    case newStory
+    case continueStory
+
+    var preparingMessage: String {
+        switch self {
+        case .newStory:
+            return "Preparing plan check for a new story."
+        case .continueStory:
+            return "Preparing plan check for a saved-story continuation."
+        }
+    }
+
+    var skippedMessage: String {
+        switch self {
+        case .newStory:
+            return "No plan check was required before starting this story."
+        case .continueStory:
+            return "No plan check was required before continuing this series."
+        }
+    }
+
+    func decisionMessage(for response: EntitlementPreflightResponse) -> String {
+        if response.allowed {
+            switch self {
+            case .newStory:
+                return "Plan check passed. Starting the voice session."
+            case .continueStory:
+                return "Plan check passed. Starting the next episode."
+            }
+        }
+
+        switch self {
+        case .newStory:
+            return "Plan check needs a parent review before this story can start."
+        case .continueStory:
+            return "Plan check needs a parent review before this episode can start."
+        }
+    }
+}
+
+enum PlanCheckDebugOverlay {
+    private static let environmentKey = "STORYTIME_DEBUG_PLAN_CHECK_OVERLAY"
+
+    static func isEnabled(environment: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
+        environment[environmentKey] == "1"
+    }
+
+    static func traceMessage(for event: APIClientTraceEvent) -> String? {
+        switch (event.operation, event.phase) {
+        case (.sessionBootstrap, .started):
+            return "Checking parent session on \(event.route)."
+        case (.sessionBootstrap, .completed):
+            if let statusCode = event.statusCode {
+                return "Parent session check finished (\(statusCode)) on \(event.route)."
+            }
+            return "Parent session check finished on \(event.route)."
+        case (.sessionBootstrap, .transportFailed):
+            return "Parent session check hit a connection problem on \(event.route)."
+        case (.entitlementPreflight, .started):
+            return "Checking the current plan on \(event.route)."
+        case (.entitlementPreflight, .completed):
+            if let statusCode = event.statusCode {
+                return "Plan service responded (\(statusCode)) on \(event.route)."
+            }
+            return "Plan service responded on \(event.route)."
+        case (.entitlementPreflight, .transportFailed):
+            return "Plan service connection failed on \(event.route)."
+        default:
+            return nil
+        }
+    }
+
+    static func failureMessage(for error: Error) -> String {
+        guard let apiError = error as? APIError else {
+            return "Displayed error: plan check failed."
+        }
+
+        switch apiError {
+        case .connectionFailed:
+            return "Displayed error: couldn't reach the plan service."
+        case .invalidResponse(let statusCode, let code, _, _, _):
+            switch code {
+            case "parent_auth_required":
+                return "Displayed error: a grown-up needs to sign in."
+            case let code? where !code.isEmpty:
+                return "Displayed error: \(code) (\(statusCode))."
+            default:
+                return "Displayed error: server returned \(statusCode)."
+            }
+        }
+    }
+}
+
+struct PlanCheckDebugOverlayView: View {
+    let entries: [PlanCheckDebugEntry]
+
+    var body: some View {
+        if !entries.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Plan Check Debug")
+                    .font(.system(size: 12, weight: .black, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.92))
+
+                ForEach(Array(entries.suffix(4))) { entry in
+                    Text(entry.message)
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(Color.black.opacity(0.84))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
+            )
+            .accessibilityIdentifier("planCheckDebugOverlay")
+            .allowsHitTesting(false)
+        }
+    }
+}
+
 struct HomeView: View {
     @ObservedObject var store: StoryLibraryStore
     @State private var localShowingNewJourney = false
@@ -908,6 +1040,7 @@ struct ParentTrustCenterView: View {
             entitlementManager.reloadFromCache()
             ClientLaunchTelemetry.recordParentPlanPresented(snapshot: entitlementManager.snapshot)
             Task {
+                await bootstrapPlanStatusIfNeeded()
                 await loadPurchaseOptionsIfNeeded()
             }
         }
@@ -977,16 +1110,12 @@ struct ParentTrustCenterView: View {
     }
 
     private var currentPlanTitle: String {
-        if let snapshot = displayedSnapshot {
-            return snapshot.tier == .plus ? "Plus" : "Starter"
-        }
-
-        return "Plan status unavailable"
+        PlanStatusPresentation.currentPlanTitle(snapshot: displayedSnapshot, isRefreshing: isRefreshingPlan)
     }
 
     private var currentPlanSummary: String {
         guard let snapshot = displayedSnapshot else {
-            return "Use Refresh Plan Status or Restore Purchases here when a parent needs the latest plan details on this device."
+            return PlanStatusPresentation.currentPlanSummary(snapshot: displayedSnapshot, isRefreshing: isRefreshingPlan)
         }
 
         return planAllowanceSummary(for: snapshot)
@@ -1087,6 +1216,26 @@ struct ParentTrustCenterView: View {
     }
 
     @MainActor
+    private func bootstrapPlanStatusIfNeeded() async {
+        guard entitlementManager.snapshot == nil else { return }
+
+        isRefreshingPlan = true
+        defer { isRefreshingPlan = false }
+
+        do {
+            if let uiTestEnvelope = UITestSeed.refreshedEntitlementEnvelopeIfNeeded() {
+                AppEntitlements.store(envelope: uiTestEnvelope)
+                entitlementManager.reloadFromCache()
+            } else {
+                try await entitlementManager.refreshFromBootstrap(using: APIClient())
+            }
+            planErrorMessage = nil
+        } catch {
+            planErrorMessage = PlanStatusPresentation.parentPlanRefreshMessage(for: error)
+        }
+    }
+
+    @MainActor
     private func refreshPlanStatus() async {
         planActionMessage = nil
         planErrorMessage = nil
@@ -1105,7 +1254,7 @@ struct ParentTrustCenterView: View {
             planActionMessage = "Plan status refreshed for this device."
             ClientLaunchTelemetry.recordParentPlanRefresh(outcome: .completed, snapshot: entitlementManager.snapshot)
         } catch {
-            planErrorMessage = "I couldn't refresh this device's plan right now. Ask a grown-up to try again."
+            planErrorMessage = PlanStatusPresentation.parentPlanRefreshMessage(for: error)
             ClientLaunchTelemetry.recordParentPlanRefresh(outcome: .failed, snapshot: entitlementManager.snapshot)
         }
     }

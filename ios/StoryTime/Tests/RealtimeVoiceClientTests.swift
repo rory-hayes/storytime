@@ -246,6 +246,38 @@ final class RealtimeVoiceClientTests: XCTestCase {
         await connectTask.value
     }
 
+    func testConnectFailsWhenBridgeNeverSignalsConnectedBeforeConnectTimeout() async {
+        let client = RealtimeVoiceClient()
+        client.bridgeCommandSender = { _, _ in }
+        client.setBridgeReadyForTesting()
+        client.connectTimeoutNanoseconds = 60_000_000
+
+        let connectTask = Task {
+            do {
+                try await client.connect(
+                    baseURL: URL(string: "https://backend.example.com")!,
+                    endpointPath: "/v1/realtime/call",
+                    session: RealtimeSessionData(
+                        ticket: "signed-ticket",
+                        expiresAt: 120,
+                        model: "gpt-realtime",
+                        voice: "alloy",
+                        inputAudioTranscriptionModel: "gpt-4o-mini-transcribe"
+                    ),
+                    installId: "install-123"
+                )
+                XCTFail("Expected connect to fail")
+            } catch {
+                XCTAssertEqual(
+                    error as? RealtimeVoiceClient.RealtimeError,
+                    .connectTimedOut
+                )
+            }
+        }
+
+        await connectTask.value
+    }
+
     func testConnectFailsWhenBridgeNeverBecomesReadyBeforeTimeout() async {
         let client = RealtimeVoiceClient()
         client.bridgeCommandSender = { _, _ in }
@@ -426,6 +458,10 @@ final class RealtimeVoiceClientTests: XCTestCase {
         XCTAssertEqual(
             RealtimeVoiceClient.RealtimeError.disconnectedBeforeReady.errorDescription,
             "Realtime bridge disconnected before it was ready."
+        )
+        XCTAssertEqual(
+            RealtimeVoiceClient.RealtimeError.connectTimedOut.errorDescription,
+            "Realtime bridge did not finish connecting in time."
         )
         XCTAssertEqual(
             RealtimeVoiceClient.RealtimeError.connectFailed("Socket failed").errorDescription,

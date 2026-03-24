@@ -101,7 +101,9 @@ enum UITestSeed {
         defaults.set(primaryProfile.id.uuidString, forKey: "storytime.active.child.profile.v1")
         defaults.set(try? JSONEncoder().encode(privacy), forKey: "storytime.parent.privacy.v1")
         defaults.set(true, forKey: FirstRunExperienceStore.onboardingCompletedKey)
-        AppEntitlements.store(envelope: seededEntitlementEnvelope(childProfileCount: 2, environment: environment))
+        if environment["STORYTIME_UI_TEST_SKIP_INITIAL_ENTITLEMENT_SEED"] != "1" {
+            AppEntitlements.store(envelope: seededEntitlementEnvelope(childProfileCount: 2, environment: environment))
+        }
     }
 
     static func entitlementPreflightOverride(for plan: StoryLaunchPlan, childProfileCount: Int) -> EntitlementPreflightResponse? {

@@ -8,6 +8,7 @@ struct StorySeriesDetailView: View {
     @State private var blockedPreflightResponse: EntitlementPreflightResponse?
     @State private var launchErrorMessage: String?
     @State private var parentUpgradeSheet: SeriesDetailParentUpgradeSheet?
+    @State private var planCheckDebugEntries: [PlanCheckDebugEntry] = []
 
     var body: some View {
         Group {
@@ -60,6 +61,13 @@ struct StorySeriesDetailView: View {
         .onChange(of: parentUpgradeSheet) { _, destination in
             if destination == nil {
                 refreshBlockedStateAfterParentReview()
+            }
+        }
+        .overlay(alignment: .bottom) {
+            if PlanCheckDebugOverlay.isEnabled() {
+                PlanCheckDebugOverlayView(entries: planCheckDebugEntries)
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 20)
             }
         }
         .navigationTitle("Story Series")
@@ -355,10 +363,15 @@ struct StorySeriesDetailView: View {
     @MainActor
     private func startNewEpisodeIfAllowed(for series: StorySeries) async {
         launchErrorMessage = nil
+        for message in AppConfig.debugCandidateBaseURLMessages() {
+            appendPlanCheckDebug(message)
+        }
+        appendPlanCheckDebug(PlanCheckDebugKind.continueStory.preparingMessage)
         guard let request = EntitlementPreflightRequest(
             plan: newEpisodeLaunchPlan(for: series),
             childProfileCount: store.childProfiles.count
         ) else {
+            appendPlanCheckDebug(PlanCheckDebugKind.continueStory.skippedMessage)
             allowNewEpisodeLaunch()
             return
         }
@@ -367,11 +380,14 @@ struct StorySeriesDetailView: View {
         defer { isCheckingPlan = false }
 
         do {
-            let response = try await APIClient().preflightEntitlements(request: request)
+            let client = configuredPlanCheckClient()
+            let response = try await client.preflightEntitlements(request: request)
+            appendPlanCheckDebug(PlanCheckDebugKind.continueStory.decisionMessage(for: response))
             handlePreflightDecision(response)
         } catch {
             blockedPreflightResponse = nil
-            launchErrorMessage = "I couldn't check the plan right now. Ask a grown-up to try again."
+            appendPlanCheckDebug(PlanCheckDebugOverlay.failureMessage(for: error))
+            launchErrorMessage = PlanStatusPresentation.launchCheckMessage(for: error)
         }
     }
 
@@ -404,6 +420,31 @@ struct StorySeriesDetailView: View {
         if tokenChanged || snapshotChanged {
             blockedPreflightResponse = nil
             launchErrorMessage = nil
+        }
+    }
+
+    private func configuredPlanCheckClient() -> APIClient {
+        let client = APIClient()
+        client.traceHandler = { event in
+            guard let message = PlanCheckDebugOverlay.traceMessage(for: event) else {
+                return
+            }
+
+            Task { @MainActor in
+                appendPlanCheckDebug(message)
+            }
+        }
+        return client
+    }
+
+    @MainActor
+    private func appendPlanCheckDebug(_ message: String) {
+        guard PlanCheckDebugOverlay.isEnabled() else { return }
+        guard planCheckDebugEntries.last?.message != message else { return }
+
+        planCheckDebugEntries.append(PlanCheckDebugEntry(message: message))
+        if planCheckDebugEntries.count > 6 {
+            planCheckDebugEntries.removeFirst(planCheckDebugEntries.count - 6)
         }
     }
 }

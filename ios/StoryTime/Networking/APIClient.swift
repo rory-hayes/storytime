@@ -1147,18 +1147,24 @@ final class APIClient: APIClienting {
     private let candidateBaseURLs: [URL]
     private let installId: String
     private let parentAuthTokenProvider: ParentAuthTokenProviding
+    private let parentAuthTokenTimeoutNanoseconds: UInt64
+    private let requestTimeoutIntervalOverride: TimeInterval?
     private var activeBaseURL: URL?
 
     init(
         baseURLs: [URL] = AppConfig.candidateAPIBaseURLs,
         session: URLSession = .shared,
         installId: String = AppInstall.identity,
-        parentAuthTokenProvider: ParentAuthTokenProviding = FirebaseParentAuthTokenProvider()
+        parentAuthTokenProvider: ParentAuthTokenProviding = FirebaseParentAuthTokenProvider(),
+        parentAuthTokenTimeoutNanoseconds: UInt64 = 2_000_000_000,
+        requestTimeoutIntervalOverride: TimeInterval? = nil
     ) {
         self.candidateBaseURLs = baseURLs
         self.session = session
         self.installId = installId
         self.parentAuthTokenProvider = parentAuthTokenProvider
+        self.parentAuthTokenTimeoutNanoseconds = parentAuthTokenTimeoutNanoseconds
+        self.requestTimeoutIntervalOverride = requestTimeoutIntervalOverride
     }
 
     func prepareConnection() async throws -> URL {
@@ -1466,7 +1472,7 @@ final class APIClient: APIClienting {
         )
 
         do {
-            let (data, response) = try await session.data(for: request)
+            let (data, response) = try await data(for: request)
             guard let http = response as? HTTPURLResponse else {
                 emitTrace(
                     APIClientTraceEvent(
@@ -1516,7 +1522,34 @@ final class APIClient: APIClienting {
                     )
                 )
             }
+            if let urlError = error as? URLError, urlError.code == .timedOut {
+                throw APIError.connectionFailed(candidateBaseURLs)
+            }
             throw error
+        }
+    }
+
+    private func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+        let timeoutNanoseconds = Self.timeoutNanoseconds(
+            for: requestTimeoutIntervalOverride ?? request.timeoutInterval
+        )
+
+        return try await withThrowingTaskGroup(of: (Data, URLResponse).self) { group in
+            group.addTask {
+                try await self.session.data(for: request)
+            }
+
+            group.addTask {
+                try await Task.sleep(nanoseconds: timeoutNanoseconds)
+                throw URLError(.timedOut)
+            }
+
+            guard let result = try await group.next() else {
+                group.cancelAll()
+                throw APIError.connectionFailed(candidateBaseURLs)
+            }
+            group.cancelAll()
+            return result
         }
     }
 
@@ -1681,9 +1714,32 @@ final class APIClient: APIClienting {
     }
 
     private func applyParentAuthHeaderIfAvailable(to request: inout URLRequest) async {
-        if let parentAuthToken = await parentAuthTokenProvider.currentParentAuthToken() {
+        if let parentAuthToken = await currentParentAuthTokenWithTimeout() {
             request.setValue(parentAuthToken, forHTTPHeaderField: "x-storytime-parent-auth")
         }
+    }
+
+    private func currentParentAuthTokenWithTimeout() async -> String? {
+        await withTaskGroup(of: String?.self) { group in
+            group.addTask {
+                await self.parentAuthTokenProvider.currentParentAuthToken()
+            }
+
+            group.addTask {
+                try? await Task.sleep(nanoseconds: self.parentAuthTokenTimeoutNanoseconds)
+                return nil
+            }
+
+            let result = await group.next() ?? nil
+            group.cancelAll()
+            return result
+        }
+    }
+
+    private static func timeoutNanoseconds(for seconds: TimeInterval) -> UInt64 {
+        let clampedSeconds = max(0.05, seconds)
+        let nanoseconds = clampedSeconds * 1_000_000_000
+        return min(UInt64.max, UInt64(nanoseconds.rounded()))
     }
 
     private func storeResolvedRegion(from envelope: BackendHealthEnvelope) {
@@ -1792,6 +1848,70 @@ enum APIError: Error, LocalizedError {
             let joined = candidates.map(\.absoluteString).joined(separator: ", ")
             return "Could not connect to backend. Tried: \(joined)"
         }
+    }
+}
+
+enum PlanStatusPresentation {
+    static func currentPlanTitle(snapshot: EntitlementSnapshot?, isRefreshing: Bool) -> String {
+        if let snapshot {
+            return snapshot.tier == .plus ? "Plus" : "Starter"
+        }
+
+        return isRefreshing ? "Checking current plan..." : "Plan status unavailable"
+    }
+
+    static func currentPlanSummary(snapshot: EntitlementSnapshot?, isRefreshing: Bool) -> String {
+        guard snapshot == nil else { return "" }
+
+        if isRefreshing {
+            return "StoryTime is checking the latest plan details for this device."
+        }
+
+        return "Use Refresh Plan Status or Restore Purchases here when a parent needs the latest plan details on this device."
+    }
+
+    static func launchCheckMessage(for error: Error) -> String {
+        if let apiError = error as? APIError {
+            if case .connectionFailed = apiError {
+                return "StoryTime couldn't reach the plan service right now. Ask a grown-up to check the connection and try again."
+            }
+
+            switch apiError.serverCode {
+            case "parent_auth_required":
+                return "A grown-up needs to sign in before StoryTime can check this plan."
+            default:
+                if let message = apiError.serverMessage?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !message.isEmpty {
+                    return "StoryTime couldn't check the plan right now. \(message)"
+                }
+
+                return "StoryTime couldn't check the plan right now. Ask a grown-up to try again."
+            }
+        }
+
+        return "StoryTime couldn't reach the plan service right now. Ask a grown-up to check the connection and try again."
+    }
+
+    static func parentPlanRefreshMessage(for error: Error) -> String {
+        if let apiError = error as? APIError {
+            if case .connectionFailed = apiError {
+                return "StoryTime couldn't reach the plan service right now. Check the connection and try again."
+            }
+
+            switch apiError.serverCode {
+            case "parent_auth_required":
+                return "Sign in to a parent account before refreshing the current plan on this device."
+            default:
+                if let message = apiError.serverMessage?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !message.isEmpty {
+                    return "StoryTime couldn't refresh the current plan right now. \(message)"
+                }
+
+                return "I couldn't refresh this device's plan right now. Ask a grown-up to try again."
+            }
+        }
+
+        return "StoryTime couldn't reach the plan service right now. Check the connection and try again."
     }
 }
 

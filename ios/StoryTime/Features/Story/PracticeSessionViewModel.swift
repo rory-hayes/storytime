@@ -383,6 +383,15 @@ final class PracticeSessionViewModel: ObservableObject {
         }
     }
 
+    struct VoiceStartupDebugSnapshot: Equatable {
+        let phase: String
+        let statusMessage: String
+        let errorMessage: String
+        let startupStage: String?
+        let lastStartupFailure: String?
+        let traceEvents: [SessionTraceEvent]
+    }
+
     @Published var voices: [String] = []
     @Published var selectedVoice: String = "alloy"
     @Published private(set) var sessionState: VoiceSessionState = .idle
@@ -505,6 +514,17 @@ final class PracticeSessionViewModel: ObservableObject {
 
     var phase: ConversationPhase {
         sessionState.phase
+    }
+
+    var voiceStartupDebugSnapshot: VoiceStartupDebugSnapshot {
+        VoiceStartupDebugSnapshot(
+            phase: sessionState.phase.rawValue,
+            statusMessage: statusMessage,
+            errorMessage: errorMessage,
+            startupStage: startupStageDebugLabel,
+            lastStartupFailure: lastStartupFailure?.rawValue,
+            traceEvents: Array(traceEvents.suffix(3))
+        )
     }
 
     var privacySummary: String {
@@ -2043,7 +2063,7 @@ final class PracticeSessionViewModel: ObservableObject {
                 return .bridgeReadiness
             case .disconnectedBeforeReady:
                 return .disconnectBeforeReady
-            case .connectFailed, .invalidBridgeResponse, .notReady:
+            case .connectTimedOut, .connectFailed, .invalidBridgeResponse, .notReady:
                 return .callConnect
             }
         }
@@ -2057,6 +2077,21 @@ final class PracticeSessionViewModel: ObservableObject {
             return .realtimeSession
         case .callConnect:
             return .callConnect
+        }
+    }
+
+    private var startupStageDebugLabel: String? {
+        guard let activeStartupAttempt else { return nil }
+
+        switch activeStartupAttempt.stage {
+        case .healthCheck:
+            return "health-check"
+        case .sessionBootstrap:
+            return "session-bootstrap"
+        case .realtimeSession:
+            return "realtime-session"
+        case .callConnect:
+            return "voice-connect"
         }
     }
 

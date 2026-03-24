@@ -200,17 +200,26 @@ Phase 13 - Authenticated Commerce Hardening
 - Restore semantics under the new account model are now explicit for the current repo scope: restored Plus stays claimed to the parent account that restored it on the current device or install, and a different signed-in parent now gets an explicit restore conflict instead of a silent transfer. Live family-share and broader multi-device restore behavior still need direct verification.
 - Authenticated entitlement ownership and promo redemption are now durable across backend restarts through a repo-fit JSON persistence layer. Later work still needs to define the final backup, migration, or production storage story if the backend grows beyond this smallest hardening layer.
 - The live authenticated-commerce pass is now explicitly split into repo-prep work and physical-device execution work. The repo now has the support rerun plus live checklist, but production Apple auth and App Store behavior still require a human-operated environment to verify directly.
-- `M13.3b` is now explicitly blocked on external execution prerequisites: a paired physical iOS device ready for developer execution, a live-capable build, and real Apple/App Store credentials or environment access.
+- `M13.3b2b` is now explicitly blocked on external execution prerequisites: a live-capable signed build that keeps the real `Sign in with Apple` capability, plus real Apple/App Store credentials or environment access for the human-operated pass.
+- Current repo evidence narrows that blocker further: the working tree is still set up for a Personal Team debug build, `ios/StoryTime/App/StoryTime.entitlements` is empty, and the local physical-device build therefore cannot satisfy the production Apple-auth verification step until the live-capable signing configuration is restored.
+- `M13.3b2a` is now complete: explicit `API_BASE_URL` runs no longer silently append the debug localhost fallback, and physical-device debug sessions no longer append localhost by default at all unless explicitly opted in.
+- Local physical-device debugging is now also protected against indefinite parent-auth stalls: `APIClient` bounds Firebase parent-token lookup with a timeout before entitlement preflight, so the app can fall through to a truthful parent-auth or plan-check response instead of hanging forever at `Checking Plan...`.
+- Local physical-device debugging is now also protected against stalled request transport: `APIClient.perform(...)` bounds the actual request wait by the request timeout interval and turns that failure into a normal connection error instead of leaving the parent-facing preflight spinner stuck indefinitely.
+- Local physical-device debugging now also has an opt-in `STORYTIME_DEBUG_PLAN_CHECK_OVERLAY=1` surface on the story-start screens, so parent session bootstrap and entitlement-preflight phases can be observed safely even when Xcode console capture is unreliable.
+- Local physical-device debugging is now also protected against a second indefinite stall in the actual voice startup path: once the bridge is ready, `RealtimeVoiceClient.connect(...)` now times out if the bridge never finishes the post-command connect handshake, and `PracticeSessionViewModel` maps that timeout into the existing safe `callConnect` failure state.
+- Local physical-device debugging now also has an opt-in `STORYTIME_DEBUG_VOICE_STARTUP_OVERLAY=1` surface on `VoiceSessionView`, so the actual voice boot path can show safe phase breadcrumbs on-device even when Xcode console capture is unreliable.
+- The old production route mismatch is now closed: after adding the missing `API_AUTH_REQUIRED=true` production env and redeploying through Vercel, the live alias again serves `/health` and `POST /v1/session/identity`, and `/v1/entitlements/preflight` now responds with the expected auth-bound `401 missing_session_token` instead of `404`.
+- The fresh Vercel preview deployment is still not a usable replacement backend because preview checks currently fail with `FUNCTION_INVOCATION_FAILED`, but production has been restored.
 - Production Firebase parent-token verification now requires backend environment configuration: `FIREBASE_PROJECT_ID` plus either service-account credentials (`FIREBASE_CLIENT_EMAIL`, `FIREBASE_PRIVATE_KEY`) or application default credentials.
 - Intentionally deferred unless reprioritized: full cloud sync, multi-device story portability, broader family account management, web admin tooling, and a broader auth-provider matrix.
 
 ## Next Recommended Milestone
 
-`M13.3b - Live authenticated-commerce execution and report` once the live-device blocker is cleared
+`M13.3b2b - Live authenticated-commerce execution and report` once the live-capable build and Apple/App Store blocker are cleared
 
 Reason:
-- `M13.3a` is now complete, so the remaining highest-signal gap is still the actual physical-device execution of production Apple auth, App Store purchase, and App Store restore.
-- The repo already has the deterministic support pack and live checklist, so no further repo-only implementation work is the right next step until the external blocker is cleared.
+- `M13.3b2a` is now complete, so the remaining highest-signal gap is still the actual live execution of production Apple auth, App Store purchase, and App Store restore.
+- The repo now has the deterministic support pack, the local-device error-visibility unblocker, a truthful explicit-backend debug target path, a bounded parent-auth token timeout path, and a bounded request-transport timeout path, so the next missing evidence is the real live-capable signed run rather than another repo-only hardening pass.
 - Family-share and real App Store mismatch behavior remain only partially verified until that live pass is actually recorded.
 
 ## Milestone Status
@@ -231,7 +240,9 @@ Reason:
 | M13.1 Durable authenticated entitlement and promo persistence | DONE | Backend authenticated entitlement records and promo redemption ledgers now persist through `ENTITLEMENTS_PERSIST_PATH`, reload across backend recreation, and keep the existing iOS contract unchanged. |
 | M13.2 Restore mismatch and device-fallback product rule | DONE | Restore-linked Plus now stays claimed to the parent account that restored it on the current device, mismatch attempts fail with `restore_parent_mismatch`, and parent-facing copy now makes local fallback explicit in Parent Controls and onboarding. |
 | M13.3a Live authenticated-commerce verification prep and support rerun | DONE | The deterministic support pack was rerun, the live-only execution gap was isolated, and `docs/verification/live-authenticated-commerce-verification-prep.md` now records exact prerequisites, commands, and the physical-device checklist for the real pass. |
-| M13.3b Live authenticated-commerce execution and report | BLOCKED | Record the first live-environment verification pass for production Apple sign-in, App Store purchase, and App Store restore after the prep and support rerun are complete. Blocked on physical-device and live-environment access. |
+| M13.3b1 Live-device plan bootstrap and error-visibility unblocker | DONE | Parent Controls now bootstraps plan state when the entitlement cache starts empty, blocked launch surfaces now surface safe plan-check failures, and focused UI/unit coverage now makes local physical-device debugging truthful enough for the final live pass. |
+| M13.3b2a Explicit backend-target truthfulness for live-device debug runs | DONE | Explicit `API_BASE_URL` runs no longer silently append the debug localhost fallback, and physical-device debug sessions now require explicit opt-in before localhost is appended, while simulator debug keeps the fallback by default. |
+| M13.3b2b Live authenticated-commerce execution and report | BLOCKED | Record the first live-environment verification pass for production Apple sign-in, App Store purchase, and App Store restore after the prep and local-device unblockers are complete. Blocked on restoring a live-capable signed build with the Apple sign-in entitlement plus real Apple/App Store environment access; repo-side debug hardening now also bounds parent-auth token stalls before preflight, stalled request transport, stalled realtime bridge connect handshakes, and exposes safe on-device startup breadcrumbs for the voice boot path. |
 | M12.1 First-run activation onboarding flow | DONE | Fresh installs now stay inside a dedicated seven-step onboarding journey until child setup, parent sign-in, and plan choice are complete; account and plan entry moved into onboarding, Parent Controls were reframed as ongoing management, and targeted smoke plus UI coverage now pins the new gate. |
 | M12.2 Onboarding activation verification and hardening | DONE | `docs/verification/onboarding-activation-verification.md` now records fresh-install gating, plan-entry visibility, purchase or restore or promo completion, relaunch persistence, the onboarding-sheet dismiss hardening, and the explicit decision to keep the current onboarding completion key without a version bump. |
 | M1.1 Realtime startup flow audit | DONE | Startup chain documented in `docs/realtime-startup-audit.md`; failing backend realtime error branch identified. |
@@ -2162,3 +2173,242 @@ Reason:
   - Production `Sign in with Apple`, live App Store purchase, and live App Store restore remain unverified.
   - Family-share and broader cross-device restore behavior remain only partially verified until the live pass can run.
 - Next: `M13.3b - Live authenticated-commerce execution and report` once device pairing, live build access, and Apple/App Store credentials are available
+
+### 2026-03-22 - M13.3b split into local-device unblocker and live execution
+- Status: DONE (`M13.3b1`) and BLOCKED (`M13.3b2`)
+- Summary: Continued the next ordered blocked live-commerce milestone after the physical device became available locally. The local iPhone was paired, made developer-ready, and a Personal Team debug build was installed, which exposed a repo-fit issue: Parent Controls stayed on cached plan state when no entitlement envelope existed yet, and blocked launch surfaces still swallowed the underlying preflight error behind the generic "plan check unavailable" copy. I fixed those minimum unblockers without pretending the real Apple/App Store pass was complete, then split the original milestone so the remaining external work stays explicit.
+- Files:
+  - `docs/verification/live-authenticated-commerce-verification-prep.md`
+  - `ios/StoryTime/App/UITestSeed.swift`
+  - `ios/StoryTime/Features/Story/HomeView.swift`
+  - `ios/StoryTime/Features/Story/NewStoryJourneyView.swift`
+  - `ios/StoryTime/Features/Story/StorySeriesDetailView.swift`
+  - `ios/StoryTime/Networking/APIClient.swift`
+  - `ios/StoryTime/Tests/SmokeTests.swift`
+  - `ios/StoryTime/UITests/StoryTimeUITests.swift`
+  - `PLANS.md`
+  - `SPRINT.md`
+- Tests:
+  - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' -only-testing:StoryTimeUITests/StoryTimeUITests/testParentControlsBootstrapPlanStatusWhenCacheStartsEmpty -only-testing:StoryTimeUITests/StoryTimeUITests/testParentControlsShowSignedOutParentAccountStatus`, which passed `2` tests.
+  - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' -only-testing:StoryTimeTests/SmokeTests/testPlanStatusPresentationSurfacesSafePlanMessages`, which passed `1` test.
+  - Note: an initial parallel xcodebuild attempt hit a transient `build.db` lock and was rerun sequentially; the passing sequential reruns are the authoritative evidence.
+- Decisions:
+  - Split `M13.3b` into `M13.3b1` and `M13.3b2` because the current repo did still need one small, tightly related unblocker before the final live pass, but the real Apple/App Store verification is still external work.
+  - Keep the unblocker scoped to parent-managed plan bootstrap and safe error presentation instead of widening into broader live-debug instrumentation.
+  - Treat the current live blocker as "need a live-capable signed build with real `Sign in with Apple` capability and Apple/App Store credentials," not "phone not connected."
+- Risks/Notes:
+  - The local device is now useful for debug builds, but the Personal Team path required removing `Sign in with Apple` capability for local signing, so it cannot stand in for the final live verification artifact.
+  - Production `Sign in with Apple`, live App Store purchase, and live App Store restore remain unverified.
+  - Family-share and broader cross-device restore behavior remain only partially verified until `M13.3b2`.
+- Next: `M13.3b2 - Live authenticated-commerce execution and report` once a live-capable signed build and Apple/App Store credentials are available
+
+### 2026-03-22 - M13.3b2 live-capable signing blocker confirmation
+- Status: BLOCKED
+- Summary: Re-checked the next ordered incomplete milestone against the current repo and device state. The physical iPhone is now paired, developer-ready, and tunnel-connected, so the blocker is no longer device access. The remaining blocker is the active signing configuration itself: the current working tree still reflects the Personal Team debug path, the checked-in entitlements file is currently empty, and the local signed build therefore cannot satisfy the real production `Sign in with Apple` verification required for the live Apple/App Store pass.
+- Files:
+  - `docs/verification/live-authenticated-commerce-verification-prep.md`
+  - `PLANS.md`
+  - `SPRINT.md`
+- Tests:
+  - No automated tests were run.
+  - Environment and repo checks:
+    - `xcrun devicectl list devices --verbose`
+    - `xcodebuild -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -showBuildSettings | rg "DEVELOPMENT_TEAM|PRODUCT_BUNDLE_IDENTIFIER|CODE_SIGN_ENTITLEMENTS|CODE_SIGN_STYLE"`
+    - `git diff -- ios/StoryTime/App/StoryTime.entitlements ios/StoryTime/StoryTime.xcodeproj/project.pbxproj`
+- Decisions:
+  - Do not mark `M13.3b2` complete from a Personal Team debug build that has the Apple sign-in entitlement removed.
+  - Treat the device as ready and the signing or capability state as the true current blocker.
+  - Keep the next milestone unchanged; the remaining work is still the real live Apple/App Store execution pass once live-capable signing is restored.
+- Risks/Notes:
+  - `ios/StoryTime/App/StoryTime.entitlements` is currently `<dict/>` in the working tree.
+  - `ios/StoryTime/StoryTime.xcodeproj/project.pbxproj` currently carries a Personal Team `DEVELOPMENT_TEAM` value for the local debug installation path.
+  - Production `Sign in with Apple`, live App Store purchase, and live App Store restore remain unverified.
+- Next: `M13.3b2b - Live authenticated-commerce execution and report` once a live-capable signed build restores the Apple sign-in entitlement and the Apple/App Store environment is available
+
+### 2026-03-22 - M13.3b2a explicit backend-target truthfulness
+- Status: DONE
+- Summary: Continued the next ordered blocked live-commerce milestone and implemented the minimum tightly related unblocker after a physical-device repro still hung at `Checking Plan...`. The repo still appended the debug localhost fallback even when `API_BASE_URL` was explicitly set to the hosted backend, and localhost was still available by default on physical devices where it is not meaningful. `AppConfig` now suppresses the localhost fallback when an explicit override is present and disables device-localhost fallback by default unless explicitly opted in, while preserving the fallback path for simulator debug runs.
+- Files:
+  - `ios/StoryTime/App/AppConfig.swift`
+  - `ios/StoryTime/Tests/SmokeTests.swift`
+  - `docs/verification/live-authenticated-commerce-verification-prep.md`
+  - `PLANS.md`
+  - `SPRINT.md`
+- Tests:
+  - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' -only-testing:StoryTimeTests/SmokeTests`, which passed `24` tests.
+- Decisions:
+  - Keep this fix narrow: remove the localhost fallback when a run explicitly sets `API_BASE_URL`, and disable device-localhost fallback by default.
+  - Preserve the existing localhost fallback for simulator debug use and allow physical-device localhost fallback only through explicit opt-in.
+  - Treat this as a tightly related unblocker, not as completion of the still-blocked live Apple/App Store verification milestone.
+- Risks/Notes:
+  - The current working tree still reflects the Personal Team signing path and empty Apple-sign-in entitlements file, so the real live pass remains blocked even though backend targeting is now more truthful.
+  - Production `Sign in with Apple`, live App Store purchase, and live App Store restore remain unverified.
+- Next: `M13.3b2b - Live authenticated-commerce execution and report` once a live-capable signed build restores the Apple sign-in entitlement and the Apple/App Store environment is available
+
+### 2026-03-22 - M13.3b2b parent-auth token timeout unblocker
+- Status: MATERIALLY ADVANCED (`M13.3b2b` remains BLOCKED)
+- Summary: Continued the next ordered blocked live-commerce milestone after a physical-device repro still stalled at `Checking Plan...` even with truthful backend targeting. Repo inspection showed `APIClient` awaited Firebase parent-token lookup with no timeout before entitlement preflight or session bootstrap could even send a request. `APIClient` now bounds parent-auth token lookup with a timeout and continues the request without that header when the token provider stalls, so the app can surface a truthful parent-auth or plan-check failure instead of spinning indefinitely.
+- Files:
+  - `ios/StoryTime/Networking/APIClient.swift`
+  - `ios/StoryTime/Tests/APIClientTests.swift`
+  - `ios/StoryTime/Tests/SmokeTests.swift`
+  - `docs/verification/live-authenticated-commerce-verification-prep.md`
+  - `PLANS.md`
+  - `SPRINT.md`
+- Tests:
+  - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' -only-testing:StoryTimeTests/APIClientTests/testPreflightDoesNotHangWhenParentAuthTokenProviderStalls -only-testing:StoryTimeTests/SmokeTests`, which passed `25` tests.
+- Decisions:
+  - Keep the fix narrow at the API client boundary instead of widening into debug-only logging or UI instrumentation.
+  - Treat a stalled parent-auth token provider as an absent token after a short timeout, allowing the existing backend contract to report `parent_auth_required` or another safe plan-check error.
+  - Keep `M13.3b2b` blocked because this guard only makes the local debug path truthful; it does not replace the still-missing live-capable signed build or Apple/App Store environment.
+- Risks/Notes:
+  - The active physical-device build still reflects Personal Team signing and an empty Apple-sign-in entitlements file, so production `Sign in with Apple` verification remains blocked.
+  - Firebase simulator logs still emit the existing "default Firebase app has not yet been configured" warning in the focused test process; this run did not widen scope into test-harness Firebase initialization because the hanging preflight path is now bounded by regression coverage.
+  - Production `Sign in with Apple`, live App Store purchase, and live App Store restore remain unverified.
+- Next: `M13.3b2b - Live authenticated-commerce execution and report` once a live-capable signed build restores the Apple sign-in entitlement and the Apple/App Store environment is available
+
+### 2026-03-22 - M13.3b2b request-transport timeout unblocker
+- Status: MATERIALLY ADVANCED (`M13.3b2b` remains BLOCKED)
+- Summary: Continued the same blocked live-commerce milestone after the phone could still sit on `Checking Plan...` with no useful error even after the explicit backend-target and parent-auth token timeout fixes. Repo inspection showed the remaining silent-spinner path was the request transport itself: if `URLSession.data(for:)` never yielded a response cleanly, the preflight task could remain in flight indefinitely. `APIClient.perform(...)` now bounds the request wait by the request timeout interval and maps a stalled transport into the existing connection-failure path, so the app can surface a safe plan-check error instead of hanging forever.
+- Files:
+  - `ios/StoryTime/Networking/APIClient.swift`
+  - `ios/StoryTime/Tests/APIClientTests.swift`
+  - `docs/verification/live-authenticated-commerce-verification-prep.md`
+  - `PLANS.md`
+  - `SPRINT.md`
+- Tests:
+  - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' -only-testing:StoryTimeTests/APIClientTests/testPreflightDoesNotHangWhenParentAuthTokenProviderStalls -only-testing:StoryTimeTests/APIClientTests/testPreflightTimesOutWhenTransportStalls -only-testing:StoryTimeTests/SmokeTests`, which passed `26` tests.
+- Decisions:
+  - Keep the fix at the API client transport boundary instead of widening into ad hoc UI timers.
+  - Reuse the existing connection-failure user-facing message for stalled transport so the child-facing and parent-facing copy stays safe and concise.
+  - Keep `M13.3b2b` blocked because this still only hardens local debug truthfulness; it does not replace the live-capable signed build or Apple/App Store execution evidence.
+- Risks/Notes:
+  - The active physical-device build still reflects Personal Team signing and an empty Apple-sign-in entitlements file, so production `Sign in with Apple` verification remains blocked.
+  - Production `Sign in with Apple`, live App Store purchase, and live App Store restore remain unverified.
+- Next: `M13.3b2b - Live authenticated-commerce execution and report` once a live-capable signed build restores the Apple sign-in entitlement and the Apple/App Store environment is available
+
+### 2026-03-22 - M13.3b2b in-app plan-check debug overlay
+- Status: MATERIALLY ADVANCED (`M13.3b2b` remains BLOCKED)
+- Summary: Continued the same blocked live-commerce milestone after the local phone repro still sat on `Checking Plan...` and the current Xcode run was not yielding usable console output. Instead of widening scope into raw logging or backend-body exposure, the story-start surfaces now use the existing `APIClientTraceEvent` seam to show an opt-in `STORYTIME_DEBUG_PLAN_CHECK_OVERLAY=1` toast stack for local device debugging only. The overlay safely reports parent session bootstrap, entitlement-preflight progress, and the sanitized displayed failure category so the next phone repro can show where the plan check stalls without depending on flaky console capture.
+- Files:
+  - `ios/StoryTime/Features/Story/HomeView.swift`
+  - `ios/StoryTime/Features/Story/NewStoryJourneyView.swift`
+  - `ios/StoryTime/Features/Story/StorySeriesDetailView.swift`
+  - `ios/StoryTime/Tests/SmokeTests.swift`
+  - `docs/verification/live-authenticated-commerce-verification-prep.md`
+  - `PLANS.md`
+  - `SPRINT.md`
+- Tests:
+  - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' -only-testing:StoryTimeTests/SmokeTests`, which passed `26` tests.
+- Decisions:
+  - Keep the debugging aid opt-in behind `STORYTIME_DEBUG_PLAN_CHECK_OVERLAY=1` so production and normal parent-managed flows stay unchanged.
+  - Reuse the existing `APIClientTraceEvent` seam and sanitized error mapping instead of inventing a separate raw logging path.
+  - Keep `M13.3b2b` blocked because this only improves local device observability; it does not restore the live-capable signing configuration or provide the required Apple/App Store environment evidence.
+- Risks/Notes:
+  - The overlay reports safe phase summaries only; it does not expose request headers, raw response bodies, or secrets.
+  - The active physical-device build still reflects Personal Team signing and an empty Apple-sign-in entitlements file, so production `Sign in with Apple` verification remains blocked.
+  - Production `Sign in with Apple`, live App Store purchase, and live App Store restore remain unverified.
+- Next: `M13.3b2b - Live authenticated-commerce execution and report` once a live-capable signed build restores the Apple sign-in entitlement and the Apple/App Store environment is available
+
+### 2026-03-22 - M13.3b2b realtime connect-timeout unblocker
+- Status: MATERIALLY ADVANCED (`M13.3b2b` remains BLOCKED)
+- Summary: Continued the same blocked live-commerce milestone after a fresh local phone repro clarified that `Start Voice Session` itself could still hang even after the plan-check path had been bounded. Repo inspection traced the remaining indefinite stall to `RealtimeVoiceClient.connect(...)`: once the bridge reported ready and the `connect` command was sent, the client had no timeout if the bridge never answered with `connected` or `error`. The client now bounds that post-command realtime connect handshake with an explicit timeout and fails through `PracticeSessionViewModel`'s existing safe `callConnect` startup path instead of leaving the boot flow stuck forever.
+- Files:
+  - `ios/StoryTime/Core/RealtimeVoiceClient.swift`
+  - `ios/StoryTime/Features/Story/PracticeSessionViewModel.swift`
+  - `ios/StoryTime/Tests/RealtimeVoiceClientTests.swift`
+  - `ios/StoryTime/Tests/PracticeSessionViewModelTests.swift`
+  - `docs/verification/live-authenticated-commerce-verification-prep.md`
+  - `PLANS.md`
+  - `SPRINT.md`
+- Tests:
+  - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' -only-testing:StoryTimeTests/RealtimeVoiceClientTests -only-testing:StoryTimeTests/PracticeSessionViewModelTests/testStartupCallConnectFailureUsesSafeMessageAndCategory -only-testing:StoryTimeTests/PracticeSessionViewModelTests/testStartupCallConnectTimeoutUsesSafeMessageAndCategory`, which passed `17` tests.
+- Decisions:
+  - Keep the fix at the realtime bridge boundary instead of widening into ad hoc UI timers or transport-side state flags.
+  - Reuse the existing safe `callConnect` startup failure mapping so child-facing copy stays concise and deterministic.
+  - Keep `M13.3b2b` blocked because this still only hardens local-device truthfulness; it does not restore the live-capable signing configuration or provide the required Apple/App Store environment evidence.
+- Risks/Notes:
+  - The active physical-device build still reflects Personal Team signing and an empty Apple-sign-in entitlements file, so production `Sign in with Apple` verification remains blocked.
+  - This fix addresses a concrete `Start Voice Session` indefinite-hang path in local device debug builds, but the full live pass still requires a real Apple-capable signed build and human-operated Apple or App Store environment.
+  - Production `Sign in with Apple`, live App Store purchase, and live App Store restore remain unverified.
+- Next: `M13.3b2b - Live authenticated-commerce execution and report` once a live-capable signed build restores the Apple sign-in entitlement and the Apple/App Store environment is available
+
+### 2026-03-22 - M13.3b2b voice-startup debug overlay
+- Status: MATERIALLY ADVANCED (`M13.3b2b` remains BLOCKED)
+- Summary: Continued the same blocked live-commerce milestone after the local phone repro still reported the same stuck `Start Voice Session` behavior and the available console output was not enough to tell which remaining boot phase the app was actually stuck in. Instead of widening into raw logging or unsafe payload exposure, `VoiceSessionView` now exposes an opt-in `STORYTIME_DEBUG_VOICE_STARTUP_OVERLAY=1` overlay that shows safe boot-phase breadcrumbs from `PracticeSessionViewModel`: current conversation phase, active startup step, status message, last startup failure, and the latest safe session traces.
+- Files:
+  - `ios/StoryTime/Features/Story/PracticeSessionViewModel.swift`
+  - `ios/StoryTime/Features/Voice/VoiceSessionView.swift`
+  - `ios/StoryTime/Tests/SmokeTests.swift`
+  - `docs/verification/live-authenticated-commerce-verification-prep.md`
+  - `PLANS.md`
+  - `SPRINT.md`
+- Tests:
+  - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' -only-testing:StoryTimeTests/SmokeTests`, which passed `28` tests.
+- Decisions:
+  - Keep the debugging aid opt-in behind `STORYTIME_DEBUG_VOICE_STARTUP_OVERLAY=1` so normal child and parent flows stay unchanged.
+  - Reuse existing view-model state and safe session traces instead of inventing a new raw-logging channel.
+  - Keep `M13.3b2b` blocked because this only improves on-device observability; it does not restore the live-capable signing configuration or provide Apple/App Store execution evidence.
+- Risks/Notes:
+  - The overlay reports safe summaries only; it does not expose headers, tokens, raw request bodies, or backend responses.
+  - The active physical-device build still reflects Personal Team signing and an empty Apple-sign-in entitlements file, so production `Sign in with Apple` verification remains blocked.
+  - Production `Sign in with Apple`, live App Store purchase, and live App Store restore remain unverified.
+- Next: `M13.3b2b - Live authenticated-commerce execution and report` once a live-capable signed build restores the Apple sign-in entitlement and the Apple/App Store environment is available
+
+### 2026-03-22 - M13.3b2b hosted backend route mismatch confirmation
+- Status: MATERIALLY ADVANCED (`M13.3b2b` remains BLOCKED)
+- Summary: Continued the same blocked live-commerce milestone after the local phone screenshot finally showed a concrete parent-facing failure instead of another silent spinner: the in-app `Plan Check Debug` overlay reported `Plan service responded (404)` and `Displayed error: server returned 404.` Repo-side verification then confirmed the mismatch directly. The active backend source still defines `POST /v1/entitlements/preflight`, but the current production alias used by the app returns `404 Cannot POST /v1/entitlements/preflight` while still serving `POST /v1/session/identity`. To avoid guessing on-device, the plan-check overlay now also includes backend target candidates plus full route-aware trace messages. A fresh Vercel preview deployment of the current backend source was created, but preview checks currently fail with `FUNCTION_INVOCATION_FAILED`, so the preview is not yet a usable replacement backend for phone testing.
+- Files:
+  - `ios/StoryTime/App/AppConfig.swift`
+  - `ios/StoryTime/Features/Story/HomeView.swift`
+  - `ios/StoryTime/Features/Story/NewStoryJourneyView.swift`
+  - `ios/StoryTime/Features/Story/StorySeriesDetailView.swift`
+  - `ios/StoryTime/Tests/SmokeTests.swift`
+  - `docs/verification/live-authenticated-commerce-verification-prep.md`
+  - `PLANS.md`
+  - `SPRINT.md`
+- Tests:
+  - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' -only-testing:StoryTimeTests/SmokeTests`, which passed `29` tests.
+- Verification:
+  - `curl -i -s https://backend-brown-ten-94.vercel.app/health`, which returned `200`.
+  - `curl -i -s -X POST https://backend-brown-ten-94.vercel.app/v1/session/identity -H 'Content-Type: application/json' -H 'X-StoryTime-Install-ID: debug-install' -d '{}'`, which returned `200`.
+  - `curl -i -s -X POST https://backend-brown-ten-94.vercel.app/v1/entitlements/preflight -H 'Content-Type: application/json' -H 'X-StoryTime-Install-ID: debug-install' -d '{"action":"new_story_start","context":{"child_profile_id":"debug-child","length_minutes":4,"child_profile_count":1}}'`, which returned `404 Cannot POST /v1/entitlements/preflight`.
+  - `vercel deploy /Users/rory/Documents/StoryTime/backend -y`, which created `https://backend-hmrffqq7a-rorys-projects-accf0d71.vercel.app`.
+  - `vercel curl /health --deployment https://backend-hmrffqq7a-rorys-projects-accf0d71.vercel.app` and `vercel curl /v1/entitlements/preflight --deployment https://backend-hmrffqq7a-rorys-projects-accf0d71.vercel.app -- --request POST --header 'Content-Type: application/json' --header 'X-StoryTime-Install-ID: debug-install' --data '{"action":"new_story_start","context":{"child_profile_id":"debug-child","length_minutes":4,"child_profile_count":1}}'`, which both failed with `FUNCTION_INVOCATION_FAILED`.
+- Decisions:
+  - Keep the on-device overlay safe and route-aware instead of exposing raw bodies or secrets.
+  - Treat the remaining blocker as a hosted backend deployment mismatch, not another client-only plan spinner.
+  - Keep `M13.3b2b` blocked because the repo still lacks a working live-capable backend target plus the required Apple/App Store execution evidence.
+- Risks/Notes:
+  - The active production alias used by the app does not currently expose the entitlement-preflight route required by the current client flow.
+  - The preview deployment of the current backend source is not yet usable because it currently fails with `FUNCTION_INVOCATION_FAILED`.
+  - The active physical-device build still reflects Personal Team signing and an empty Apple-sign-in entitlements file, so production `Sign in with Apple` verification remains blocked.
+  - Production `Sign in with Apple`, live App Store purchase, and live App Store restore remain unverified.
+- Next: `M13.3b2b - Live authenticated-commerce execution and report` once a working live-capable backend target and the Apple/App Store environment are available
+
+### 2026-03-23 - M13.3b2b production backend redeploy and env repair
+- Status: MATERIALLY ADVANCED (`M13.3b2b` remains BLOCKED)
+- Summary: The user explicitly requested a Vercel deployment after simulator and physical-device repros both confirmed the same `404` on entitlement preflight. A production redeploy of the active backend source was performed against the linked Vercel project. The first deploy immediately broke the production alias with `FUNCTION_INVOCATION_FAILED`, but Vercel runtime logs made the startup error explicit: `API_AUTH_REQUIRED must be enabled in production.` The production Vercel environment was missing that variable, so `API_AUTH_REQUIRED=true` was added to production and the backend was redeployed. After the repair deploy, the production alias recovered: `/health` returns `200`, `POST /v1/session/identity` returns `200`, and `POST /v1/entitlements/preflight` now returns `401 missing_session_token` for a bare curl request instead of `404`. The old route mismatch is resolved, and the next check is app-level retry on simulator or device against the restored production alias.
+- Files:
+  - `docs/verification/live-authenticated-commerce-verification-prep.md`
+  - `PLANS.md`
+  - `SPRINT.md`
+- Deploy/Verification:
+  - `vercel deploy /Users/rory/Documents/StoryTime/backend --prod -y`
+  - `vercel logs https://backend-brown-ten-94.vercel.app --since 15m --no-follow --level error --expand`
+  - `vercel env ls production`
+  - `printf 'true\n' | vercel env add API_AUTH_REQUIRED production`
+  - `vercel deploy /Users/rory/Documents/StoryTime/backend --prod -y`
+  - `curl -i -s https://backend-brown-ten-94.vercel.app/health`
+  - `curl -i -s -X POST https://backend-brown-ten-94.vercel.app/v1/session/identity -H 'Content-Type: application/json' -H 'X-StoryTime-Install-ID: debug-install' -d '{}'`
+  - `curl -i -s -X POST https://backend-brown-ten-94.vercel.app/v1/entitlements/preflight -H 'Content-Type: application/json' -H 'X-StoryTime-Install-ID: debug-install' -d '{"action":"new_story_start","context":{"child_profile_id":"debug-child","length_minutes":4,"child_profile_count":1}}'`
+- Decisions:
+  - Repair production by fixing the missing env contract instead of rolling back to the older alias state that was missing the entitlement-preflight route.
+  - Treat the production alias as restored only after direct curl verification showed the route behavior had moved from `404` to the expected auth-bound response.
+  - Keep `M13.3b2b` blocked because the live Apple sign-in and App Store verification pass still requires the live-capable signing configuration and Apple/App Store environment access.
+- Risks/Notes:
+  - The production alias is restored, but the app-level simulator/device retry still needs to be performed after the redeploy.
+  - The Vercel preview deployment remains unusable because it still fails with `FUNCTION_INVOCATION_FAILED`.
+  - The active physical-device build still reflects Personal Team signing and an empty Apple-sign-in entitlements file, so production `Sign in with Apple` verification remains blocked.
+  - Production `Sign in with Apple`, live App Store purchase, and live App Store restore remain unverified.
+- Next: `M13.3b2b - Live authenticated-commerce execution and report` once the restored production backend is rechecked in-app and the Apple/App Store environment blocker is cleared

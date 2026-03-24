@@ -698,7 +698,68 @@ Notes:
 - `docs/verification/live-authenticated-commerce-verification-prep.md` now records the refreshed deterministic support pack, the attempted but unstable restore-happy-path rerun, and the exact physical-device checklist for the real live pass.
 - `M13.3` was split because the real Apple-auth and App Store execution cannot be completed honestly from repo automation alone; it requires a human-operated physical device and live environment access.
 
-### M13.3b - Live authenticated-commerce execution and report
+### M13.3b1 - Live-device plan bootstrap and error-visibility unblocker
+
+Status: `DONE`
+
+Goal:
+- Make the local physical-device debugging path truthful enough to expose real authenticated-commerce failures before the live Apple or App Store execution pass.
+
+Concrete tasks:
+- Inspect the current parent-plan bootstrap path and the blocked launch preflight failure presentation on device.
+- Fix any repo-fit issue that leaves Parent Controls stuck on cached `Plan status unavailable` state when no entitlement snapshot exists yet.
+- Replace swallowed preflight failures with safe, parent-appropriate plan-check error messages.
+- Keep the fix scoped to parent-managed plan visibility and blocked launch messaging instead of widening into broader live verification claims.
+
+Required tests or verification method:
+- focused `StoryTimeUITests` for the empty-cache parent-controls bootstrap path
+- focused `StoryTimeTests` coverage for the new safe plan-check message mapping
+- updated note in `docs/verification/live-authenticated-commerce-verification-prep.md`
+
+Dependencies:
+- `M13.3a`
+
+Definition of done:
+- Parent Controls no longer depends on a hidden manual refresh just to leave `Plan status unavailable` when the device starts with no cached entitlement envelope.
+- Blocked new-story and continuation launches now surface safe, non-generic plan-check failures instead of swallowing the underlying contract error entirely.
+- The repo records this as a tightly related unblocker rather than a completed live Apple or App Store pass.
+
+Notes:
+- `ParentTrustCenterView` now auto-bootstraps the current entitlement snapshot when the cache starts empty, and the UI-test seed can now skip the initial entitlement envelope to verify that path deterministically.
+- `NewStoryJourneyView` and `StorySeriesDetailView` now surface sanitized plan-check failures through the shared `PlanStatusPresentation` helper instead of always showing the old generic message.
+- Focused `StoryTimeUITests` plus `SmokeTests` now cover the empty-cache parent-controls bootstrap path and the new safe plan-check message mapping.
+
+### M13.3b2a - Explicit backend-target truthfulness for live-device debug runs
+
+Status: `DONE`
+
+Goal:
+- Make live-device debug runs target the backend a parent explicitly selected, instead of silently falling back to localhost and obscuring plan-check failures.
+
+Concrete tasks:
+- Inspect `AppConfig` candidate URL ordering for debug builds on physical devices.
+- Remove the hidden `127.0.0.1` fallback when `API_BASE_URL` is explicitly set for a run.
+- Keep local fallback behavior intact for simulator debug use, while disabling device-localhost fallback by default unless it is explicitly opted in.
+- Add focused test coverage for the new candidate ordering.
+
+Required tests or verification method:
+- focused `StoryTimeTests/SmokeTests` coverage for `AppConfig.candidateAPIBaseURLs(...)`
+
+Dependencies:
+- `M13.3b1`
+
+Definition of done:
+- An explicit `API_BASE_URL` no longer coexists with a silent localhost fallback candidate.
+- Physical-device debug runs can target the hosted backend truthfully when a parent or developer explicitly chose it.
+- Physical-device debug runs no longer append the localhost fallback by default.
+- Test coverage pins the explicit-override path, simulator fallback path, and explicit device opt-in path.
+
+Notes:
+- Debug simulator runs still allow localhost fallback by default.
+- Physical devices now require `STORYTIME_ALLOW_DEVICE_LOCALHOST_FALLBACK=1` to append the localhost fallback candidate.
+- This is a tightly related unblocker for the live device path, not the live Apple/App Store verification pass itself.
+
+### M13.3b2b - Live authenticated-commerce execution and report
 
 Status: `BLOCKED`
 
@@ -716,7 +777,7 @@ Required tests or verification method:
 - exact recorded command set plus live-environment step list and outcomes
 
 Dependencies:
-- `M13.3a`
+- `M13.3b2a`
 
 Definition of done:
 - The repo has one explicit live authenticated-commerce verification artifact with real execution results.
@@ -724,9 +785,22 @@ Definition of done:
 - Remaining external gaps, if any, are documented concretely.
 
 Notes:
-- This milestone is blocked on access to a human-operated physical iOS device, a live-capable build, and real Apple or App Store environment credentials.
+- This milestone is blocked on access to a live-capable signed build that keeps the real `Sign in with Apple` capability, plus real Apple or App Store environment credentials and the human-operated live pass itself.
 - `docs/verification/live-authenticated-commerce-verification-prep.md` already records the exact prerequisites, manual checklist, and evidence capture expectations for the live pass.
-- Follow-up environment check on 2026-03-21 narrowed the blocker: `xcrun devicectl list devices` now shows one physical iPhone, but `xcrun devicectl list devices --verbose` reports it as `pairingState: unpaired` and `tunnelState: disconnected`, so the live pass still cannot proceed yet.
+- Follow-up device work on 2026-03-22 cleared the pairing issue and enabled local debug builds, but that path required a Personal Team build with `Sign in with Apple` capability removed for local signing, so it still does not satisfy the real live verification requirement.
+- Current repo evidence now makes that blocker concrete: `ios/StoryTime/App/StoryTime.entitlements` is empty in the active working tree, while the project is signed to a Personal Team development team for local debug installation. The live pass cannot proceed until a live-capable signing configuration restores the Apple sign-in entitlement.
+- `M13.3b2a` also removed the hidden localhost fallback when an explicit `API_BASE_URL` override is present and disabled device-localhost fallback by default, so future physical-device debugging now targets the chosen or bundled backend more truthfully.
+- A follow-up physical-device repro on 2026-03-22 showed `Checking Plan...` could still stall before any request was sent if Firebase parent-token lookup never returned. `APIClient` now bounds parent-auth token lookup with a timeout and continues the preflight attempt without that header, so the app can surface a truthful parent-auth or plan-check failure instead of spinning indefinitely.
+- Focused simulator regression coverage now pins both live-device debug safeguards: explicit backend targeting plus the parent-auth token timeout path.
+- A second follow-up repro on 2026-03-22 showed the remaining silent-spinner risk was the transport itself: a request could still sit in flight without yielding a backend response. `APIClient.perform(...)` now bounds the request transport by the request timeout interval and turns that stall into a normal connection failure, so `Checking Plan...` can fall through to a safe error instead of hanging forever.
+- Focused `APIClientTests` now also pin the stalled-transport path for entitlement preflight.
+- A third follow-up repro on 2026-03-22 still lacked usable Xcode console output on the phone, so the story-start surfaces now expose an opt-in `STORYTIME_DEBUG_PLAN_CHECK_OVERLAY=1` overlay for local debugging only. It shows safe session-bootstrap and plan-preflight phase breadcrumbs from `APIClientTraceEvent` plus the sanitized failure category, without exposing raw backend payloads.
+- A fourth follow-up repro on 2026-03-22 exposed a separate `Start Voice Session` hang after the bridge was already ready: `RealtimeVoiceClient.connect(...)` sent the bridge `connect` command and then waited indefinitely if the bridge never answered with `connected` or `error`. The client now bounds that post-command connect handshake with an explicit timeout and routes the failure through the existing safe `callConnect` startup failure path instead of leaving the boot flow stuck forever.
+- Focused `RealtimeVoiceClientTests` and `PracticeSessionViewModelTests` now pin that realtime-connect timeout regression directly.
+- A fifth follow-up repro on 2026-03-22 still failed to yield enough on-device context to distinguish the remaining startup phase on the phone, so `VoiceSessionView` now exposes an opt-in `STORYTIME_DEBUG_VOICE_STARTUP_OVERLAY=1` overlay. It shows safe boot-phase breadcrumbs from `PracticeSessionViewModel`, including the current conversation phase, active startup step, status message, last startup failure, and the latest safe session traces, without exposing request bodies, headers, or secrets.
+- Focused `SmokeTests` now pin the enable flag and safe summary formatting for the voice-startup overlay.
+- A sixth follow-up repro on 2026-03-22 finally proved the local story-start failure is a concrete backend `404`, not another silent spinner: the on-device `Plan Check Debug` overlay reported `Plan service responded (404)` and `Displayed error: server returned 404.` Direct terminal checks confirmed that the current production alias used by the app still serves `POST /v1/session/identity` but returns `404 Cannot POST /v1/entitlements/preflight`, even though the active backend source defines that route. The plan-check overlay now also includes backend target candidates plus route-aware trace messages, and a fresh Vercel preview deployment of the current backend source was created, but that preview currently fails with `FUNCTION_INVOCATION_FAILED`, so the milestone remains blocked on a working live-capable backend target plus the Apple/App Store execution environment.
+- On 2026-03-23, the user explicitly requested a Vercel deploy to fix that backend mismatch. A production deploy of the active backend source was performed, which initially broke the live alias with `FUNCTION_INVOCATION_FAILED`. Vercel runtime logs showed the startup error was a missing required production env: `API_AUTH_REQUIRED must be enabled in production.` After adding `API_AUTH_REQUIRED=true` to the production Vercel environment and redeploying, the live alias recovered: `/health` is back to `200`, `POST /v1/session/identity` is `200`, and `POST /v1/entitlements/preflight` now returns the expected auth-bound `401 missing_session_token` for a bare curl request instead of `404`. The old deployed-route mismatch is now resolved, and the next check is an in-app retry on simulator or device against the restored production alias.
 
 ## Phase 1 - Core Voice Reliability
 

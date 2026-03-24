@@ -1,5 +1,63 @@
 import SwiftUI
 
+struct VoiceStartupDebugOverlay: View {
+    let snapshot: PracticeSessionViewModel.VoiceStartupDebugSnapshot
+
+    static func isEnabled(environment: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
+        environment["STORYTIME_DEBUG_VOICE_STARTUP_OVERLAY"] == "1"
+    }
+
+    static func messages(for snapshot: PracticeSessionViewModel.VoiceStartupDebugSnapshot) -> [String] {
+        var messages = ["Phase: \(snapshot.phase)"]
+
+        if let startupStage = snapshot.startupStage {
+            messages.append("Startup step: \(startupStage)")
+        }
+        if !snapshot.statusMessage.isEmpty {
+            messages.append("Status: \(snapshot.statusMessage)")
+        }
+        if let lastStartupFailure = snapshot.lastStartupFailure {
+            messages.append("Startup failure: \(lastStartupFailure)")
+        }
+        if !snapshot.errorMessage.isEmpty {
+            messages.append("Error: \(snapshot.errorMessage)")
+        }
+
+        messages.append(contentsOf: snapshot.traceEvents.map(traceMessage(for:)))
+        return messages
+    }
+
+    static func traceMessage(for event: PracticeSessionViewModel.SessionTraceEvent) -> String {
+        let operation = event.apiOperation?.rawValue ?? "none"
+        if let statusCode = event.statusCode {
+            return "Trace: \(event.kind.rawValue) \(event.source) (\(operation) \(statusCode))"
+        }
+        return "Trace: \(event.kind.rawValue) \(event.source) (\(operation))"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Voice Startup Debug")
+                .font(.system(size: 12, weight: .black, design: .rounded))
+
+            ForEach(Self.messages(for: snapshot), id: \.self) { message in
+                Text(message)
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: 280, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color.black.opacity(0.78))
+        )
+        .foregroundStyle(.white)
+        .padding(12)
+        .accessibilityIdentifier("voiceStartupDebugOverlay")
+    }
+}
+
 private final class UITestSessionAPIClient: APIClienting {
     var traceHandler: ((APIClientTraceEvent) -> Void)? {
         get { base.traceHandler }
@@ -172,6 +230,11 @@ struct VoiceSessionView: View {
                     .frame(width: 1, height: 1)
                     .opacity(0.01)
                     .allowsHitTesting(false)
+            }
+        }
+        .overlay(alignment: .topTrailing) {
+            if VoiceStartupDebugOverlay.isEnabled() {
+                VoiceStartupDebugOverlay(snapshot: viewModel.voiceStartupDebugSnapshot)
             }
         }
         .safeAreaInset(edge: .bottom) {

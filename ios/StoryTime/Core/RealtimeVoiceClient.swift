@@ -26,6 +26,7 @@ final class RealtimeVoiceClient: NSObject, ObservableObject, RealtimeVoiceContro
         case bridgeReadyTimedOut
         case bridgeReadyFailed(String)
         case disconnectedBeforeReady
+        case connectTimedOut
         case connectFailed(String)
 
         var errorDescription: String? {
@@ -40,6 +41,8 @@ final class RealtimeVoiceClient: NSObject, ObservableObject, RealtimeVoiceContro
                 return message
             case .disconnectedBeforeReady:
                 return "Realtime bridge disconnected before it was ready."
+            case .connectTimedOut:
+                return "Realtime bridge did not finish connecting in time."
             case .connectFailed(let message):
                 return message
             }
@@ -62,8 +65,10 @@ final class RealtimeVoiceClient: NSObject, ObservableObject, RealtimeVoiceContro
     private var bridgeReady = false
     private var bridgeReadyFailure: RealtimeError?
     private var connectionContinuation: CheckedContinuation<Void, Error>?
+    private var connectionTimeoutTask: Task<Void, Never>?
     private var messageProxy: WeakScriptMessageHandler?
     var bridgeReadyTimeoutNanoseconds: UInt64 = 5_000_000_000
+    var connectTimeoutNanoseconds: UInt64 = 12_000_000_000
     var bridgeCommandSender: ((String, [String: Any]) async throws -> Void)?
 
     override init() {
@@ -109,12 +114,12 @@ final class RealtimeVoiceClient: NSObject, ObservableObject, RealtimeVoiceContro
             }
 
             self.connectionContinuation = continuation
+            self.beginConnectTimeout()
             Task {
                 do {
                     try await self.send(command: "connect", payload: payload)
                 } catch {
-                    self.connectionContinuation = nil
-                    continuation.resume(throwing: error)
+                    await self.resolvePendingConnection(with: .failure(error))
                 }
             }
         }
@@ -141,6 +146,8 @@ final class RealtimeVoiceClient: NSObject, ObservableObject, RealtimeVoiceContro
         bridgeReady = false
         bridgeReadyFailure = nil
         connectionContinuation = nil
+        connectionTimeoutTask?.cancel()
+        connectionTimeoutTask = nil
         // The bridge HTML is embedded locally. It only needs a secure origin for
         // getUserMedia/WebRTC; the actual realtime call target comes from payload.callURL.
         webView.loadHTMLString(Self.bridgeHTML, baseURL: Self.embeddedBridgeOriginURL)
@@ -207,14 +214,12 @@ final class RealtimeVoiceClient: NSObject, ObservableObject, RealtimeVoiceContro
             bridgeReadyFailure = nil
 
         case "connected":
-            connectionContinuation?.resume(returning: ())
-            connectionContinuation = nil
+            resolvePendingConnection(with: .success(()))
             onConnected?()
 
         case "disconnected":
             if connectionContinuation != nil {
-                connectionContinuation?.resume(throwing: RealtimeError.invalidBridgeResponse)
-                connectionContinuation = nil
+                resolvePendingConnection(with: .failure(RealtimeError.invalidBridgeResponse))
             } else if !bridgeReady {
                 bridgeReadyFailure = .disconnectedBeforeReady
             }
@@ -245,8 +250,7 @@ final class RealtimeVoiceClient: NSObject, ObservableObject, RealtimeVoiceContro
         case "error":
             let errorMessage = message["message"] as? String ?? "Realtime bridge error"
             if connectionContinuation != nil {
-                connectionContinuation?.resume(throwing: RealtimeError.connectFailed(errorMessage))
-                connectionContinuation = nil
+                resolvePendingConnection(with: .failure(RealtimeError.connectFailed(errorMessage)))
             } else if !bridgeReady {
                 bridgeReadyFailure = .bridgeReadyFailed(errorMessage)
             }
@@ -261,11 +265,37 @@ final class RealtimeVoiceClient: NSObject, ObservableObject, RealtimeVoiceContro
         guard !bridgeReady else { return }
 
         bridgeReadyFailure = failure
-        if let connectionContinuation {
-            self.connectionContinuation = nil
-            connectionContinuation.resume(throwing: failure)
-        }
+        resolvePendingConnection(with: .failure(failure))
         onError?(failure.localizedDescription)
+    }
+
+    private func beginConnectTimeout() {
+        connectionTimeoutTask?.cancel()
+        let timeoutNanoseconds = connectTimeoutNanoseconds
+        connectionTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: timeoutNanoseconds)
+            await self?.failConnectIfStillPending()
+        }
+    }
+
+    private func failConnectIfStillPending() {
+        guard connectionContinuation != nil else { return }
+        resolvePendingConnection(with: .failure(RealtimeError.connectTimedOut))
+    }
+
+    private func resolvePendingConnection(with result: Result<Void, Error>) {
+        connectionTimeoutTask?.cancel()
+        connectionTimeoutTask = nil
+
+        guard let connectionContinuation else { return }
+        self.connectionContinuation = nil
+
+        switch result {
+        case .success:
+            connectionContinuation.resume(returning: ())
+        case .failure(let error):
+            connectionContinuation.resume(throwing: error)
+        }
     }
 }
 

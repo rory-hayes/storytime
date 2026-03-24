@@ -2879,6 +2879,29 @@ final class PracticeSessionViewModelTests: XCTestCase {
         XCTAssertFalse(viewModel.errorMessage.contains("raw token"))
     }
 
+    func testStartupCallConnectTimeoutUsesSafeMessageAndCategory() async throws {
+        let api = MockAPIClient()
+        let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [])
+        voice.connectError = RealtimeVoiceClient.RealtimeError.connectTimedOut
+        let store = StoryLibraryStore()
+        let plan = makePlan(childProfileId: try XCTUnwrap(store.activeProfile?.id))
+        let viewModel = PracticeSessionViewModel(
+            plan: plan,
+            sourceSeries: nil,
+            store: store,
+            api: api,
+            voiceCore: voice,
+            forceMockVoiceCore: false
+        )
+
+        await viewModel.startSession()
+
+        XCTAssertEqual(viewModel.phase, .failed)
+        XCTAssertEqual(viewModel.lastStartupFailure, .callConnect)
+        XCTAssertEqual(viewModel.statusMessage, "Connection failed")
+        XCTAssertEqual(viewModel.errorMessage, "I couldn't connect the live storyteller right now. Please try again.")
+    }
+
     func testStartupDisconnectBeforeReadyFailsOnceAndLateConnectedDoesNotReviveSession() async throws {
         let api = MockAPIClient()
         let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [])
