@@ -759,7 +759,74 @@ Notes:
 - Physical devices now require `STORYTIME_ALLOW_DEVICE_LOCALHOST_FALLBACK=1` to append the localhost fallback candidate.
 - This is a tightly related unblocker for the live device path, not the live Apple/App Store verification pass itself.
 
-### M13.3b2b - Live authenticated-commerce execution and report
+### M13.3b2b1 - Production parent-auth verification fallback and Vercel Firebase project restore
+
+Status: `DONE`
+
+Goal:
+- Restore production entitlement preflight for signed-in parents without waiting on a Firebase service-account key, while keeping parent-auth verification explicit and testable.
+
+Concrete tasks:
+- Inspect the backend parent-auth verifier path that currently returns `parent_auth_unavailable` when a signed-in parent token is present on entitlement routes.
+- Add a backend fallback that verifies Firebase ID tokens against Google's public signing keys when `FIREBASE_PROJECT_ID` is configured but Firebase admin credentials are absent.
+- Add regression coverage for verifier selection between service-account verification, project-ID-only verification, and fully unconfigured auth.
+- Configure the production Vercel backend with `FIREBASE_PROJECT_ID` and redeploy, then retest the live alias.
+
+Required tests or verification method:
+- focused backend auth tests
+- backend build
+- live production curl verification against `backend-brown-ten-94.vercel.app`
+
+Dependencies:
+- `M13.3b2a`
+
+Definition of done:
+- Production entitlement preflight no longer fails with `503 parent_auth_unavailable` simply because the backend lacks Firebase admin credentials.
+- The backend can verify signed-in parent Firebase ID tokens with `FIREBASE_PROJECT_ID` alone.
+- The live production alias is redeployed and direct curl evidence shows the old `503` is replaced by normal auth behavior.
+
+Notes:
+- `backend/src/lib/parentIdentity.ts` now prefers Firebase Admin verification when full admin credentials are present, but falls back to Google JWKS verification when only `FIREBASE_PROJECT_ID` is configured.
+- Focused backend auth tests plus a targeted backend entitlement-route slice now pin the new verifier selection behavior without widening into unrelated runtime changes.
+- Production Vercel now has `FIREBASE_PROJECT_ID=storytime-2fe9b`, and the live alias was redeployed after the backend fallback landed.
+- Direct production checks now show the expected behavior:
+  - install-only entitlement preflight returns `200`
+  - preflight with a fake parent token returns `401 invalid_parent_auth`
+  - the old `503 parent_auth_unavailable` blocker is removed from production
+
+### M13.3b2b2a - Realtime bridge startup ordering and safe failure detail
+
+Status: `DONE`
+
+Goal:
+- Eliminate the last repo-side `Start Voice Session` startup blocker that still fails after `/v1/realtime/session` succeeds but before `/v1/realtime/call` is ever sent.
+
+Concrete tasks:
+- Inspect the `RealtimeVoiceClient` bridge startup order and the `PracticeSessionViewModel` boot failure mapping for the current `startup.callConnect` failure.
+- Remove any bridge startup step that can fail before the realtime call request without being necessary for the SDP exchange itself.
+- Preserve safe, parent-appropriate user messaging while exposing a sanitized bridge-stage detail through the existing voice startup debug overlay.
+- Add focused regression coverage for the bridge/client failure mapping and overlay-safe formatting.
+
+Required tests or verification method:
+- focused `StoryTimeTests/RealtimeVoiceClientTests`
+- focused `StoryTimeTests/PracticeSessionViewModelTests`
+- focused `StoryTimeTests/SmokeTests`
+
+Dependencies:
+- `M13.3b2b1`
+
+Definition of done:
+- The realtime bridge no longer depends on eager WebAudio resume before it can send `/v1/realtime/call`.
+- Boot-time bridge failures keep the existing safe user copy while surfacing a sanitized startup-detail message in the debug overlay.
+- Focused iOS regressions pass.
+
+Notes:
+- The failing simulator and device repro now reaches `/health`, `/v1/voices`, and `/v1/realtime/session` with `200`, then fails during `startup.callConnect` before the backend ever receives `/v1/realtime/call`.
+- `RealtimeVoiceClient` now treats `AudioContext.resume()` as best-effort and delays it until after the realtime session setup is underway, so eager WebAudio startup can no longer kill the connection before the call request is attempted.
+- The embedded bridge now prefixes stage-specific failures such as microphone access, WebRTC offer setup, realtime call request, remote answer setup, and audio playback, while still avoiding raw backend-body exposure.
+- `PracticeSessionViewModel` now keeps the existing safe `callConnect` user message, but the opt-in `STORYTIME_DEBUG_VOICE_STARTUP_OVERLAY=1` surface now includes a sanitized `Bridge detail:` line so the next device or simulator repro can confirm the exact remaining bridge stage if any issue persists.
+
+### M13.3b2b2b - Live authenticated-commerce execution and report
 
 Status: `BLOCKED`
 
@@ -777,7 +844,7 @@ Required tests or verification method:
 - exact recorded command set plus live-environment step list and outcomes
 
 Dependencies:
-- `M13.3b2a`
+- `M13.3b2b2a`
 
 Definition of done:
 - The repo has one explicit live authenticated-commerce verification artifact with real execution results.
@@ -801,6 +868,8 @@ Notes:
 - Focused `SmokeTests` now pin the enable flag and safe summary formatting for the voice-startup overlay.
 - A sixth follow-up repro on 2026-03-22 finally proved the local story-start failure is a concrete backend `404`, not another silent spinner: the on-device `Plan Check Debug` overlay reported `Plan service responded (404)` and `Displayed error: server returned 404.` Direct terminal checks confirmed that the current production alias used by the app still serves `POST /v1/session/identity` but returns `404 Cannot POST /v1/entitlements/preflight`, even though the active backend source defines that route. The plan-check overlay now also includes backend target candidates plus route-aware trace messages, and a fresh Vercel preview deployment of the current backend source was created, but that preview currently fails with `FUNCTION_INVOCATION_FAILED`, so the milestone remains blocked on a working live-capable backend target plus the Apple/App Store execution environment.
 - On 2026-03-23, the user explicitly requested a Vercel deploy to fix that backend mismatch. A production deploy of the active backend source was performed, which initially broke the live alias with `FUNCTION_INVOCATION_FAILED`. Vercel runtime logs showed the startup error was a missing required production env: `API_AUTH_REQUIRED must be enabled in production.` After adding `API_AUTH_REQUIRED=true` to the production Vercel environment and redeploying, the live alias recovered: `/health` is back to `200`, `POST /v1/session/identity` is `200`, and `POST /v1/entitlements/preflight` now returns the expected auth-bound `401 missing_session_token` for a bare curl request instead of `404`. The old deployed-route mismatch is now resolved, and the next check is an in-app retry on simulator or device against the restored production alias.
+- On 2026-03-24, a fresh simulator and device repro made the remaining production blocker explicit: once the app sent a signed-in parent token on entitlement preflight, the backend returned `503 parent_auth_unavailable`. The backend now falls back to Google JWKS verification when only `FIREBASE_PROJECT_ID` is configured, production Vercel now includes `FIREBASE_PROJECT_ID=storytime-2fe9b`, and the live alias has been redeployed. Direct production checks now show `401 invalid_parent_auth` for a fake parent token instead of `503`, so the backend-side parent-auth verifier blocker is closed.
+- The latest simulator and device repro now show a different repo-side issue after plan preflight is healthy: `/health`, `/v1/voices`, and `/v1/realtime/session` return `200`, but the bridge fails during `startup.callConnect` before `/v1/realtime/call` is sent. `M13.3b2b2a` addressed the bridge startup ordering and now preserves a safe bridge-detail line in the debug overlay, so the remaining work should return to the actual live-capable Apple/App Store pass unless a new bridge-specific repro proves otherwise.
 
 ## Phase 1 - Core Voice Reliability
 

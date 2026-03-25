@@ -19,6 +19,9 @@ struct VoiceStartupDebugOverlay: View {
         if let lastStartupFailure = snapshot.lastStartupFailure {
             messages.append("Startup failure: \(lastStartupFailure)")
         }
+        if let startupDetail = snapshot.startupDetail, !startupDetail.isEmpty {
+            messages.append("Bridge detail: \(startupDetail)")
+        }
         if !snapshot.errorMessage.isEmpty {
             messages.append("Error: \(snapshot.errorMessage)")
         }

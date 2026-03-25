@@ -2,7 +2,12 @@ import { describe, expect, it } from "vitest";
 import { extractClientIp, extractInstallId, resolveSessionIdentityWithOptions, SESSION_HEADER } from "../lib/auth.js";
 import { loadEnv } from "../lib/env.js";
 import { AppError } from "../lib/errors.js";
-import { resolveOptionalParentIdentity, type ParentIdentityVerifier, PARENT_AUTH_HEADER } from "../lib/parentIdentity.js";
+import {
+  FirebaseParentIdentityVerifier,
+  resolveOptionalParentIdentity,
+  type ParentIdentityVerifier,
+  PARENT_AUTH_HEADER
+} from "../lib/parentIdentity.js";
 import {
   createEntitlementToken,
   createRealtimeTicket,
@@ -182,6 +187,75 @@ describe("auth and security", () => {
       uid: "parent-user-123",
       provider: "firebase"
     });
+  });
+
+  it("uses project-id verification when Firebase admin credentials are absent", async () => {
+    const verifier = new FirebaseParentIdentityVerifier({
+      verifyWithProjectID: async (token, projectID) => {
+        expect(token).toBe("project-only-token");
+        expect(projectID).toBe("storytime-test");
+        return {
+          uid: "parent-user-project-only",
+          provider: "firebase"
+        };
+      },
+      verifyWithFirebaseAdmin: async () => {
+        throw new Error("firebase-admin verifier should not be used");
+      }
+    });
+
+    const identity = await verifier.verifyParentToken(
+      "project-only-token",
+      makeTestEnv({
+        FIREBASE_PROJECT_ID: "storytime-test",
+        FIREBASE_CLIENT_EMAIL: undefined,
+        FIREBASE_PRIVATE_KEY: undefined
+      })
+    );
+
+    expect(identity).toEqual({
+      uid: "parent-user-project-only",
+      provider: "firebase"
+    });
+  });
+
+  it("uses firebase-admin verification when full Firebase admin credentials are present", async () => {
+    const verifier = new FirebaseParentIdentityVerifier({
+      verifyWithFirebaseAdmin: async (token, env) => {
+        expect(token).toBe("admin-token");
+        expect(env.FIREBASE_PROJECT_ID).toBe("storytime-test");
+        return {
+          uid: "parent-user-admin",
+          provider: "firebase"
+        };
+      },
+      verifyWithProjectID: async () => {
+        throw new Error("project-id verifier should not be used");
+      }
+    });
+
+    const identity = await verifier.verifyParentToken(
+      "admin-token",
+      makeTestEnv({
+        FIREBASE_PROJECT_ID: "storytime-test",
+        FIREBASE_CLIENT_EMAIL: "firebase-adminsdk@test.invalid",
+        FIREBASE_PRIVATE_KEY: "-----BEGIN PRIVATE KEY-----\\npretend\\n-----END PRIVATE KEY-----\\n"
+      })
+    );
+
+    expect(identity).toEqual({
+      uid: "parent-user-admin",
+      provider: "firebase"
+    });
+  });
+
+  it("returns parent auth unavailable only when Firebase verification is entirely unconfigured", async () => {
+    const verifier = new FirebaseParentIdentityVerifier();
+
+    await expect(verifier.verifyParentToken("any-token", makeTestEnv())).rejects.toSatisfy(
+      (error: unknown) =>
+        error instanceof AppError && error.code === "parent_auth_unavailable" && error.status === 503
+    );
   });
 
   it("rejects tampered or expired tokens", () => {

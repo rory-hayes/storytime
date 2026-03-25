@@ -210,16 +210,18 @@ Phase 13 - Authenticated Commerce Hardening
 - Local physical-device debugging now also has an opt-in `STORYTIME_DEBUG_VOICE_STARTUP_OVERLAY=1` surface on `VoiceSessionView`, so the actual voice boot path can show safe phase breadcrumbs on-device even when Xcode console capture is unreliable.
 - The old production route mismatch is now closed: after adding the missing `API_AUTH_REQUIRED=true` production env and redeploying through Vercel, the live alias again serves `/health` and `POST /v1/session/identity`, and `/v1/entitlements/preflight` now responds with the expected auth-bound `401 missing_session_token` instead of `404`.
 - The fresh Vercel preview deployment is still not a usable replacement backend because preview checks currently fail with `FUNCTION_INVOCATION_FAILED`, but production has been restored.
-- Production Firebase parent-token verification now requires backend environment configuration: `FIREBASE_PROJECT_ID` plus either service-account credentials (`FIREBASE_CLIENT_EMAIL`, `FIREBASE_PRIVATE_KEY`) or application default credentials.
+- Production Firebase parent-token verification no longer depends on a Firebase service-account key for the minimal live path: the backend now falls back to Google JWKS verification when `FIREBASE_PROJECT_ID` is configured without admin credentials. Production Vercel now has `FIREBASE_PROJECT_ID=storytime-2fe9b`, and the old `503 parent_auth_unavailable` blocker is closed.
+- The current remaining app-side voice blocker is narrower and explicit: simulator and device repros now reach `/health`, `/v1/voices`, and `/v1/realtime/session` with `200`, then fail during `startup.callConnect` before `/v1/realtime/call` is ever sent.
+- `RealtimeVoiceClient` now treats early WebAudio resume as best-effort instead of a hard prerequisite for the realtime SDP exchange, and the voice startup overlay now includes a sanitized `Bridge detail:` line so local repros can distinguish microphone, audio, WebRTC, and call-request setup failures safely.
 - Intentionally deferred unless reprioritized: full cloud sync, multi-device story portability, broader family account management, web admin tooling, and a broader auth-provider matrix.
 
 ## Next Recommended Milestone
 
-`M13.3b2b - Live authenticated-commerce execution and report` once the live-capable build and Apple/App Store blocker are cleared
+`M13.3b2b2b - Live authenticated-commerce execution and report` once the live-capable build and Apple/App Store blocker are cleared
 
 Reason:
-- `M13.3b2a` is now complete, so the remaining highest-signal gap is still the actual live execution of production Apple auth, App Store purchase, and App Store restore.
-- The repo now has the deterministic support pack, the local-device error-visibility unblocker, a truthful explicit-backend debug target path, a bounded parent-auth token timeout path, and a bounded request-transport timeout path, so the next missing evidence is the real live-capable signed run rather than another repo-only hardening pass.
+- `M13.3b2b2a` is now complete, so the remaining highest-signal gap is the actual live execution of production Apple auth, App Store purchase, and App Store restore.
+- The repo now has the deterministic support pack, the local-device error-visibility unblockers, a restored production backend route set, a production parent-auth verifier that no longer fails with `parent_auth_unavailable`, and a tighter realtime bridge startup path that no longer treats eager WebAudio resume as a hard prerequisite for `/v1/realtime/call`.
 - Family-share and real App Store mismatch behavior remain only partially verified until that live pass is actually recorded.
 
 ## Milestone Status
@@ -242,7 +244,9 @@ Reason:
 | M13.3a Live authenticated-commerce verification prep and support rerun | DONE | The deterministic support pack was rerun, the live-only execution gap was isolated, and `docs/verification/live-authenticated-commerce-verification-prep.md` now records exact prerequisites, commands, and the physical-device checklist for the real pass. |
 | M13.3b1 Live-device plan bootstrap and error-visibility unblocker | DONE | Parent Controls now bootstraps plan state when the entitlement cache starts empty, blocked launch surfaces now surface safe plan-check failures, and focused UI/unit coverage now makes local physical-device debugging truthful enough for the final live pass. |
 | M13.3b2a Explicit backend-target truthfulness for live-device debug runs | DONE | Explicit `API_BASE_URL` runs no longer silently append the debug localhost fallback, and physical-device debug sessions now require explicit opt-in before localhost is appended, while simulator debug keeps the fallback by default. |
-| M13.3b2b Live authenticated-commerce execution and report | BLOCKED | Record the first live-environment verification pass for production Apple sign-in, App Store purchase, and App Store restore after the prep and local-device unblockers are complete. Blocked on restoring a live-capable signed build with the Apple sign-in entitlement plus real Apple/App Store environment access; repo-side debug hardening now also bounds parent-auth token stalls before preflight, stalled request transport, stalled realtime bridge connect handshakes, and exposes safe on-device startup breadcrumbs for the voice boot path. |
+| M13.3b2b1 Production parent-auth verification fallback and Vercel Firebase project restore | DONE | Backend parent-auth verification now falls back to Google JWKS when only `FIREBASE_PROJECT_ID` is configured, production Vercel now includes `FIREBASE_PROJECT_ID=storytime-2fe9b`, and the live alias now returns normal auth results (`401 invalid_parent_auth` for a fake parent token) instead of `503 parent_auth_unavailable`. |
+| M13.3b2b2a Realtime bridge startup ordering and safe failure detail | DONE | `RealtimeVoiceClient` no longer treats eager WebAudio resume as a hard prerequisite for `/v1/realtime/call`, and `VoiceSessionView` debug output now includes a sanitized `Bridge detail:` line so simulator and device repros can distinguish microphone, audio, WebRTC, and call-request setup failures safely. |
+| M13.3b2b2b Live authenticated-commerce execution and report | BLOCKED | Record the first live-environment verification pass for production Apple sign-in, App Store purchase, and App Store restore after the prep and local-device unblockers are complete. Blocked on restoring a live-capable signed build with the Apple sign-in entitlement plus real Apple/App Store environment access; repo-side debug hardening now also bounds parent-auth token stalls before preflight, stalled request transport, stalled realtime bridge connect handshakes, and exposes safe on-device startup breadcrumbs plus bridge-stage detail for the voice boot path. |
 | M12.1 First-run activation onboarding flow | DONE | Fresh installs now stay inside a dedicated seven-step onboarding journey until child setup, parent sign-in, and plan choice are complete; account and plan entry moved into onboarding, Parent Controls were reframed as ongoing management, and targeted smoke plus UI coverage now pins the new gate. |
 | M12.2 Onboarding activation verification and hardening | DONE | `docs/verification/onboarding-activation-verification.md` now records fresh-install gating, plan-entry visibility, purchase or restore or promo completion, relaunch persistence, the onboarding-sheet dismiss hardening, and the explicit decision to keep the current onboarding completion key without a version bump. |
 | M1.1 Realtime startup flow audit | DONE | Startup chain documented in `docs/realtime-startup-audit.md`; failing backend realtime error branch identified. |
@@ -2412,3 +2416,59 @@ Reason:
   - The active physical-device build still reflects Personal Team signing and an empty Apple-sign-in entitlements file, so production `Sign in with Apple` verification remains blocked.
   - Production `Sign in with Apple`, live App Store purchase, and live App Store restore remain unverified.
 - Next: `M13.3b2b - Live authenticated-commerce execution and report` once the restored production backend is rechecked in-app and the Apple/App Store environment blocker is cleared
+
+### 2026-03-24 - M13.3b2b split into backend parent-auth unblocker and final live pass
+- Status: DONE (`M13.3b2b1`) and BLOCKED (`M13.3b2b2`)
+- Summary: The next device and simulator repro finally surfaced the remaining backend-side blocker clearly: after the production route mismatch was fixed, `POST /v1/entitlements/preflight` now reached the live backend, but signed-in parent requests failed with `503 parent_auth_unavailable`. Repo inspection showed production Vercel still lacked Firebase parent-identity env, and the backend verifier only supported Firebase Admin credentials or application default credentials. To keep the parent-auth boundary explicit without waiting on a service-account key, the backend now falls back to Google JWKS-based Firebase ID token verification whenever `FIREBASE_PROJECT_ID` is configured but admin credentials are absent. Production Vercel now has `FIREBASE_PROJECT_ID=storytime-2fe9b`, the active backend source has been redeployed, and the live alias now returns normal auth behavior instead of `parent_auth_unavailable`.
+- Files:
+  - `backend/package.json`
+  - `backend/package-lock.json`
+  - `backend/src/lib/parentIdentity.ts`
+  - `backend/src/tests/auth-security.test.ts`
+  - `docs/verification/live-authenticated-commerce-verification-prep.md`
+  - `PLANS.md`
+  - `SPRINT.md`
+- Tests:
+  - `cd /Users/rory/Documents/StoryTime/backend && npm test -- --run src/tests/auth-security.test.ts`
+  - `cd /Users/rory/Documents/StoryTime/backend && npm test -- --run src/tests/auth-security.test.ts src/tests/app.integration.test.ts -t "rejects invalid parent auth tokens on account-owned entitlement routes|rejects purchase sync without an authenticated parent account|returns an allowed entitlement preflight decision for starter launch intent"`
+  - `cd /Users/rory/Documents/StoryTime/backend && npm run build`
+- Deploy/Verification:
+  - `cd /Users/rory/Documents/StoryTime/backend && printf 'storytime-2fe9b\n' | vercel env add FIREBASE_PROJECT_ID production`
+  - `cd /Users/rory/Documents/StoryTime/backend && vercel deploy /Users/rory/Documents/StoryTime/backend --prod -y`
+  - `curl -s https://backend-brown-ten-94.vercel.app/health | jq '{ok,auth_required,default_region,allowed_regions}'`
+  - `curl -s -i -X POST https://backend-brown-ten-94.vercel.app/v1/entitlements/preflight ... -H 'X-StoryTime-Parent-Auth: fake-parent-token' ...`, which now returns `401 invalid_parent_auth`
+  - `curl -s -i -X POST https://backend-brown-ten-94.vercel.app/v1/entitlements/preflight ...` without a parent-auth header, which now returns `200` for a valid install-scoped Starter preflight
+- Decisions:
+  - Split the still-blocked live verification milestone into a backend auth unblocker plus the final live pass so the repo can mark the backend-side production fix honestly without pretending the Apple/App Store execution evidence exists.
+  - Keep Firebase Admin verification as the preferred path when full admin credentials are available, but allow project-ID-only production verification through Google's public JWKS so Vercel can validate signed-in parent Firebase ID tokens without a service-account key.
+  - Keep `M13.3b2b2` blocked because the remaining gap is now the real live-capable signing configuration and the human-operated Apple/App Store verification pass, not backend auth availability.
+- Risks/Notes:
+  - The active physical-device build still reflects Personal Team signing and an empty Apple-sign-in entitlements file, so the true production `Sign in with Apple` portion of the live pass remains blocked.
+  - Live App Store purchase and restore remain unverified.
+  - The fresh preview deployment remains unnecessary for the current unblock because production is now serving the required auth and entitlement routes again.
+- Next: `M13.3b2b2 - Live authenticated-commerce execution and report` once a live-capable signed build restores the Apple sign-in entitlement and the Apple/App Store environment is available
+
+### 2026-03-24 - M13.3b2b2 split into realtime bridge unblocker and final live pass
+- Status: DONE (`M13.3b2b2a`) and BLOCKED (`M13.3b2b2b`)
+- Summary: Fresh simulator and device repros after the production parent-auth fix proved the app was no longer blocked on entitlement preflight. The current path now reaches `/health`, `/v1/voices`, and `/v1/realtime/session` with `200`, then fails during `startup.callConnect` before the backend ever receives `/v1/realtime/call`. Repo inspection showed the embedded `RealtimeVoiceClient` bridge still created and resumed `AudioContext` eagerly before the realtime call request, which is a plausible WebKit startup failure point that does not need to block the SDP exchange. The bridge now treats WebAudio resume as best-effort, adds stage-specific failure labels around microphone, offer, request, answer, and playback setup, and `PracticeSessionViewModel` now preserves a sanitized bridge-detail string for the opt-in voice debug overlay while keeping the main user-facing error safe and concise.
+- Files:
+  - `ios/StoryTime/Core/RealtimeVoiceClient.swift`
+  - `ios/StoryTime/Features/Story/PracticeSessionViewModel.swift`
+  - `ios/StoryTime/Features/Voice/VoiceSessionView.swift`
+  - `ios/StoryTime/Tests/PracticeSessionViewModelTests.swift`
+  - `ios/StoryTime/Tests/SmokeTests.swift`
+  - `docs/verification/live-authenticated-commerce-verification-prep.md`
+  - `PLANS.md`
+  - `SPRINT.md`
+- Tests:
+  - `xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' -only-testing:StoryTimeTests/RealtimeVoiceClientTests -only-testing:StoryTimeTests/PracticeSessionViewModelTests/testStartupCallConnectFailureUsesSafeMessageAndCategory -only-testing:StoryTimeTests/PracticeSessionViewModelTests/testStartupCallConnectTimeoutUsesSafeMessageAndCategory -only-testing:StoryTimeTests/PracticeSessionViewModelTests/testStartupBridgeErrorEventFailsOnceAndDoesNotReviveSession -only-testing:StoryTimeTests/SmokeTests`
+  - Result: succeeded (`47` tests, `0` failures) in `Test-StoryTime-2026.03.24_20-05-56-+0000.xcresult`
+- Decisions:
+  - Split `M13.3b2b2` because the remaining issue was still one repo-side realtime startup blocker, not only external Apple/App Store execution.
+  - Keep the main user-facing `callConnect` error unchanged and safe, but expose a sanitized `Bridge detail:` line through the debug overlay so local repros can differentiate microphone, audio, WebRTC, and call-request failures without leaking raw payloads or secrets.
+  - Make `AudioContext.resume()` best-effort and move it later in the bridge path so WebAudio startup can no longer fail the session before `/v1/realtime/call` is attempted.
+- Risks/Notes:
+  - The final live milestone remains blocked on a live-capable signed build that restores the Apple sign-in entitlement plus real Apple/App Store environment access.
+  - This unblocker makes the realtime startup path more robust and more diagnosable, but it does not itself provide the required production Apple-auth, purchase, or restore evidence.
+  - The next simulator or device repro should now either reach `/v1/realtime/call` or show a more specific sanitized bridge-stage failure in the voice overlay.
+- Next: `M13.3b2b2b - Live authenticated-commerce execution and report` once the live-capable signing configuration and Apple/App Store environment are available

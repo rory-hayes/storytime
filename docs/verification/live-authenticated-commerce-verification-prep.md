@@ -345,6 +345,40 @@ Observed result:
     - `401 missing_session_token` for a bare `POST /v1/entitlements/preflight`
   - The original `404 Cannot POST /v1/entitlements/preflight` mismatch is now resolved on production.
 
+## 2026-03-24 Production Parent-Auth Verifier Fallback And Firebase Project Restore
+
+- Trigger: After the route mismatch was repaired, new simulator and device repros showed entitlement preflight now reached the live backend but failed with `503 parent_auth_unavailable` whenever a signed-in parent Firebase token was attached. Production Vercel still had no Firebase auth env, and the backend verifier only supported Firebase Admin credentials or application default credentials.
+- Commands:
+  - `cd /Users/rory/Documents/StoryTime/backend && npm test -- --run src/tests/auth-security.test.ts`
+  - `cd /Users/rory/Documents/StoryTime/backend && npm test -- --run src/tests/auth-security.test.ts src/tests/app.integration.test.ts -t "rejects invalid parent auth tokens on account-owned entitlement routes|rejects purchase sync without an authenticated parent account|returns an allowed entitlement preflight decision for starter launch intent"`
+  - `cd /Users/rory/Documents/StoryTime/backend && npm run build`
+  - `cd /Users/rory/Documents/StoryTime/backend && vercel env ls production`
+  - `cd /Users/rory/Documents/StoryTime/backend && printf 'storytime-2fe9b\n' | vercel env add FIREBASE_PROJECT_ID production`
+  - `cd /Users/rory/Documents/StoryTime/backend && vercel deploy /Users/rory/Documents/StoryTime/backend --prod -y`
+  - `curl -s https://backend-brown-ten-94.vercel.app/health | jq '{ok,auth_required,default_region,allowed_regions}'`
+  - `curl -s -i -X POST https://backend-brown-ten-94.vercel.app/v1/entitlements/preflight ... -H 'X-StoryTime-Parent-Auth: fake-parent-token' ...`
+  - `curl -s -i -X POST https://backend-brown-ten-94.vercel.app/v1/entitlements/preflight ...` without a parent-auth header
+- Files inspected:
+  - `backend/src/lib/parentIdentity.ts`
+  - `backend/src/lib/env.ts`
+  - `backend/src/app.ts`
+  - `backend/src/tests/auth-security.test.ts`
+  - `backend/src/tests/app.integration.test.ts`
+  - `ios/StoryTime/App/GoogleService-Info.plist`
+- Files changed:
+  - `backend/package.json`
+  - `backend/package-lock.json`
+  - `backend/src/lib/parentIdentity.ts`
+  - `backend/src/tests/auth-security.test.ts`
+- Result:
+  - The backend now prefers Firebase Admin verification when full admin credentials are present, but falls back to Google JWKS-based Firebase ID token verification when only `FIREBASE_PROJECT_ID` is configured.
+  - Production Vercel now includes `FIREBASE_PROJECT_ID=storytime-2fe9b`.
+  - The live production alias was redeployed successfully after the fallback landed.
+  - Direct production verification now shows:
+    - install-only entitlement preflight returns `200`
+    - preflight with a fake parent token returns `401 invalid_parent_auth`
+    - the old `503 parent_auth_unavailable` blocker is gone from production
+
 ### VERIFIED BY TEST
 
 - Backend entitlement, restore-claim, and promo routes still pass the focused support suite after the durability and mismatch milestones.
@@ -366,6 +400,7 @@ Observed result:
 - The API client now also bounds the request transport itself, so a stalled entitlement-preflight request becomes a normal connection failure instead of leaving the UI spinner stuck indefinitely.
 - Local physical-device debugging can now show safe in-app phase breadcrumbs for parent session bootstrap and entitlement preflight even when Xcode console capture is unreliable.
 - Local physical-device debugging can now also show the backend target candidate list plus full route-aware phase messages, which is what made the hosted `404` mismatch explicit.
+- Local simulator and device debugging can now also show a sanitized realtime `Bridge detail:` line, and the embedded bridge no longer makes eager WebAudio resume a hard prerequisite before `/v1/realtime/call` is attempted.
 
 ### PARTIALLY VERIFIED
 
@@ -373,6 +408,7 @@ Observed result:
 - First-run onboarding plus live Apple or App Store behavior is still only partially covered here because this prep milestone reran the simpler Parent Controls path as the support baseline.
 - The current production backend alias now has direct evidence for a route mismatch: `/v1/session/identity` is live, while `/v1/entitlements/preflight` still returns `404` on the deployed alias used by the app.
 - The production backend alias has now been restored and the old `404` route mismatch is closed. The alias now exposes `/v1/entitlements/preflight` and correctly enforces session-token requirements with `401 missing_session_token` when the caller omits the session token.
+- The production backend parent-auth verifier is now restored too: signed-in parent entitlement requests no longer fail with `503 parent_auth_unavailable`, but the final live Apple-auth evidence is still pending because the current local build does not restore the real `Sign in with Apple` entitlement.
 - The local physical-device run is now good enough to expose repo-fit entitlement and preflight issues, but it still does not count as the live Apple-auth or App Store verification pass because the Personal Team build removed `Sign in with Apple` capability for local signing.
 - The physical device itself is no longer the blocker; the remaining repo-visible blocker is that the current working tree and signed build are still configured for the Personal Team debug path with the Apple sign-in entitlement removed.
 - The new in-app plan-check overlay only applies when `STORYTIME_DEBUG_PLAN_CHECK_OVERLAY=1` is set for a local debug run. It is a local troubleshooting aid, not live-verification evidence.
@@ -424,6 +460,32 @@ Observed result:
   - optional mismatch attempt
 - Any discrepancy between live behavior and current deterministic repo behavior.
 
+## 2026-03-24 Realtime Bridge Startup Ordering Unblocker
+
+- Trigger:
+  - Fresh simulator and device repros after the production parent-auth fix now reach `/health`, `/v1/voices`, and `/v1/realtime/session` with `200`, then fail during `startup.callConnect` before the backend ever receives `/v1/realtime/call`.
+  - The voice startup overlay showed the failure source as `startup.callConnect (realtimeSession 200)` while Vercel logs showed no matching `/v1/realtime/call` request.
+- Files inspected:
+  - `ios/StoryTime/Core/RealtimeVoiceClient.swift`
+  - `ios/StoryTime/Features/Story/PracticeSessionViewModel.swift`
+  - `ios/StoryTime/Features/Voice/VoiceSessionView.swift`
+  - `ios/StoryTime/Tests/RealtimeVoiceClientTests.swift`
+  - `ios/StoryTime/Tests/PracticeSessionViewModelTests.swift`
+  - `ios/StoryTime/Tests/SmokeTests.swift`
+- Repo change made:
+  - The embedded realtime bridge no longer treats eager `AudioContext.resume()` as a hard prerequisite before the SDP call request. WebAudio resume is now best-effort and happens later in the bridge path, so early WebAudio startup can no longer fail the session before `/v1/realtime/call` is attempted.
+  - The bridge now prefixes stage-specific failures such as microphone access, local offer setup, realtime call request, remote answer setup, and audio playback.
+  - `PracticeSessionViewModel` now preserves a sanitized `Bridge detail:` string for the opt-in `STORYTIME_DEBUG_VOICE_STARTUP_OVERLAY=1` surface while keeping the main user-facing startup error unchanged and safe.
+- Command run:
+
+```bash
+xcodebuild test -project /Users/rory/Documents/StoryTime/ios/StoryTime/StoryTime.xcodeproj -scheme StoryTime -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.2' -only-testing:StoryTimeTests/RealtimeVoiceClientTests -only-testing:StoryTimeTests/PracticeSessionViewModelTests/testStartupCallConnectFailureUsesSafeMessageAndCategory -only-testing:StoryTimeTests/PracticeSessionViewModelTests/testStartupCallConnectTimeoutUsesSafeMessageAndCategory -only-testing:StoryTimeTests/PracticeSessionViewModelTests/testStartupBridgeErrorEventFailsOnceAndDoesNotReviveSession -only-testing:StoryTimeTests/SmokeTests
+```
+
+- Observed result:
+  - The focused iOS regression slice succeeded in `Test-StoryTime-2026.03.24_20-05-56-+0000.xcresult`.
+  - `47` tests ran with `0` failures.
+
 ## Conclusion
 
-`M13.3a` is complete in repo terms. The deterministic support pack is refreshed, the live-only execution gap is explicit, and `M13.3b` can now focus on the actual physical-device verification pass instead of spending another run rediscovering prerequisites or command coverage.
+`M13.3a` and the later repo-side unblockers are complete in repo terms. The deterministic support pack is refreshed, the backend auth and route blockers are closed, and the realtime bridge startup path is now tighter plus more diagnosable. The remaining gap is the actual live-capable Apple or App Store verification pass rather than another implicit repo-side startup mystery.

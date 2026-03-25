@@ -406,6 +406,46 @@ private extension RealtimeVoiceClient {
             pendingUtteranceIds: [],
             responseUtteranceMap: new Map(),
 
+            describeError(error, fallbackMessage) {
+              if (error && typeof error.message === "string" && error.message.trim()) {
+                return error.message.trim();
+              }
+              if (typeof error === "string" && error.trim()) {
+                return error.trim();
+              }
+              return fallbackMessage;
+            },
+
+            stageError(stage, error, fallbackMessage) {
+              return new Error(`${stage}: ${this.describeError(error, fallbackMessage)}`);
+            },
+
+            ensureAudioContext() {
+              const AudioCtx = window.AudioContext || window.webkitAudioContext;
+              if (!AudioCtx) {
+                throw new Error("Web audio is unavailable.");
+              }
+
+              if (!this.audioContext) {
+                this.audioContext = new AudioCtx();
+              }
+
+              return this.audioContext;
+            },
+
+            async resumeAudioContextIfPossible() {
+              const audioContext = this.ensureAudioContext();
+              if (audioContext.state !== "suspended") {
+                return;
+              }
+
+              try {
+                await audioContext.resume();
+              } catch (error) {
+                console.warn("Audio context resume failed", error);
+              }
+            },
+
             async receiveCommand(command, payload) {
               switch (command) {
                 case "connect":
@@ -439,13 +479,9 @@ private extension RealtimeVoiceClient {
                     noiseSuppression: true,
                     autoGainControl: true
                   }
+                }).catch((error) => {
+                  throw this.stageError("Microphone access failed", error, "Unable to start microphone capture.");
                 });
-
-                const AudioCtx = window.AudioContext || window.webkitAudioContext;
-                this.audioContext = this.audioContext || new AudioCtx();
-                if (this.audioContext.state === "suspended") {
-                  await this.audioContext.resume();
-                }
 
                 this.localAnalyser = this.createAnalyser(stream);
 
@@ -457,9 +493,13 @@ private extension RealtimeVoiceClient {
                   this.audio.srcObject = remoteStream;
                   this.remoteAnalyser = this.createAnalyser(remoteStream);
                   try {
+                    await this.resumeAudioContextIfPossible();
                     await this.audio.play();
                   } catch (error) {
-                    post({ type: "error", message: `Audio playback failed: ${error.message}` });
+                    post({
+                      type: "error",
+                      message: this.stageError("Audio playback failed", error, "Unable to play remote audio.").message
+                    });
                   }
                 };
 
@@ -485,8 +525,12 @@ private extension RealtimeVoiceClient {
                   post({ type: "error", message: "Realtime data channel error." });
                 };
 
-                const offer = await this.pc.createOffer({ offerToReceiveAudio: true });
-                await this.pc.setLocalDescription(offer);
+                const offer = await this.pc.createOffer({ offerToReceiveAudio: true }).catch((error) => {
+                  throw this.stageError("Local realtime offer failed", error, "Unable to prepare the live call.");
+                });
+                await this.pc.setLocalDescription(offer).catch((error) => {
+                  throw this.stageError("Local realtime offer failed", error, "Unable to prepare the live call.");
+                });
 
                 const response = await fetch(payload.callURL, {
                   method: "POST",
@@ -499,21 +543,26 @@ private extension RealtimeVoiceClient {
                     ticket: payload.ticket,
                     sdp: offer.sdp
                   })
+                }).catch((error) => {
+                  throw this.stageError("Realtime call request failed", error, "Unable to reach the live call service.");
                 });
 
                 if (!response.ok) {
-                  throw new Error(await response.text());
+                  throw new Error(`Realtime call request failed: HTTP ${response.status}`);
                 }
 
                 const call = await response.json();
                 await this.pc.setRemoteDescription({
                   type: "answer",
                   sdp: call.answer_sdp
+                }).catch((error) => {
+                  throw this.stageError("Remote realtime answer failed", error, "Unable to finish the live call setup.");
                 });
 
+                await this.resumeAudioContextIfPossible();
                 this.startLevelLoop();
               } catch (error) {
-                post({ type: "error", message: error.message || "Realtime connection failed." });
+                post({ type: "error", message: this.describeError(error, "Realtime connection failed.") });
               }
             },
 
@@ -616,8 +665,9 @@ private extension RealtimeVoiceClient {
             },
 
             createAnalyser(stream) {
-              const source = this.audioContext.createMediaStreamSource(stream);
-              const analyser = this.audioContext.createAnalyser();
+              const audioContext = this.ensureAudioContext();
+              const source = audioContext.createMediaStreamSource(stream);
+              const analyser = audioContext.createAnalyser();
               analyser.fftSize = 256;
               source.connect(analyser);
               return analyser;

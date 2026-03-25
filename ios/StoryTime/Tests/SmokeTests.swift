@@ -269,6 +269,7 @@ final class SmokeTests: XCTestCase {
             errorMessage: "",
             startupStage: "voice-connect",
             lastStartupFailure: "callConnect",
+            startupDetail: "Microphone setup failed before the live connection started.",
             traceEvents: [
                 PracticeSessionViewModel.SessionTraceEvent(
                     kind: .startup,
@@ -289,6 +290,7 @@ final class SmokeTests: XCTestCase {
                 "Startup step: voice-connect",
                 "Status: Connecting live voice",
                 "Startup failure: callConnect",
+                "Bridge detail: Microphone setup failed before the live connection started.",
                 "Trace: startup connected (realtimeSession 200)"
             ]
         )

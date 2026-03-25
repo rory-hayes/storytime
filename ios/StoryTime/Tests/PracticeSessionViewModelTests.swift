@@ -2876,6 +2876,7 @@ final class PracticeSessionViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.lastStartupFailure, .callConnect)
         XCTAssertEqual(viewModel.statusMessage, "Connection failed")
         XCTAssertEqual(viewModel.errorMessage, "I couldn't connect the live storyteller right now. Please try again.")
+        XCTAssertEqual(viewModel.voiceStartupDebugSnapshot.startupDetail, "The live storyteller bridge failed before the session connected.")
         XCTAssertFalse(viewModel.errorMessage.contains("raw token"))
     }
 
@@ -2936,7 +2937,7 @@ final class PracticeSessionViewModelTests: XCTestCase {
         let voice = MockRealtimeVoiceCore(autoCompleteSpeakIndices: [])
         voice.emitsConnectedOnConnect = false
         voice.onConnectAction = { mock in
-            mock.emitError("Socket failed: raw body")
+            mock.emitError("Microphone access failed: NotAllowedError")
         }
         let store = StoryLibraryStore()
         let plan = makePlan(childProfileId: try XCTUnwrap(store.activeProfile?.id))
@@ -2957,7 +2958,11 @@ final class PracticeSessionViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.lastStartupFailure, .callConnect)
         XCTAssertEqual(viewModel.statusMessage, "Connection failed")
         XCTAssertEqual(viewModel.errorMessage, "I couldn't connect the live storyteller right now. Please try again.")
-        XCTAssertFalse(viewModel.errorMessage.contains("raw body"))
+        XCTAssertEqual(
+            viewModel.voiceStartupDebugSnapshot.startupDetail,
+            "Microphone setup failed before the live connection started."
+        )
+        XCTAssertFalse(viewModel.errorMessage.contains("NotAllowedError"))
     }
 
     func testMockVoiceCoreJourneyCanProgressWithoutManualTextEntry() async throws {

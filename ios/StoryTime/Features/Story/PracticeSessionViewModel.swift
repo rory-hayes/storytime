@@ -389,6 +389,7 @@ final class PracticeSessionViewModel: ObservableObject {
         let errorMessage: String
         let startupStage: String?
         let lastStartupFailure: String?
+        let startupDetail: String?
         let traceEvents: [SessionTraceEvent]
     }
 
@@ -443,6 +444,7 @@ final class PracticeSessionViewModel: ObservableObject {
 
     internal private(set) var invalidTransitionMessages: [String] = []
     internal private(set) var lastStartupFailure: StartupFailure?
+    internal private(set) var startupDebugDetail: String?
     internal private(set) var traceEvents: [SessionTraceEvent] = []
     internal private(set) var runtimeTelemetryEvents: [RuntimeTelemetryEvent] = []
 
@@ -523,6 +525,7 @@ final class PracticeSessionViewModel: ObservableObject {
             errorMessage: errorMessage,
             startupStage: startupStageDebugLabel,
             lastStartupFailure: lastStartupFailure?.rawValue,
+            startupDetail: startupDebugDetail,
             traceEvents: Array(traceEvents.suffix(3))
         )
     }
@@ -1217,7 +1220,16 @@ final class PracticeSessionViewModel: ObservableObject {
         guard !sessionState.isTerminal else { return }
 
         if case .booting = sessionState {
-            failStartupAttemptIfNeeded(.callConnect, reason: "voice startup error")
+            failStartupAttemptIfNeeded(
+                .callConnect,
+                appError: StoryTimeAppError(
+                    category: .startup,
+                    statusMessage: StartupFailure.callConnect.statusMessage,
+                    userMessage: StartupFailure.callConnect.userMessage
+                ),
+                reason: "voice startup error",
+                startupDetail: safeRealtimeStartupDetail(message)
+            )
             return
         }
 
@@ -1291,7 +1303,16 @@ final class PracticeSessionViewModel: ObservableObject {
         voiceCore.onError = { [weak self] message in
             guard let self else { return }
             if case .booting = self.sessionState {
-                self.failStartupAttemptIfNeeded(.callConnect, reason: "voice startup error")
+                self.failStartupAttemptIfNeeded(
+                    .callConnect,
+                    appError: StoryTimeAppError(
+                        category: .startup,
+                        statusMessage: StartupFailure.callConnect.statusMessage,
+                        userMessage: StartupFailure.callConnect.userMessage
+                    ),
+                    reason: "voice startup error",
+                    startupDetail: self.safeRealtimeStartupDetail(message)
+                )
                 return
             }
             Task { @MainActor in
@@ -2029,13 +2050,19 @@ final class PracticeSessionViewModel: ObservableObject {
 
         let failure = mapStartupFailure(for: error, stage: startupAttempt.stage)
         let appError = startupAppError(for: error, fallback: failure)
-        failStartupAttemptIfNeeded(failure, appError: appError, reason: "startup \(failure.rawValue)")
+        failStartupAttemptIfNeeded(
+            failure,
+            appError: appError,
+            reason: "startup \(failure.rawValue)",
+            startupDetail: startupDebugDetail(for: error)
+        )
     }
 
     private func failStartupAttemptIfNeeded(
         _ failure: StartupFailure,
         appError: StoryTimeAppError? = nil,
-        reason: String
+        reason: String,
+        startupDetail: String? = nil
     ) {
         guard activeStartupAttempt != nil else { return }
         guard case .booting = sessionState else { return }
@@ -2047,6 +2074,7 @@ final class PracticeSessionViewModel: ObservableObject {
             userMessage: failure.userMessage
         )
         lastStartupFailure = failure
+        startupDebugDetail = startupDetail
         lastAppError = resolvedAppError
         failSession(
             message: resolvedAppError.userMessage,
@@ -2111,8 +2139,67 @@ final class PracticeSessionViewModel: ObservableObject {
         )
     }
 
+    private func startupDebugDetail(for error: Error) -> String? {
+        if let realtimeError = error as? RealtimeVoiceClient.RealtimeError {
+            switch realtimeError {
+            case .bridgeReadyFailed(let message), .connectFailed(let message):
+                return safeRealtimeStartupDetail(message)
+            case .bridgeReadyTimedOut:
+                return "The live storyteller bridge did not become ready in time."
+            case .disconnectedBeforeReady:
+                return "The live storyteller bridge disconnected before it was ready."
+            case .connectTimedOut:
+                return "The live storyteller bridge did not finish connecting in time."
+            case .invalidBridgeResponse:
+                return "The live storyteller bridge returned an unexpected startup response."
+            case .notReady:
+                return "The live storyteller bridge was not ready when connection started."
+            }
+        }
+
+        return nil
+    }
+
+    private func safeRealtimeStartupDetail(_ message: String) -> String {
+        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalized = trimmed.lowercased()
+
+        if normalized.contains("microphone")
+            || normalized.contains("media")
+            || normalized.contains("getusermedia")
+            || normalized.contains("notallowederror")
+            || normalized.contains("permission") {
+            return "Microphone setup failed before the live connection started."
+        }
+
+        if normalized.contains("audio playback")
+            || normalized.contains("audio context")
+            || normalized.contains("audiocontext")
+            || normalized.contains("web audio") {
+            return "Audio setup failed before the live connection started."
+        }
+
+        if normalized.contains("offer")
+            || normalized.contains("peer")
+            || normalized.contains("rtc")
+            || normalized.contains("local realtime")
+            || normalized.contains("remote realtime answer") {
+            return "WebRTC setup failed before the live connection finished."
+        }
+
+        if normalized.contains("realtime call request")
+            || normalized.contains("network")
+            || normalized.contains("fetch")
+            || normalized.contains("http ") {
+            return "The live call request failed before the storyteller connected."
+        }
+
+        return "The live storyteller bridge failed before the session connected."
+    }
+
     private func clearAppError() {
         lastAppError = nil
+        startupDebugDetail = nil
     }
 
     private func noteModerationBlock(userMessage: String, statusMessage: String) {
@@ -2389,6 +2476,7 @@ final class PracticeSessionViewModel: ObservableObject {
         latestAPITraceByOperation.removeAll()
         activeStartupAttempt = nil
         lastStartupFailure = nil
+        startupDebugDetail = nil
         lastAppError = nil
         activeDiscoveryRequestID = nil
         activeGenerationRequestID = nil
